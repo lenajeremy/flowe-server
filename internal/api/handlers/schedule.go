@@ -151,6 +151,7 @@ func (h *WorkflowHandler) runWorkflowByID(workflowID string) {
 		"status": finalStatus,
 		"events": models.JSONB(eventsJSON),
 	})
+	hub.Global.ClearBuffer(runID)
 }
 
 // GET /api/workflows/:id/schedule

@@ -7,12 +7,18 @@ import (
 )
 
 // RunHub is a simple in-memory pub/sub for workflow run events.
+// It also buffers past events so late subscribers (e.g. approval page opened
+// after node_waiting was already emitted) receive the full history.
 type RunHub struct {
-	mu   sync.Mutex
-	subs map[string][]chan executor.ExecutionEvent
+	mu      sync.Mutex
+	subs    map[string][]chan executor.ExecutionEvent
+	buffers map[string][]executor.ExecutionEvent // events emitted so far per run
 }
 
-var Global = &RunHub{subs: make(map[string][]chan executor.ExecutionEvent)}
+var Global = &RunHub{
+	subs:    make(map[string][]chan executor.ExecutionEvent),
+	buffers: make(map[string][]executor.ExecutionEvent),
+}
 
 // WorkflowHub notifies frontend subscribers the instant a run starts for a workflow.
 // It sends the run ID as a string so the frontend can immediately attach to the run stream.
@@ -58,10 +64,16 @@ func (h *WorkflowHub) Publish(workflowID string, runID string) {
 	}
 }
 
-// Subscribe returns a buffered channel that will receive events published for runID.
+// Subscribe returns a buffered channel pre-loaded with any events already emitted
+// for this run, followed by live events as they arrive.
 func (h *RunHub) Subscribe(runID string) chan executor.ExecutionEvent {
-	ch := make(chan executor.ExecutionEvent, 256)
 	h.mu.Lock()
+	past := make([]executor.ExecutionEvent, len(h.buffers[runID]))
+	copy(past, h.buffers[runID])
+	ch := make(chan executor.ExecutionEvent, 256+len(past))
+	for _, ev := range past {
+		ch <- ev
+	}
 	h.subs[runID] = append(h.subs[runID], ch)
 	h.mu.Unlock()
 	return ch
@@ -84,14 +96,24 @@ func (h *RunHub) Unsubscribe(runID string, ch chan executor.ExecutionEvent) {
 	}
 }
 
-// Publish sends an event to all subscribers for runID (non-blocking; slow consumers are dropped).
+// Publish sends an event to all subscribers for runID and appends it to the buffer
+// so late joiners receive the full history.
 func (h *RunHub) Publish(runID string, event executor.ExecutionEvent) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	h.buffers[runID] = append(h.buffers[runID], event)
 	for _, ch := range h.subs[runID] {
 		select {
 		case ch <- event:
 		default:
 		}
 	}
+}
+
+// ClearBuffer drops the in-memory event buffer for a run once it has been
+// persisted to the database. Call this after writing events to DB.
+func (h *RunHub) ClearBuffer(runID string) {
+	h.mu.Lock()
+	delete(h.buffers, runID)
+	h.mu.Unlock()
 }

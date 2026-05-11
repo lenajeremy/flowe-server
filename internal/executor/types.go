@@ -45,6 +45,7 @@ type FlowNodeData struct {
 	// humanApproval
 	ApprovalMessage string `json:"approvalMessage"`
 	ApprovalTimeout int    `json:"approvalTimeout"` // seconds, 0 = no timeout
+	ApprovalEmail   string `json:"approvalEmail"`   // optional email to notify
 
 	// scheduledTrigger
 	Interval string `json:"interval"` // "5m","15m","30m","1h","6h","12h","24h"

@@ -360,6 +360,26 @@ func executeNode(ctx context.Context, node WorkflowASTNode, outputs map[string]s
 				break
 			}
 		}
+		// Use LLM to evaluate the condition when an API key is available.
+		// This lets users write plain-language conditions like "Does the text mention an error?"
+		if keys.Anthropic != "" || keys.OpenAI != "" {
+			system := `You are a boolean condition evaluator. The user will give you a condition and some text. Reply with exactly one word: true or false. No punctuation, no explanation.`
+			prompt := fmt.Sprintf("Condition: %s\n\nText to evaluate:\n%s", cond, up)
+			var result string
+			var err error
+			if keys.Anthropic != "" {
+				result, err = callAnthropic(ctx, "claude-haiku-4-5-20251001", system, prompt, 0, 5, keys.Anthropic)
+			} else {
+				result, err = callOpenAI(ctx, "gpt-4o-mini", system, prompt, 0, 5, keys.OpenAI)
+			}
+			if err == nil {
+				result = strings.TrimSpace(strings.ToLower(result))
+				if result == "true" || result == "false" {
+					return result, nil
+				}
+			}
+		}
+		// Fallback: regex-based evaluation (no API key, or LLM returned unexpected output)
 		return evaluateBranchCondition(cond, up), nil
 	case NodeTypeLoop:
 		// Collect upstream output and return it — RunWorkflow handles actual iteration
@@ -451,6 +471,38 @@ func executeNode(ctx context.Context, node WorkflowASTNode, outputs map[string]s
 			Message: message,
 			RunID:   runID,
 		})
+
+		// Send notification email if configured
+		if d.ApprovalEmail != "" {
+			appURL := os.Getenv("APP_URL")
+			if appURL == "" {
+				appURL = "http://localhost:4905"
+			}
+			runURL := fmt.Sprintf("%s/run/%s", appURL, runID)
+
+			// Find the upstream node output (the content to review)
+			var upstreamOutput string
+			for _, e := range edges {
+				if e.Target == node.ID {
+					if v, ok := outputs[e.Source]; ok {
+						upstreamOutput = v
+					}
+					break
+				}
+			}
+
+			resendKey := os.Getenv("RESEND_API_KEY")
+			if resendKey != "" {
+				emailBody := fmt.Sprintf("%s\n\n---\n\nContent to review:\n\n%s\n\n---\n\nApprove or reject here:\n%s", message, upstreamOutput, runURL)
+				client := resend.NewClient(resendKey)
+				_, _ = client.Emails.Send(&resend.SendEmailRequest{
+					From:    "workflow-ai <noreply@usecelery.io>",
+					To:      []string{d.ApprovalEmail},
+					Subject: "Action Required: " + node.Data.Label,
+					Text:    emailBody,
+				})
+			}
+		}
 		timeout := d.ApprovalTimeout
 		if timeout <= 0 {
 			timeout = 86400 * 7 // 7-day default for "no timeout"
@@ -500,21 +552,46 @@ func reachableFrom(startID string, edges []WorkflowASTEdge) map[string]bool {
 	return visited
 }
 
+// stripCodeFences removes markdown code fences (```json … ``` or ``` … ```) from s.
+func stripCodeFences(s string) string {
+	s = strings.TrimSpace(s)
+	if !strings.HasPrefix(s, "```") {
+		return s
+	}
+	// Drop the opening fence line (e.g. "```json")
+	if nl := strings.Index(s, "\n"); nl != -1 {
+		s = s[nl+1:]
+	} else {
+		return s // malformed — nothing after the fence
+	}
+	// Drop the closing fence
+	if strings.HasSuffix(strings.TrimSpace(s), "```") {
+		s = s[:strings.LastIndex(s, "```")]
+	}
+	return strings.TrimSpace(s)
+}
+
 // extractLoopItems parses input JSON and extracts the array at the given dot-path field.
 // If field is empty, input itself must be an array. Falls back to line-splitting for plain text.
 func extractLoopItems(input, field string) []string {
 	if input == "" {
 		return nil
 	}
+	// LLMs sometimes wrap JSON in markdown code fences even when instructed not to.
+	// Strip them before attempting to parse.
+	clean := stripCodeFences(input)
 	var data interface{}
-	if err := json.Unmarshal([]byte(input), &data); err != nil {
-		var lines []string
-		for _, l := range strings.Split(strings.TrimSpace(input), "\n") {
-			if l = strings.TrimSpace(l); l != "" {
-				lines = append(lines, l)
+	if err := json.Unmarshal([]byte(clean), &data); err != nil {
+		// If stripping didn't help, try the original
+		if err2 := json.Unmarshal([]byte(input), &data); err2 != nil {
+			var lines []string
+			for _, l := range strings.Split(strings.TrimSpace(input), "\n") {
+				if l = strings.TrimSpace(l); l != "" {
+					lines = append(lines, l)
+				}
 			}
+			return lines
 		}
-		return lines
 	}
 	if field != "" {
 		current := data
@@ -631,7 +708,16 @@ func RunWorkflow(ctx context.Context, workflow WorkflowAST, keys APIKeys, runID 
 					bodyNodes = append(bodyNodes, n)
 				}
 			}
-			bodyOrder := topoSort(bodyNodes, edges)
+			// Only include edges where both endpoints are body nodes so that
+			// the loop node → first-body-node edge doesn't inflate inDegree
+			// and cause body nodes to never reach inDeg==0 in topoSort.
+			var bodyEdges []WorkflowASTEdge
+			for _, e := range edges {
+				if bodySet[e.Source] && bodySet[e.Target] {
+					bodyEdges = append(bodyEdges, e)
+				}
+			}
+			bodyOrder := topoSort(bodyNodes, bodyEdges)
 
 			// Execute loop body for each item
 			var iterResults []string

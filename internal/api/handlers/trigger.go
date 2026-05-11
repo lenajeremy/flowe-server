@@ -12,6 +12,7 @@ import (
 
 	"workflow-ai/server/internal/database/models"
 	"workflow-ai/server/internal/executor"
+	"workflow-ai/server/internal/hub"
 
 	"github.com/gin-gonic/gin"
 )
@@ -93,6 +94,7 @@ func (h *WorkflowHandler) TriggerWorkflow(c *gin.Context) {
 			executor.RunWorkflow(context.Background(), ast, keys, runID, func(event executor.ExecutionEvent) {
 				event.Timestamp = time.Since(startTime).Milliseconds()
 				events = append(events, event)
+				hub.Global.Publish(runID, event)
 				if event.Type == executor.EventWorkflowError {
 					execErr = fmt.Errorf("%s", event.Message)
 				}
@@ -114,6 +116,7 @@ func (h *WorkflowHandler) TriggerWorkflow(c *gin.Context) {
 			"error_msg": errMsg,
 			"events":    models.JSONB(eventsJSON),
 		})
+		hub.Global.ClearBuffer(runID)
 	}()
 
 	c.JSON(http.StatusAccepted, gin.H{

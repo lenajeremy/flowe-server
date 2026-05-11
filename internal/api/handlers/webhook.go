@@ -135,6 +135,7 @@ func (h *WorkflowHandler) ReceiveWebhook(c *gin.Context) {
 			"status": finalStatus,
 			"events": models.JSONB(eventsJSON),
 		})
+		hub.Global.ClearBuffer(runID)
 	}()
 
 	c.JSON(http.StatusAccepted, gin.H{"run_id": runID, "status": "running"})

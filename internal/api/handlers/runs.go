@@ -122,10 +122,29 @@ func (h *WorkflowHandler) StreamRun(c *gin.Context) {
 		return
 	}
 
-	// Run is still in progress — subscribe to live events
+	// Run is still in progress — subscribe to live events (buffer replays past events).
 	slog.Info("stream: subscribing to live run", "run_id", runID)
 	ch := hub.Global.Subscribe(runID)
 	defer hub.Global.Unsubscribe(runID, ch)
+
+	// Guard against the race where the run completed (and ClearBuffer was called)
+	// between our initial status check and the Subscribe call above.
+	// If the channel is empty and the run is no longer running, replay from DB.
+	if len(ch) == 0 {
+		if err := h.db.DB.First(&run, "id = ?", runID).Error; err == nil &&
+			run.Status != models.RunStatusRunning {
+			slog.Info("stream: run finished before subscribe — replaying from DB", "run_id", runID, "status", run.Status)
+			var events []executor.ExecutionEvent
+			if err2 := json.Unmarshal(run.Events, &events); err2 == nil {
+				for _, ev := range events {
+					data, _ := json.Marshal(ev)
+					fmt.Fprintf(c.Writer, "data: %s\n\n", data)
+				}
+			}
+			flusher.Flush()
+			return
+		}
+	}
 
 	ctx := c.Request.Context()
 	for {
