@@ -39,6 +39,13 @@ type ApiKey struct {
 	LastUsedAt  *time.Time `json:"last_used_at"`
 }
 
+// WorkflowChat stores the AI builder conversation for a workflow.
+type WorkflowChat struct {
+	BaseModel
+	WorkflowID string `json:"workflow_id" gorm:"not null;uniqueIndex"`
+	Messages   JSONB  `json:"messages"    gorm:"type:jsonb;not null;default:'[]'"`
+}
+
 // WorkflowVersion stores snapshots of workflow node/edge definitions.
 type WorkflowVersion struct {
 	BaseModel

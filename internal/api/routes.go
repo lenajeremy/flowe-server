@@ -62,6 +62,13 @@ func InitServer(port int, db *database.DBClient, rdb *redis.Client) {
 		api.POST("/workflows/:id/schedule", wh.SetSchedule)
 		api.DELETE("/workflows/:id/schedule", wh.DeleteSchedule)
 
+		// AI workflow generation
+		api.POST("/ai/generate-workflow", wh.AIGenerate)
+
+		// AI chat history per workflow
+		api.GET("/workflows/:id/chat", wh.GetWorkflowChat)
+		api.PUT("/workflows/:id/chat", wh.SaveWorkflowChat)
+
 		// Workflow versions
 		api.GET("/workflows/:id/versions", wh.ListVersions)
 		api.POST("/workflows/:id/versions", wh.SaveVersion)
