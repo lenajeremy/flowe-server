@@ -10,6 +10,7 @@ services:
     environment:
       - POSTGRES_HOST=postgres
       - REDIS_HOST=redis
+      - N8N_URL=http://n8n:5678
     volumes:
       - .:/app
       - go_cache:/root/.cache/go-build
@@ -17,6 +18,8 @@ services:
       postgres:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      n8n:
         condition: service_healthy
 
   postgres:
@@ -47,7 +50,27 @@ services:
       timeout: 5s
       retries: 5
 
+  n8n:
+    image: n8nio/n8n:latest
+    ports:
+      - "5678:5678"
+    environment:
+      - N8N_USER_MANAGEMENT_DISABLED=true
+      - N8N_BASIC_AUTH_ACTIVE=false
+      - N8N_DIAGNOSTICS_ENABLED=false
+      - WEBHOOK_URL=http://n8n:5678
+      - N8N_PUBLIC_API_DISABLED=false
+    volumes:
+      - n8n_data:/home/node/.n8n
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:5678/healthz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
 volumes:
   postgres_data:
   redis_data:
   go_cache:
+  n8n_data:

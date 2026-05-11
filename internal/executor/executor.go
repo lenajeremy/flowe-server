@@ -17,7 +17,11 @@ import (
 	"time"
 
 	"github.com/resend/resend-go/v2"
+	"workflow-ai/server/internal/n8n"
 )
+
+// N8NClient is set by main.go after the n8n service becomes available.
+var N8NClient *n8n.Client
 
 // ── Approval channels ──────────────────────────────────────────
 
@@ -68,6 +72,12 @@ func ntPtr(t NodeType) *NodeType { return &t }
 
 // ── Anthropic ─────────────────────────────────────────────────
 
+// imageRef holds a parsed base64 data URL for vision API calls.
+type imageRef struct {
+	MediaType string // e.g. "image/jpeg"
+	Data      string // raw base64, no prefix
+}
+
 type anthropicRequest struct {
 	Model       string             `json:"model"`
 	MaxTokens   int                `json:"max_tokens"`
@@ -76,8 +86,18 @@ type anthropicRequest struct {
 	Messages    []anthropicMessage `json:"messages"`
 }
 type anthropicMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role    string      `json:"role"`
+	Content interface{} `json:"content"` // string or []anthropicBlock
+}
+type anthropicBlock struct {
+	Type   string                `json:"type"`
+	Text   string                `json:"text,omitempty"`
+	Source *anthropicImageSource `json:"source,omitempty"`
+}
+type anthropicImageSource struct {
+	Type      string `json:"type"`       // "base64"
+	MediaType string `json:"media_type"` // "image/jpeg"
+	Data      string `json:"data"`
 }
 type anthropicResponse struct {
 	Content []struct {
@@ -86,11 +106,30 @@ type anthropicResponse struct {
 	} `json:"content"`
 }
 
-func callAnthropic(ctx context.Context, model, system, user string, temp float64, maxTok int, key string) (string, error) {
+func callAnthropic(ctx context.Context, model, system, user string, temp float64, maxTok int, key string, imgs []imageRef) (string, error) {
+	var msgContent interface{}
+	if len(imgs) > 0 {
+		blocks := make([]anthropicBlock, 0, len(imgs)+1)
+		for _, img := range imgs {
+			blocks = append(blocks, anthropicBlock{
+				Type: "image",
+				Source: &anthropicImageSource{
+					Type:      "base64",
+					MediaType: img.MediaType,
+					Data:      img.Data,
+				},
+			})
+		}
+		blocks = append(blocks, anthropicBlock{Type: "text", Text: user})
+		msgContent = blocks
+	} else {
+		msgContent = user
+	}
+
 	body, _ := json.Marshal(anthropicRequest{
 		Model: model, MaxTokens: maxTok, Temperature: temp,
 		System:   system,
-		Messages: []anthropicMessage{{Role: "user", Content: user}},
+		Messages: []anthropicMessage{{Role: "user", Content: msgContent}},
 	})
 	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://api.anthropic.com/v1/messages", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
@@ -125,8 +164,16 @@ type openAIRequest struct {
 	Messages    []openAIMessage `json:"messages"`
 }
 type openAIMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role    string      `json:"role"`
+	Content interface{} `json:"content"` // string or []openAIBlock
+}
+type openAIBlock struct {
+	Type     string          `json:"type"`
+	Text     string          `json:"text,omitempty"`
+	ImageURL *openAIImageURL `json:"image_url,omitempty"`
+}
+type openAIImageURL struct {
+	URL string `json:"url"`
 }
 type openAIResponse struct {
 	Choices []struct {
@@ -134,10 +181,28 @@ type openAIResponse struct {
 	} `json:"choices"`
 }
 
-func callOpenAI(ctx context.Context, model, system, user string, temp float64, maxTok int, key string) (string, error) {
+func callOpenAI(ctx context.Context, model, system, user string, temp float64, maxTok int, key string, imgs []imageRef) (string, error) {
+	var userContent interface{}
+	if len(imgs) > 0 {
+		blocks := make([]openAIBlock, 0, len(imgs)+1)
+		for _, img := range imgs {
+			blocks = append(blocks, openAIBlock{
+				Type:     "image_url",
+				ImageURL: &openAIImageURL{URL: "data:" + img.MediaType + ";base64," + img.Data},
+			})
+		}
+		blocks = append(blocks, openAIBlock{Type: "text", Text: user})
+		userContent = blocks
+	} else {
+		userContent = user
+	}
+
 	body, _ := json.Marshal(openAIRequest{
 		Model: model, Temperature: temp, MaxTokens: maxTok,
-		Messages: []openAIMessage{{Role: "system", Content: system}, {Role: "user", Content: user}},
+		Messages: []openAIMessage{
+			{Role: "system", Content: system},
+			{Role: "user", Content: userContent},
+		},
 	})
 	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://api.openai.com/v1/chat/completions", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
@@ -327,7 +392,35 @@ func executeNode(ctx context.Context, node WorkflowASTNode, outputs map[string]s
 	case NodeTypeLLM:
 		model := derefStr(d.Model, "gpt-4o")
 		sys := substituteTemplates(derefStr(d.SystemPrompt, ""), outputs)
-		usr := substituteTemplates(derefStr(d.UserPrompt, ""), outputs)
+		userPromptTpl := derefStr(d.UserPrompt, "")
+
+		// Extract image data URLs from any {{nodeId.output}} references so they
+		// can be sent as vision content blocks instead of raw base64 text.
+		promptOutputs := make(map[string]string, len(outputs))
+		for k, v := range outputs {
+			promptOutputs[k] = v
+		}
+		var imgs []imageRef
+		for _, m := range templateRe.FindAllStringSubmatch(userPromptTpl, -1) {
+			if len(m) < 2 {
+				continue
+			}
+			nodeID := m[1]
+			v, ok := promptOutputs[nodeID]
+			if !ok || !strings.HasPrefix(v, "data:image/") {
+				continue
+			}
+			// parse "data:image/jpeg;base64,<data>"
+			rest := strings.TrimPrefix(v, "data:")
+			parts := strings.SplitN(rest, ";base64,", 2)
+			if len(parts) != 2 {
+				continue
+			}
+			imgs = append(imgs, imageRef{MediaType: parts[0], Data: parts[1]})
+			promptOutputs[nodeID] = "[attached image]"
+		}
+		usr := substituteTemplates(userPromptTpl, promptOutputs)
+
 		temp := 0.7
 		if d.Temperature != nil {
 			temp = *d.Temperature
@@ -343,12 +436,12 @@ func executeNode(ctx context.Context, node WorkflowASTNode, outputs map[string]s
 			if keys.Anthropic == "" {
 				return "", fmt.Errorf("Anthropic API key not set")
 			}
-			return callAnthropic(ctx, model, sys, usr, temp, maxTok, keys.Anthropic)
+			return callAnthropic(ctx, model, sys, usr, temp, maxTok, keys.Anthropic, imgs)
 		}
 		if keys.OpenAI == "" {
 			return "", fmt.Errorf("OpenAI API key not set")
 		}
-		return callOpenAI(ctx, model, sys, usr, temp, maxTok, keys.OpenAI)
+		return callOpenAI(ctx, model, sys, usr, temp, maxTok, keys.OpenAI, imgs)
 	case NodeTypeBranch:
 		cond := derefStr(d.Condition, "false")
 		var up string
@@ -368,9 +461,9 @@ func executeNode(ctx context.Context, node WorkflowASTNode, outputs map[string]s
 			var result string
 			var err error
 			if keys.Anthropic != "" {
-				result, err = callAnthropic(ctx, "claude-haiku-4-5-20251001", system, prompt, 0, 5, keys.Anthropic)
+				result, err = callAnthropic(ctx, "claude-haiku-4-5-20251001", system, prompt, 0, 5, keys.Anthropic, nil)
 			} else {
-				result, err = callOpenAI(ctx, "gpt-4o-mini", system, prompt, 0, 5, keys.OpenAI)
+				result, err = callOpenAI(ctx, "gpt-4o-mini", system, prompt, 0, 5, keys.OpenAI, nil)
 			}
 			if err == nil {
 				result = strings.TrimSpace(strings.ToLower(result))
@@ -529,6 +622,67 @@ func executeNode(ctx context.Context, node WorkflowASTNode, outputs map[string]s
 
 	case NodeTypeScheduledTrigger:
 		return `{"trigger":"scheduled","time":"` + time.Now().Format(time.RFC3339) + `"}`, nil
+
+	case NodeTypeNotion:
+		if N8NClient == nil {
+			return "", fmt.Errorf("n8n integration not configured")
+		}
+		token := substituteTemplates(d.IntegrationToken, outputs)
+		if token == "" {
+			return "", fmt.Errorf("Notion integration token not set")
+		}
+		op := d.IntegrationOp
+		var webhookPath string
+		payload := map[string]any{"token": token}
+		switch op {
+		case "create_page":
+			webhookPath = "notion-create-page"
+			payload["databaseId"] = substituteTemplates(d.NotionDatabaseId, outputs)
+			payload["title"] = substituteTemplates(d.NotionTitle, outputs)
+			payload["content"] = substituteTemplates(d.NotionContent, outputs)
+		case "query_database":
+			webhookPath = "notion-query-database"
+			payload["databaseId"] = substituteTemplates(d.NotionDatabaseId, outputs)
+			payload["filter"] = substituteTemplates(d.NotionFilter, outputs)
+		case "append_blocks":
+			webhookPath = "notion-append-blocks"
+			payload["pageId"] = substituteTemplates(d.NotionPageId, outputs)
+			payload["content"] = substituteTemplates(d.NotionContent, outputs)
+		default:
+			return "", fmt.Errorf("unknown Notion operation: %s", op)
+		}
+		return N8NClient.CallWebhook(ctx, webhookPath, payload)
+
+	case NodeTypeLinear:
+		if N8NClient == nil {
+			return "", fmt.Errorf("n8n integration not configured")
+		}
+		token := substituteTemplates(d.IntegrationToken, outputs)
+		if token == "" {
+			return "", fmt.Errorf("Linear API key not set")
+		}
+		op := d.IntegrationOp
+		var webhookPath string
+		payload := map[string]any{"token": token}
+		switch op {
+		case "create_issue":
+			webhookPath = "linear-create-issue"
+			payload["teamId"] = substituteTemplates(d.LinearTeamId, outputs)
+			payload["title"] = substituteTemplates(d.LinearTitle, outputs)
+			payload["description"] = substituteTemplates(d.LinearDescription, outputs)
+			payload["priority"] = d.LinearPriority
+		case "get_issues":
+			webhookPath = "linear-get-issues"
+			payload["teamId"] = substituteTemplates(d.LinearTeamId, outputs)
+			payload["limit"] = d.LinearLimit
+		case "create_comment":
+			webhookPath = "linear-create-comment"
+			payload["issueId"] = substituteTemplates(d.LinearIssueId, outputs)
+			payload["body"] = substituteTemplates(d.LinearCommentBody, outputs)
+		default:
+			return "", fmt.Errorf("unknown Linear operation: %s", op)
+		}
+		return N8NClient.CallWebhook(ctx, webhookPath, payload)
 	}
 	return "", fmt.Errorf("unknown node type: %s", d.NodeType)
 }

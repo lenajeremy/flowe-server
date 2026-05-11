@@ -15,6 +15,8 @@ const (
 	NodeTypeHumanApproval    NodeType = "humanApproval"
 	NodeTypeWebhookTrigger   NodeType = "webhookTrigger"
 	NodeTypeScheduledTrigger NodeType = "scheduledTrigger"
+	NodeTypeNotion           NodeType = "notion"
+	NodeTypeLinear           NodeType = "linear"
 )
 
 type FlowNodeData struct {
@@ -52,6 +54,26 @@ type FlowNodeData struct {
 
 	// LLM structured output
 	OutputSchema string `json:"outputSchema"` // JSON schema string
+
+	// notion / linear shared
+	IntegrationToken string `json:"integrationToken,omitempty"`
+	IntegrationOp    string `json:"integrationOp,omitempty"`
+
+	// notion
+	NotionDatabaseId string `json:"notionDatabaseId,omitempty"`
+	NotionPageId     string `json:"notionPageId,omitempty"`
+	NotionTitle      string `json:"notionTitle,omitempty"`
+	NotionContent    string `json:"notionContent,omitempty"`
+	NotionFilter     string `json:"notionFilter,omitempty"`
+
+	// linear
+	LinearTeamId      string `json:"linearTeamId,omitempty"`
+	LinearIssueId     string `json:"linearIssueId,omitempty"`
+	LinearTitle       string `json:"linearTitle,omitempty"`
+	LinearDescription string `json:"linearDescription,omitempty"`
+	LinearPriority    int    `json:"linearPriority,omitempty"`
+	LinearCommentBody string `json:"linearCommentBody,omitempty"`
+	LinearLimit       int    `json:"linearLimit,omitempty"`
 }
 
 type Position struct {
