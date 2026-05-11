@@ -1,0 +1,726 @@
+package executor
+
+import (
+	"bytes"
+	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"regexp"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/resend/resend-go/v2"
+)
+
+// ── Approval channels ──────────────────────────────────────────
+
+var (
+	approvalChannels   = make(map[string]chan bool)
+	approvalChannelsMu sync.Mutex
+)
+
+func RegisterApprovalChannel(runID string) chan bool {
+	ch := make(chan bool, 1)
+	approvalChannelsMu.Lock()
+	approvalChannels[runID] = ch
+	approvalChannelsMu.Unlock()
+	return ch
+}
+
+func ResolveApproval(runID string, approved bool) bool {
+	approvalChannelsMu.Lock()
+	ch, ok := approvalChannels[runID]
+	approvalChannelsMu.Unlock()
+	if !ok {
+		return false
+	}
+	ch <- approved
+	approvalChannelsMu.Lock()
+	delete(approvalChannels, runID)
+	approvalChannelsMu.Unlock()
+	return true
+}
+
+// ── UUID ──────────────────────────────────────────────────────
+
+func newUUID() string {
+	b := make([]byte, 16)
+	_, _ = rand.Read(b)
+	b[6] = (b[6] & 0x0f) | 0x40
+	b[8] = (b[8] & 0x3f) | 0x80
+	return fmt.Sprintf("%s-%s-%s-%s-%s",
+		hex.EncodeToString(b[0:4]),
+		hex.EncodeToString(b[4:6]),
+		hex.EncodeToString(b[6:8]),
+		hex.EncodeToString(b[8:10]),
+		hex.EncodeToString(b[10:16]))
+}
+
+func strPtr(s string) *string    { return &s }
+func ntPtr(t NodeType) *NodeType { return &t }
+
+// ── Anthropic ─────────────────────────────────────────────────
+
+type anthropicRequest struct {
+	Model       string             `json:"model"`
+	MaxTokens   int                `json:"max_tokens"`
+	Temperature float64            `json:"temperature"`
+	System      string             `json:"system"`
+	Messages    []anthropicMessage `json:"messages"`
+}
+type anthropicMessage struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+type anthropicResponse struct {
+	Content []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	} `json:"content"`
+}
+
+func callAnthropic(ctx context.Context, model, system, user string, temp float64, maxTok int, key string) (string, error) {
+	body, _ := json.Marshal(anthropicRequest{
+		Model: model, MaxTokens: maxTok, Temperature: temp,
+		System:   system,
+		Messages: []anthropicMessage{{Role: "user", Content: user}},
+	})
+	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://api.anthropic.com/v1/messages", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-api-key", key)
+	req.Header.Set("anthropic-version", "2023-06-01")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("anthropic %d: %s", resp.StatusCode, raw)
+	}
+	var r anthropicResponse
+	_ = json.Unmarshal(raw, &r)
+	for _, b := range r.Content {
+		if b.Type == "text" {
+			return b.Text, nil
+		}
+	}
+	return "", nil
+}
+
+// ── OpenAI ────────────────────────────────────────────────────
+
+type openAIRequest struct {
+	Model       string          `json:"model"`
+	Temperature float64         `json:"temperature"`
+	MaxTokens   int             `json:"max_tokens"`
+	Messages    []openAIMessage `json:"messages"`
+}
+type openAIMessage struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+type openAIResponse struct {
+	Choices []struct {
+		Message struct{ Content string `json:"content"` } `json:"message"`
+	} `json:"choices"`
+}
+
+func callOpenAI(ctx context.Context, model, system, user string, temp float64, maxTok int, key string) (string, error) {
+	body, _ := json.Marshal(openAIRequest{
+		Model: model, Temperature: temp, MaxTokens: maxTok,
+		Messages: []openAIMessage{{Role: "system", Content: system}, {Role: "user", Content: user}},
+	})
+	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://api.openai.com/v1/chat/completions", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+key)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("openai %d: %s", resp.StatusCode, raw)
+	}
+	var r openAIResponse
+	_ = json.Unmarshal(raw, &r)
+	if len(r.Choices) > 0 {
+		return r.Choices[0].Message.Content, nil
+	}
+	return "", nil
+}
+
+// ── Template substitution ─────────────────────────────────────
+
+var templateRe = regexp.MustCompile(`\{\{([\w-]+)\.output\}\}`)
+
+func substituteTemplates(text string, outputs map[string]string) string {
+	return templateRe.ReplaceAllStringFunc(text, func(m string) string {
+		parts := templateRe.FindStringSubmatch(m)
+		if len(parts) < 2 {
+			return m
+		}
+		if v, ok := outputs[parts[1]]; ok {
+			return v
+		}
+		return "[no output from " + parts[1] + "]"
+	})
+}
+
+func isAnthropicModel(model string) bool { return strings.HasPrefix(model, "claude") }
+
+func derefStr(p *string, fallback string) string {
+	if p == nil || *p == "" {
+		return fallback
+	}
+	return *p
+}
+
+func boolStr(b bool) string {
+	if b {
+		return "true"
+	}
+	return "false"
+}
+
+// ── Branch condition evaluator ────────────────────────────────
+
+var (
+	reStrCmp     = regexp.MustCompile(`^output\s*(===?|!==?)\s*['"](.*)['"]$`)
+	reNumCmp     = regexp.MustCompile(`^output\s*(===?|!==?|>=?|<=?)\s*(-?\d+(?:\.\d+)?)$`)
+	reLenCmp     = regexp.MustCompile(`^output\.length\s*(===?|!==?|>=?|<=?)\s*(\d+)$`)
+	reIncludes   = regexp.MustCompile(`^output\.includes\(['"](.+)['"]\)$`)
+	reStartsWith = regexp.MustCompile(`^output\.startsWith\(['"](.+)['"]\)$`)
+	reEndsWith   = regexp.MustCompile(`^output\.endsWith\(['"](.+)['"]\)$`)
+)
+
+func cmpFloats(a float64, op string, b float64) bool {
+	switch op {
+	case "==", "===":
+		return a == b
+	case "!=", "!==":
+		return a != b
+	case ">":
+		return a > b
+	case "<":
+		return a < b
+	case ">=":
+		return a >= b
+	case "<=":
+		return a <= b
+	}
+	return false
+}
+
+func evaluateBranchCondition(condition, upstream string) string {
+	condition = strings.TrimSpace(condition)
+	if condition == "true" {
+		return "true"
+	}
+	if condition == "false" {
+		return "false"
+	}
+	truthy := upstream != "" && upstream != "false" && upstream != "0" && upstream != "null" && upstream != "undefined"
+	if condition == "output" {
+		return boolStr(truthy)
+	}
+	if condition == "!output" {
+		return boolStr(!truthy)
+	}
+	if m := reIncludes.FindStringSubmatch(condition); len(m) > 0 {
+		return boolStr(strings.Contains(upstream, m[1]))
+	}
+	if m := reStartsWith.FindStringSubmatch(condition); len(m) > 0 {
+		return boolStr(strings.HasPrefix(upstream, m[1]))
+	}
+	if m := reEndsWith.FindStringSubmatch(condition); len(m) > 0 {
+		return boolStr(strings.HasSuffix(upstream, m[1]))
+	}
+	if m := reLenCmp.FindStringSubmatch(condition); len(m) > 0 {
+		rhs, _ := strconv.ParseFloat(m[2], 64)
+		return boolStr(cmpFloats(float64(len(upstream)), m[1], rhs))
+	}
+	if m := reStrCmp.FindStringSubmatch(condition); len(m) > 0 {
+		switch m[1] {
+		case "==", "===":
+			return boolStr(upstream == m[2])
+		case "!=", "!==":
+			return boolStr(upstream != m[2])
+		}
+	}
+	if m := reNumCmp.FindStringSubmatch(condition); len(m) > 0 {
+		rhs, err := strconv.ParseFloat(m[2], 64)
+		if err == nil {
+			if lhs, err2 := strconv.ParseFloat(upstream, 64); err2 == nil {
+				return boolStr(cmpFloats(lhs, m[1], rhs))
+			}
+			switch m[1] {
+			case "==", "===":
+				return boolStr(upstream == m[2])
+			case "!=", "!==":
+				return boolStr(upstream != m[2])
+			}
+		}
+	}
+	return "false"
+}
+
+// ── Topo sort ─────────────────────────────────────────────────
+
+func topoSort(nodes []WorkflowASTNode, edges []WorkflowASTEdge) []string {
+	inDeg := make(map[string]int, len(nodes))
+	adj := make(map[string][]string, len(nodes))
+	for _, n := range nodes {
+		inDeg[n.ID] = 0
+	}
+	for _, e := range edges {
+		adj[e.Source] = append(adj[e.Source], e.Target)
+		inDeg[e.Target]++
+	}
+	var q []string
+	for _, n := range nodes {
+		if inDeg[n.ID] == 0 {
+			q = append(q, n.ID)
+		}
+	}
+	out := make([]string, 0, len(nodes))
+	seen := make(map[string]bool, len(nodes))
+	for len(q) > 0 {
+		id := q[0]
+		q = q[1:]
+		out = append(out, id)
+		seen[id] = true
+		for _, nb := range adj[id] {
+			inDeg[nb]--
+			if inDeg[nb] == 0 {
+				q = append(q, nb)
+			}
+		}
+	}
+	for _, n := range nodes {
+		if !seen[n.ID] {
+			out = append(out, n.ID)
+		}
+	}
+	return out
+}
+
+// ── Execute single node ────────────────────────────────────────
+
+func executeNode(ctx context.Context, node WorkflowASTNode, outputs map[string]string, edges []WorkflowASTEdge, keys APIKeys, runID string, emit func(ExecutionEvent)) (string, error) {
+	d := node.Data
+	switch d.NodeType {
+	case NodeTypeTextInput:
+		return derefStr(d.DefaultValue, "(empty text input)"), nil
+	case NodeTypeImageInput:
+		return derefStr(d.ImageURL, "(no image URL)"), nil
+	case NodeTypeLLM:
+		model := derefStr(d.Model, "gpt-4o")
+		sys := substituteTemplates(derefStr(d.SystemPrompt, ""), outputs)
+		usr := substituteTemplates(derefStr(d.UserPrompt, ""), outputs)
+		temp := 0.7
+		if d.Temperature != nil {
+			temp = *d.Temperature
+		}
+		maxTok := 1024
+		if d.MaxTokens != nil {
+			maxTok = *d.MaxTokens
+		}
+		if d.OutputSchema != "" {
+			sys += "\n\nRespond ONLY with valid JSON that matches this schema. No markdown, no explanation, just JSON:\n" + d.OutputSchema
+		}
+		if isAnthropicModel(model) {
+			if keys.Anthropic == "" {
+				return "", fmt.Errorf("Anthropic API key not set")
+			}
+			return callAnthropic(ctx, model, sys, usr, temp, maxTok, keys.Anthropic)
+		}
+		if keys.OpenAI == "" {
+			return "", fmt.Errorf("OpenAI API key not set")
+		}
+		return callOpenAI(ctx, model, sys, usr, temp, maxTok, keys.OpenAI)
+	case NodeTypeBranch:
+		cond := derefStr(d.Condition, "false")
+		var up string
+		for _, e := range edges {
+			if e.Target == node.ID {
+				if v, ok := outputs[e.Source]; ok {
+					up = v
+				}
+				break
+			}
+		}
+		return evaluateBranchCondition(cond, up), nil
+	case NodeTypeLoop:
+		// Collect upstream output and return it — RunWorkflow handles actual iteration
+		for _, e := range edges {
+			if e.Target == node.ID {
+				if v, ok := outputs[e.Source]; ok {
+					return v, nil
+				}
+			}
+		}
+		return "[]", nil
+	case NodeTypeTextOutput:
+		for _, e := range edges {
+			if e.Target == node.ID {
+				if v, ok := outputs[e.Source]; ok {
+					return v, nil
+				}
+			}
+		}
+		return "(no input)", nil
+
+	case NodeTypeHTTPRequest:
+		url := substituteTemplates(d.URL, outputs)
+		method := d.Method
+		if method == "" {
+			method = "GET"
+		}
+		var reqBody io.Reader
+		if d.RequestBody != "" {
+			body := substituteTemplates(d.RequestBody, outputs)
+			reqBody = strings.NewReader(body)
+		}
+		req, err := http.NewRequest(method, url, reqBody)
+		if err != nil {
+			return "", err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		if d.RequestHeaders != "" {
+			var headers map[string]string
+			if err := json.Unmarshal([]byte(d.RequestHeaders), &headers); err == nil {
+				for k, v := range headers {
+					req.Header.Set(k, v)
+				}
+			}
+		}
+		client := &http.Client{Timeout: 30 * time.Second}
+		resp, err := client.Do(req)
+		if err != nil {
+			return "", err
+		}
+		defer resp.Body.Close()
+		respBytes, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return "", err
+		}
+		return string(respBytes), nil
+
+	case NodeTypeEmailSend:
+		to := substituteTemplates(d.EmailTo, outputs)
+		subject := substituteTemplates(d.EmailSubject, outputs)
+		body := substituteTemplates(d.EmailBody, outputs)
+		resendKey := os.Getenv("RESEND_API_KEY")
+		if resendKey == "" {
+			return fmt.Sprintf(`{"status":"sent","to":"%s","subject":"%s","note":"dev_mode_no_key"}`, to, subject), nil
+		}
+		client := resend.NewClient(resendKey)
+		params := &resend.SendEmailRequest{
+			From:    "workflow-ai <noreply@usecelery.io>",
+			To:      []string{to},
+			Subject: subject,
+			Text:    body,
+		}
+		sent, err := client.Emails.Send(params)
+		if err != nil {
+			return "", fmt.Errorf("resend error: %w", err)
+		}
+		return fmt.Sprintf(`{"status":"sent","to":"%s","subject":"%s","id":"%s"}`, to, subject, sent.Id), nil
+
+	case NodeTypeHumanApproval:
+		message := d.ApprovalMessage
+		if message == "" {
+			message = "Please review and approve or reject this step."
+		}
+		ch := RegisterApprovalChannel(runID + ":" + node.ID)
+		emit(ExecutionEvent{
+			ID:      newUUID(),
+			Type:    EventNodeWaiting,
+			NodeID:  strPtr(node.ID),
+			Message: message,
+			RunID:   runID,
+		})
+		timeout := d.ApprovalTimeout
+		if timeout <= 0 {
+			timeout = 86400 * 7 // 7-day default for "no timeout"
+		}
+		select {
+		case approved := <-ch:
+			if approved {
+				return "approved", nil
+			}
+			return "rejected", nil
+		case <-time.After(time.Duration(timeout) * time.Second):
+			approvalChannelsMu.Lock()
+			delete(approvalChannels, runID+":"+node.ID)
+			approvalChannelsMu.Unlock()
+			return "rejected", fmt.Errorf("approval timed out after %d seconds", timeout)
+		}
+
+	case NodeTypeWebhookTrigger:
+		// DefaultValue is injected with the received payload by ReceiveWebhook handler
+		if d.DefaultValue != nil && *d.DefaultValue != "" && *d.DefaultValue != "null" {
+			return *d.DefaultValue, nil
+		}
+		return `{"trigger":"webhook"}`, nil
+
+	case NodeTypeScheduledTrigger:
+		return `{"trigger":"scheduled","time":"` + time.Now().Format(time.RFC3339) + `"}`, nil
+	}
+	return "", fmt.Errorf("unknown node type: %s", d.NodeType)
+}
+
+// ── Loop helpers ───────────────────────────────────────────────
+
+// reachableFrom returns all node IDs reachable via edges from startID (not including startID).
+func reachableFrom(startID string, edges []WorkflowASTEdge) map[string]bool {
+	visited := make(map[string]bool)
+	queue := []string{startID}
+	for len(queue) > 0 {
+		cur := queue[0]
+		queue = queue[1:]
+		for _, e := range edges {
+			if e.Source == cur && !visited[e.Target] {
+				visited[e.Target] = true
+				queue = append(queue, e.Target)
+			}
+		}
+	}
+	return visited
+}
+
+// extractLoopItems parses input JSON and extracts the array at the given dot-path field.
+// If field is empty, input itself must be an array. Falls back to line-splitting for plain text.
+func extractLoopItems(input, field string) []string {
+	if input == "" {
+		return nil
+	}
+	var data interface{}
+	if err := json.Unmarshal([]byte(input), &data); err != nil {
+		var lines []string
+		for _, l := range strings.Split(strings.TrimSpace(input), "\n") {
+			if l = strings.TrimSpace(l); l != "" {
+				lines = append(lines, l)
+			}
+		}
+		return lines
+	}
+	if field != "" {
+		current := data
+		for _, part := range strings.Split(field, ".") {
+			m, ok := current.(map[string]interface{})
+			if !ok {
+				return nil
+			}
+			current = m[part]
+		}
+		data = current
+	}
+	arr, ok := data.([]interface{})
+	if !ok {
+		b, _ := json.Marshal(data)
+		return []string{string(b)}
+	}
+	result := make([]string, len(arr))
+	for i, item := range arr {
+		if s, ok := item.(string); ok {
+			result[i] = s
+		} else {
+			b, _ := json.Marshal(item)
+			result[i] = string(b)
+		}
+	}
+	return result
+}
+
+// ── Run workflow ──────────────────────────────────────────────
+
+func RunWorkflow(ctx context.Context, workflow WorkflowAST, keys APIKeys, runID string, emit EmitFn) {
+	start := time.Now()
+
+	mk := func(t ExecutionEventType, node *WorkflowASTNode, output *string, msg string) ExecutionEvent {
+		ev := ExecutionEvent{ID: newUUID(), Type: t, Timestamp: time.Since(start).Milliseconds(), Message: msg, Output: output}
+		if node != nil {
+			ev.NodeID = strPtr(node.ID)
+			ev.NodeLabel = strPtr(node.Data.Label)
+			nt := node.Data.NodeType
+			ev.NodeType = ntPtr(nt)
+		}
+		return ev
+	}
+
+	startEv := mk(EventWorkflowStarted, nil, nil, "Workflow started")
+	startEv.RunID = runID
+	emit(startEv)
+
+	nodes, edges := workflow.Nodes, workflow.Edges
+	order := topoSort(nodes, edges)
+
+	inDeg := make(map[string]int, len(nodes))
+	for _, e := range edges {
+		inDeg[e.Target]++
+	}
+	enabled := make(map[string]bool, len(nodes))
+	for _, n := range nodes {
+		if inDeg[n.ID] == 0 {
+			enabled[n.ID] = true
+		}
+	}
+
+	outputs := make(map[string]string, len(nodes))
+	nodeMap := make(map[string]WorkflowASTNode, len(nodes))
+	for _, n := range nodes {
+		nodeMap[n.ID] = n
+	}
+
+	loopHandled := make(map[string]bool) // nodes fully handled inside a loop iteration
+
+	for _, id := range order {
+		if loopHandled[id] {
+			continue
+		}
+		node, ok := nodeMap[id]
+		if !ok || !enabled[id] {
+			continue
+		}
+		select {
+		case <-ctx.Done():
+			emit(mk(EventWorkflowError, nil, nil, "Workflow cancelled"))
+			return
+		default:
+		}
+
+		// ── Loop node: iterate over items ─────────────────────
+		if node.Data.NodeType == NodeTypeLoop {
+			emit(mk(EventNodeStarted, &node, nil, node.Data.Label))
+
+			// Get upstream output
+			var upstreamOutput string
+			for _, e := range edges {
+				if e.Target == id {
+					if v, ok2 := outputs[e.Source]; ok2 {
+						upstreamOutput = v
+						break
+					}
+				}
+			}
+			field := ""
+			if node.Data.LoopOverField != nil {
+				field = *node.Data.LoopOverField
+			}
+			items := extractLoopItems(upstreamOutput, field)
+
+			// Find all body nodes (reachable from loop node)
+			bodySet := reachableFrom(id, edges)
+
+			// Get body nodes in topo order
+			var bodyNodes []WorkflowASTNode
+			for _, n := range nodes {
+				if bodySet[n.ID] {
+					bodyNodes = append(bodyNodes, n)
+				}
+			}
+			bodyOrder := topoSort(bodyNodes, edges)
+
+			// Execute loop body for each item
+			var iterResults []string
+			for i, item := range items {
+				iterOutputs := make(map[string]string, len(outputs)+len(bodyNodes)+1)
+				for k, v := range outputs {
+					iterOutputs[k] = v
+				}
+				iterOutputs[id] = item // current item is loop node's output for this iteration
+
+				var lastOut string
+				for _, bodyID := range bodyOrder {
+					if !bodySet[bodyID] {
+						continue
+					}
+					bodyNode, ok2 := nodeMap[bodyID]
+					if !ok2 {
+						continue
+					}
+					select {
+					case <-ctx.Done():
+						emit(mk(EventWorkflowError, nil, nil, "Workflow cancelled"))
+						return
+					default:
+					}
+					iterLabel := fmt.Sprintf("[%d/%d] %s", i+1, len(items), bodyNode.Data.Label)
+					emit(mk(EventNodeStarted, &bodyNode, nil, iterLabel))
+					out, err := executeNode(ctx, bodyNode, iterOutputs, edges, keys, runID, emit)
+					if err != nil {
+						emit(mk(EventNodeError, &bodyNode, nil, "Error: "+err.Error()))
+						lastOut = fmt.Sprintf(`{"error":%q}`, err.Error())
+						break
+					}
+					iterOutputs[bodyID] = out
+					emit(mk(EventNodeOutput, &bodyNode, strPtr(out), iterLabel))
+					emit(mk(EventNodeCompleted, &bodyNode, nil, iterLabel+" completed"))
+					lastOut = out
+				}
+				iterResults = append(iterResults, lastOut)
+			}
+
+			// Mark all body nodes as handled (skip in outer loop)
+			for bodyID := range bodySet {
+				loopHandled[bodyID] = true
+				outputs[bodyID] = "[loop iteration]"
+			}
+
+			// Enable nodes downstream of the loop body (outside the body)
+			for bodyID := range bodySet {
+				for _, e := range edges {
+					if e.Source == bodyID && !bodySet[e.Target] {
+						enabled[e.Target] = true
+					}
+				}
+			}
+
+			resultJSON, _ := json.Marshal(iterResults)
+			outputs[id] = string(resultJSON)
+			emit(mk(EventNodeOutput, &node, strPtr(string(resultJSON)), node.Data.Label))
+			emit(mk(EventNodeCompleted, &node, nil, node.Data.Label+" completed"))
+			continue
+		}
+
+		// ── Normal node execution ─────────────────────────────
+		emit(mk(EventNodeStarted, &node, nil, node.Data.Label))
+
+		out, err := executeNode(ctx, node, outputs, edges, keys, runID, emit)
+		if err != nil {
+			emit(mk(EventNodeError, &node, nil, "Error: "+err.Error()))
+			emit(mk(EventWorkflowError, nil, nil, fmt.Sprintf("Workflow failed at %q", node.Data.Label)))
+			return
+		}
+
+		outputs[id] = out
+		emit(mk(EventNodeOutput, &node, strPtr(out), node.Data.Label))
+		emit(mk(EventNodeCompleted, &node, nil, node.Data.Label+" completed"))
+
+		for _, e := range edges {
+			if e.Source != id {
+				continue
+			}
+			if node.Data.NodeType == NodeTypeBranch || node.Data.NodeType == NodeTypeHumanApproval {
+				if e.SourceHandle != nil && *e.SourceHandle == out {
+					enabled[e.Target] = true
+				}
+			} else {
+				enabled[e.Target] = true
+			}
+		}
+	}
+	emit(mk(EventWorkflowCompleted, nil, nil, "Workflow completed successfully"))
+}

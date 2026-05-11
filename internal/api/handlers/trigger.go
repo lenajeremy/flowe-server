@@ -1,0 +1,124 @@
+package handlers
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"os"
+	"strings"
+	"time"
+
+	"workflow-ai/server/internal/database/models"
+	"workflow-ai/server/internal/executor"
+
+	"github.com/gin-gonic/gin"
+)
+
+// POST /api/trigger/:workflowId
+func (h *WorkflowHandler) TriggerWorkflow(c *gin.Context) {
+	// Validate Bearer token
+	authHeader := c.GetHeader("Authorization")
+	if !strings.HasPrefix(authHeader, "Bearer ") {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Bearer token required"})
+		return
+	}
+	token := strings.TrimPrefix(authHeader, "Bearer ")
+
+	// Hash token and look up in ApiKey table
+	hash := fmt.Sprintf("%x", sha256.Sum256([]byte(token)))
+	var apiKey models.ApiKey
+	if err := h.db.DB.Where("key_hash = ?", hash).First(&apiKey).Error; err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid API key"})
+		return
+	}
+
+	// Update last used
+	now := time.Now()
+	h.db.DB.Model(&apiKey).Update("last_used_at", now)
+
+	// Get workflow
+	workflowID := c.Param("workflowId")
+	var workflow models.Workflow
+	if err := h.db.DB.First(&workflow, "id = ?", workflowID).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "workflow not found"})
+		return
+	}
+
+	// Parse input
+	var body struct {
+		Input map[string]interface{} `json:"input"`
+		Async bool                   `json:"async"`
+	}
+	c.ShouldBindJSON(&body)
+
+	// Create run record
+	run := models.WorkflowRun{
+		WorkflowID:   workflowID,
+		WorkflowName: workflow.Name,
+		Status:       models.RunStatusRunning,
+	}
+	h.db.DB.Create(&run)
+
+	// Build WorkflowAST from workflow
+	var nodes []executor.WorkflowASTNode
+	var edges []executor.WorkflowASTEdge
+	json.Unmarshal(workflow.Nodes, &nodes)
+	json.Unmarshal(workflow.Edges, &edges)
+
+	ast := executor.WorkflowAST{
+		Version: "1.0",
+		Name:    workflow.Name,
+		Nodes:   nodes,
+		Edges:   edges,
+	}
+
+	keys := executor.APIKeys{
+		Anthropic: os.Getenv("ANTHROPIC_API_KEY"),
+		OpenAI:    os.Getenv("OPENAI_API_KEY"),
+	}
+
+	runID := run.ID.String()
+
+	go func() {
+		var events []executor.ExecutionEvent
+		startTime := time.Now()
+
+		var execErr error
+		doneCh := make(chan struct{})
+
+		go func() {
+			defer close(doneCh)
+			executor.RunWorkflow(context.Background(), ast, keys, runID, func(event executor.ExecutionEvent) {
+				event.Timestamp = time.Since(startTime).Milliseconds()
+				events = append(events, event)
+				if event.Type == executor.EventWorkflowError {
+					execErr = fmt.Errorf("%s", event.Message)
+				}
+			})
+		}()
+
+		<-doneCh
+
+		status := models.RunStatusCompleted
+		errMsg := ""
+		if execErr != nil {
+			status = models.RunStatusError
+			errMsg = execErr.Error()
+		}
+
+		eventsJSON, _ := json.Marshal(events)
+		h.db.DB.Model(&run).Updates(map[string]interface{}{
+			"status":    status,
+			"error_msg": errMsg,
+			"events":    models.JSONB(eventsJSON),
+		})
+	}()
+
+	c.JSON(http.StatusAccepted, gin.H{
+		"run_id":      runID,
+		"status":      "running",
+		"workflow_id": workflowID,
+	})
+}
