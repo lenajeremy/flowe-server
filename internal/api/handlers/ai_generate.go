@@ -50,6 +50,45 @@ var toolGetNodes = map[string]any{
 	},
 }
 
+var toolGetCurrentWorkflow = map[string]any{
+	"name":        "get_current_workflow",
+	"description": "Returns the current workflow on the canvas — all nodes with their full configuration and all edges. Call this before making any edits to an existing workflow.",
+	"input_schema": map[string]any{
+		"type":       "object",
+		"properties": map[string]any{},
+	},
+}
+
+var toolUpdateWorkflow = map[string]any{
+	"name":        "update_workflow",
+	"description": "Makes surgical edits to the existing workflow without replacing it. Use this to add or remove individual nodes or edges, or to update configuration fields inside an existing node. Prefer this over create_workflow when the user asks to change, add, or remove something specific.",
+	"input_schema": map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"operations": map[string]any{
+				"type":        "array",
+				"description": "Ordered list of operations to apply",
+				"items": map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"op": map[string]any{
+							"type": "string",
+							"enum": []string{"add_node", "remove_node", "add_edge", "remove_edge", "update_node"},
+						},
+						"node":    map[string]any{"type": "object", "description": "add_node: full node with id, type, position {x,y}, data"},
+						"node_id": map[string]any{"type": "string", "description": "remove_node / update_node: target node id"},
+						"edge":    map[string]any{"type": "object", "description": "add_edge: object with id, source, target, optional sourceHandle"},
+						"edge_id": map[string]any{"type": "string", "description": "remove_edge: target edge id"},
+						"data":    map[string]any{"type": "object", "description": "update_node: partial data fields to merge into the node"},
+					},
+					"required": []string{"op"},
+				},
+			},
+		},
+		"required": []string{"operations"},
+	},
+}
+
 var toolCreateWorkflow = map[string]any{
 	"name":        "create_workflow",
 	"description": "Creates a workflow on the user's canvas. Call this with the nodes and edges arrays to build the workflow. The workflow will appear on the canvas immediately.",
@@ -214,20 +253,34 @@ func getAvailableNodesResult() string {
 
 // ── System prompt ───────────────────────────────────────────────
 
-const workflowSystemPrompt = `You are a workflow builder AI. The user describes a workflow in natural language and you build it using your tools.
+const workflowSystemPrompt = `You are a workflow builder AI. The user describes what they want and you build or edit it using your tools.
 
-Your workflow:
-1. ALWAYS call get_available_nodes first to learn what nodes exist and their data schemas.
-2. Design the workflow based on the user's request.
-3. Call create_workflow with the nodes and edges arrays to build it on the canvas.
-4. After calling create_workflow, respond with a brief explanation of what you built and any configuration the user needs to do (API keys, tokens, URLs to fill in, etc).
+Decision rules:
+- If the canvas might already have a workflow, call get_current_workflow first to see what's there.
+- If the user asks to ADD, REMOVE, or CHANGE something specific → call update_workflow with targeted operations.
+- If the user asks to build something from scratch, or the canvas is empty → call get_available_nodes then create_workflow.
+- Never tear down and rebuild a workflow just to make a small change.
+
+Tool order for NEW workflows:
+1. get_available_nodes — learn node schemas
+2. create_workflow — place all nodes and edges
+
+Tool order for EDITS:
+1. get_current_workflow — see what's already on the canvas
+2. update_workflow — apply only the necessary changes
+
+update_workflow operations:
+- add_node: { op, node: { id, type, position: {x,y}, data: { nodeType, label, ...fields } } }
+- remove_node: { op, node_id } — also removes connected edges automatically
+- add_edge: { op, edge: { id, source, target, sourceHandle? } }
+- remove_edge: { op, edge_id }
+- update_node: { op, node_id, data: { ...only the fields to change } }
 
 Rules:
-- Every node's data object MUST include nodeType (matching the node type) and label (descriptive name).
-- Use {{nodeId.output}} in LLM/HTTP/email/integration fields to reference upstream nodes.
-- For branch nodes, outgoing edges must have sourceHandle "true" or "false".
-- Space nodes ~250px apart horizontally, start at x:100, y:100, flow left-to-right.
-- Always call both tools — do not output raw JSON in your text response.`
+- Every node's data MUST include nodeType (matching the node type) and label.
+- For branch nodes, edges need sourceHandle "true" or "false".
+- Space new nodes ~250px apart from existing ones.
+- After calling create_workflow or update_workflow, explain what you did and what the user needs to configure.`
 
 // ── Handler ─────────────────────────────────────────────────────
 
@@ -244,13 +297,8 @@ func (h *WorkflowHandler) AIGenerate(c *gin.Context) {
 		return
 	}
 
-	// Build user prompt with current workflow context
+	// Build user prompt
 	userPrompt := req.Prompt
-	if len(req.CurrentNodes) > 0 {
-		nodesJSON, _ := json.Marshal(req.CurrentNodes)
-		edgesJSON, _ := json.Marshal(req.CurrentEdges)
-		userPrompt += fmt.Sprintf("\n\nCurrent workflow on the canvas:\nNodes: %s\nEdges: %s\n\nYou can modify, extend, or replace this workflow.", nodesJSON, edgesJSON)
-	}
 
 	// Set up SSE
 	c.Header("Content-Type", "text/event-stream")
@@ -264,7 +312,7 @@ func (h *WorkflowHandler) AIGenerate(c *gin.Context) {
 		return
 	}
 
-	allTools := []map[string]any{toolGetNodes, toolCreateWorkflow}
+	allTools := []map[string]any{toolGetNodes, toolGetCurrentWorkflow, toolCreateWorkflow, toolUpdateWorkflow}
 
 	// Build message history — prior turns as plain text role/content pairs
 	var messages []map[string]any
@@ -346,6 +394,20 @@ func (h *WorkflowHandler) AIGenerate(c *gin.Context) {
 				inputJSON, _ := json.Marshal(bm["input"])
 				sendSSE(c.Writer, flusher, "workflow", string(inputJSON))
 				output = `{"status": "success", "message": "Workflow created on the canvas."}`
+
+			case "get_current_workflow":
+				currentWorkflow := map[string]any{
+					"nodes": req.CurrentNodes,
+					"edges": req.CurrentEdges,
+				}
+				workflowJSON, _ := json.Marshal(currentWorkflow)
+				output = string(workflowJSON)
+
+			case "update_workflow":
+				inputJSON, _ := json.Marshal(bm["input"])
+				sendSSE(c.Writer, flusher, "patch", string(inputJSON))
+				output = `{"status":"success","message":"Patch applied to canvas."}`
+
 			default:
 				output = fmt.Sprintf(`{"error": "unknown tool: %s"}`, toolName)
 			}
