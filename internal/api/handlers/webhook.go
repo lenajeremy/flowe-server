@@ -102,6 +102,8 @@ func (h *WorkflowHandler) ReceiveWebhook(c *gin.Context) {
 	keys := executor.APIKeys{
 		Anthropic: os.Getenv("ANTHROPIC_API_KEY"),
 		OpenAI:    os.Getenv("OPENAI_API_KEY"),
+		Brave:     os.Getenv("BRAVE_API_KEY"),
+		Jina:      os.Getenv("JINA_API_KEY"),
 	}
 	runID := run.ID.String()
 	slog.Info("webhook triggered", "run_id", runID, "workflow_id", wh.WorkflowID, "workflow_name", workflow.Name)

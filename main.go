@@ -11,6 +11,7 @@ import (
 	"workflow-ai/server/internal/api"
 	"workflow-ai/server/internal/database"
 	rdb "workflow-ai/server/internal/database/redis"
+	"workflow-ai/server/internal/database/models"
 	"workflow-ai/server/internal/executor"
 	"workflow-ai/server/internal/n8n"
 )
@@ -35,6 +36,20 @@ func main() {
 
 	if err := dbClient.Setup(); err != nil {
 		log.Fatal("failed to run migrations: ", err)
+	}
+
+	// Mark any runs that were left in "running" state from a previous server
+	// session as errored — they can never be resumed after a restart.
+	if result := dbClient.DB.
+		Model(&models.WorkflowRun{}).
+		Where("status = ?", models.RunStatusRunning).
+		Updates(map[string]any{
+			"status":        models.RunStatusError,
+			"error_message": "Server restarted — run was interrupted",
+		}); result.Error != nil {
+		slog.Warn("failed to clean up orphaned runs", "error", result.Error)
+	} else if result.RowsAffected > 0 {
+		slog.Info("marked orphaned runs as error", "count", result.RowsAffected)
 	}
 
 	redisClient := rdb.New()

@@ -10,6 +10,7 @@ import (
 	"workflow-ai/server/internal/database"
 	"workflow-ai/server/internal/database/models"
 	"workflow-ai/server/internal/executor"
+	"workflow-ai/server/internal/hub"
 
 	"github.com/gin-gonic/gin"
 	"github.com/redis/go-redis/v9"
@@ -43,6 +44,12 @@ func (h *WorkflowHandler) Run(c *gin.Context) {
 		slog.Error("failed to persist workflow run", "error", err)
 	}
 
+	// Notify workflow-level subscribers that a run has started (powers the
+	// WorkflowEvents SSE so the editor can auto-attach to the stream).
+	if req.WorkflowID != "" {
+		hub.Workflow.Publish(req.WorkflowID, run.ID.String())
+	}
+
 	// SSE setup
 	c.Header("Content-Type", "text/event-stream")
 	c.Header("Cache-Control", "no-cache")
@@ -59,7 +66,12 @@ func (h *WorkflowHandler) Run(c *gin.Context) {
 	var errMsg string
 	var bufferedEvents []executor.ExecutionEvent
 
+	runID := run.ID.String()
 	emit := func(event executor.ExecutionEvent) {
+		// Publish to hub so /runs/:id/stream subscribers (e.g. the approval page)
+		// receive events in real time.
+		hub.Global.Publish(runID, event)
+
 		data, _ := json.Marshal(event)
 		fmt.Fprintf(c.Writer, "data: %s\n\n", data)
 		flusher.Flush()
@@ -75,9 +87,11 @@ func (h *WorkflowHandler) Run(c *gin.Context) {
 	keys := executor.APIKeys{
 		Anthropic: config.GetEnv("ANTHROPIC_API_KEY"),
 		OpenAI:    config.GetEnv("OPENAI_API_KEY"),
+		Brave:     config.GetEnv("BRAVE_API_KEY"),
+		Jina:      config.GetEnv("JINA_API_KEY"),
 	}
 
-	executor.RunWorkflow(c.Request.Context(), req.Workflow, keys, run.ID.String(), emit)
+	executor.RunWorkflow(c.Request.Context(), req.Workflow, keys, runID, emit)
 
 	// Serialize buffered events and update run record
 	eventsJSON, _ := json.Marshal(bufferedEvents)
@@ -89,6 +103,9 @@ func (h *WorkflowHandler) Run(c *gin.Context) {
 		updates["error_message"] = errMsg
 	}
 	h.db.DB.Model(run).Updates(updates)
+
+	// Drop the in-memory event buffer now that events are in DB.
+	hub.Global.ClearBuffer(runID)
 }
 
 // ── Workflow CRUD ─────────────────────────────────────────────

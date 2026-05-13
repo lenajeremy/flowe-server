@@ -55,6 +55,9 @@ type FlowNodeData struct {
 	// LLM structured output
 	OutputSchema string `json:"outputSchema"` // JSON schema string
 
+	// LLM web tools
+	EnableWebSearch bool `json:"enableWebSearch,omitempty"` // gives the LLM web_search + read_url tools
+
 	// notion / linear shared
 	IntegrationToken string `json:"integrationToken,omitempty"`
 	IntegrationOp    string `json:"integrationOp,omitempty"`
@@ -107,6 +110,8 @@ type WorkflowAST struct {
 type APIKeys struct {
 	Anthropic string
 	OpenAI    string
+	Brave     string
+	Jina      string
 }
 
 type RunRequest struct {

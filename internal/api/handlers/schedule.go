@@ -126,7 +126,7 @@ func (h *WorkflowHandler) runWorkflowByID(workflowID string) {
 	}
 
 	ast := executor.WorkflowAST{Version: "1.0", Name: workflow.Name, Nodes: nodes, Edges: edges}
-	keys := executor.APIKeys{Anthropic: os.Getenv("ANTHROPIC_API_KEY"), OpenAI: os.Getenv("OPENAI_API_KEY")}
+	keys := executor.APIKeys{Anthropic: os.Getenv("ANTHROPIC_API_KEY"), OpenAI: os.Getenv("OPENAI_API_KEY"), Brave: os.Getenv("BRAVE_API_KEY"), Jina: os.Getenv("JINA_API_KEY")}
 
 	run := models.WorkflowRun{WorkflowID: workflowID, WorkflowName: workflow.Name, Status: models.RunStatusRunning}
 	h.db.DB.Create(&run)

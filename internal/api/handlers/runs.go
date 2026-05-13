@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"workflow-ai/server/internal/database/models"
 	"workflow-ai/server/internal/executor"
@@ -147,6 +148,8 @@ func (h *WorkflowHandler) StreamRun(c *gin.Context) {
 	}
 
 	ctx := c.Request.Context()
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
@@ -162,6 +165,25 @@ func (h *WorkflowHandler) StreamRun(c *gin.Context) {
 			flusher.Flush()
 			if event.Type == executor.EventWorkflowCompleted || event.Type == executor.EventWorkflowError {
 				slog.Info("stream: run finished", "run_id", runID, "type", event.Type)
+				return
+			}
+		case <-ticker.C:
+			// Periodically re-check DB in case the run finished but we missed the final event
+			// (e.g. server restart left the run as orphaned "running").
+			var latest models.WorkflowRun
+			if err := h.db.DB.First(&latest, "id = ?", runID).Error; err != nil {
+				continue
+			}
+			if latest.Status != models.RunStatusRunning {
+				slog.Info("stream: detected run no longer running via poll", "run_id", runID, "status", latest.Status)
+				var events []executor.ExecutionEvent
+				if err := json.Unmarshal(latest.Events, &events); err == nil {
+					for _, ev := range events {
+						data, _ := json.Marshal(ev)
+						fmt.Fprintf(c.Writer, "data: %s\n\n", data)
+					}
+				}
+				flusher.Flush()
 				return
 			}
 		}

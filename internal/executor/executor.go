@@ -436,10 +436,16 @@ func executeNode(ctx context.Context, node WorkflowASTNode, outputs map[string]s
 			if keys.Anthropic == "" {
 				return "", fmt.Errorf("Anthropic API key not set")
 			}
+			if d.EnableWebSearch {
+				return callAnthropicWithTools(ctx, model, sys, usr, maxTok, keys.Anthropic, imgs, keys)
+			}
 			return callAnthropic(ctx, model, sys, usr, temp, maxTok, keys.Anthropic, imgs)
 		}
 		if keys.OpenAI == "" {
 			return "", fmt.Errorf("OpenAI API key not set")
+		}
+		if d.EnableWebSearch {
+			return callOpenAIWithTools(ctx, model, sys, usr, maxTok, keys.OpenAI, imgs, keys)
 		}
 		return callOpenAI(ctx, model, sys, usr, temp, maxTok, keys.OpenAI, imgs)
 	case NodeTypeBranch:
@@ -505,7 +511,7 @@ func executeNode(ctx context.Context, node WorkflowASTNode, outputs map[string]s
 			body := substituteTemplates(d.RequestBody, outputs)
 			reqBody = strings.NewReader(body)
 		}
-		req, err := http.NewRequest(method, url, reqBody)
+		req, err := http.NewRequestWithContext(ctx, method, url, reqBody)
 		if err != nil {
 			return "", err
 		}
@@ -611,6 +617,11 @@ func executeNode(ctx context.Context, node WorkflowASTNode, outputs map[string]s
 			delete(approvalChannels, runID+":"+node.ID)
 			approvalChannelsMu.Unlock()
 			return "rejected", fmt.Errorf("approval timed out after %d seconds", timeout)
+		case <-ctx.Done():
+			approvalChannelsMu.Lock()
+			delete(approvalChannels, runID+":"+node.ID)
+			approvalChannelsMu.Unlock()
+			return "", fmt.Errorf("workflow cancelled")
 		}
 
 	case NodeTypeWebhookTrigger:
