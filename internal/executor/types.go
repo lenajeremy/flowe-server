@@ -4,12 +4,12 @@ package executor
 type NodeType string
 
 const (
-	NodeTypeTextInput    NodeType = "textInput"
-	NodeTypeImageInput   NodeType = "imageInput"
-	NodeTypeLLM          NodeType = "llm"
-	NodeTypeBranch       NodeType = "branch"
-	NodeTypeLoop         NodeType = "loop"
-	NodeTypeTextOutput   NodeType = "textOutput"
+	NodeTypeTextInput        NodeType = "textInput"
+	NodeTypeImageInput       NodeType = "imageInput"
+	NodeTypeLLM              NodeType = "llm"
+	NodeTypeBranch           NodeType = "branch"
+	NodeTypeLoop             NodeType = "loop"
+	NodeTypeTextOutput       NodeType = "textOutput"
 	NodeTypeHTTPRequest      NodeType = "httpRequest"
 	NodeTypeEmailSend        NodeType = "emailSend"
 	NodeTypeHumanApproval    NodeType = "humanApproval"

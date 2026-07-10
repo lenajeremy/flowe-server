@@ -14,6 +14,9 @@ import (
 // GetWorkflowChat returns the stored conversation for a workflow.
 func (h *WorkflowHandler) GetWorkflowChat(c *gin.Context) {
 	workflowID := c.Param("id")
+	if _, ok := h.loadOwnedWorkflow(c, workflowID); !ok {
+		return
+	}
 
 	var chat models.WorkflowChat
 	err := h.db.DB.Where("workflow_id = ?", workflowID).First(&chat).Error
@@ -34,6 +37,10 @@ func (h *WorkflowHandler) GetWorkflowChat(c *gin.Context) {
 // SaveWorkflowChat upserts the conversation for a workflow.
 func (h *WorkflowHandler) SaveWorkflowChat(c *gin.Context) {
 	workflowID := c.Param("id")
+	wf, ok := h.loadOwnedWorkflow(c, workflowID)
+	if !ok {
+		return
+	}
 
 	var body struct {
 		Messages []any `json:"messages"`
@@ -49,6 +56,7 @@ func (h *WorkflowHandler) SaveWorkflowChat(c *gin.Context) {
 	err := h.db.DB.Where("workflow_id = ?", workflowID).First(&chat).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		chat = models.WorkflowChat{
+			UserID:     wf.UserID,
 			WorkflowID: workflowID,
 			Messages:   raw,
 		}

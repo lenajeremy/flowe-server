@@ -46,6 +46,8 @@ func (c *DBClient) Setup() error {
 		c.DB.Unscoped().Where("deleted_at IS NOT NULL").Delete(&models.IntegrationConnection{})
 	}
 	return c.DB.AutoMigrate(
+		&models.User{},
+		&models.LoginCode{},
 		&models.WorkflowRun{},
 		&models.Workflow{},
 		&models.ApiKey{},

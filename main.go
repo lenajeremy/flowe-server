@@ -50,13 +50,14 @@ func main() {
 
 	redisClient := rdb.New()
 
-	// Notion/Linear nodes fall back to stored OAuth connections when the
-	// node config carries no manual token. Connections are keyed per user;
-	// until multi-user auth lands every workflow belongs to DefaultUserID —
-	// afterwards, resolve the run's owner here instead.
-	executor.IntegrationTokenLookup = func(provider string) string {
+	// Notion/Linear nodes fall back to the workflow owner's stored OAuth
+	// connection when the node config carries no manual token.
+	executor.IntegrationTokenLookup = func(userID, provider string) string {
+		if userID == "" {
+			return ""
+		}
 		var conn models.IntegrationConnection
-		if err := dbClient.DB.Where("user_id = ? AND provider = ?", models.DefaultUserID, provider).
+		if err := dbClient.DB.Where("user_id = ? AND provider = ?", userID, provider).
 			First(&conn).Error; err != nil {
 			return ""
 		}

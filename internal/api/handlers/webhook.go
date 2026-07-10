@@ -20,11 +20,15 @@ import (
 // GET /api/workflows/:id/webhook  — get (or create) webhook for this workflow
 func (h *WorkflowHandler) GetWebhook(c *gin.Context) {
 	workflowID := c.Param("id")
+	wf, ok := h.loadOwnedWorkflow(c, workflowID)
+	if !ok {
+		return
+	}
 	var wh models.WebhookTrigger
 	if err := h.db.DB.Where("workflow_id = ?", workflowID).First(&wh).Error; err != nil {
 		// Create one; handle races by re-fetching on unique constraint violation
 		token, _ := randomHex(24)
-		wh = models.WebhookTrigger{WorkflowID: workflowID, Token: token}
+		wh = models.WebhookTrigger{UserID: wf.UserID, WorkflowID: workflowID, Token: token}
 		if err2 := h.db.DB.Create(&wh).Error; err2 != nil {
 			if err3 := h.db.DB.Where("workflow_id = ?", workflowID).First(&wh).Error; err3 != nil {
 				c.JSON(http.StatusInternalServerError, gin.H{"error": err2.Error()})
@@ -58,6 +62,9 @@ func (h *WorkflowHandler) WebhookInfo(c *gin.Context) {
 // DELETE /api/workflows/:id/webhook  — regenerate token (delete + GetWebhook will recreate)
 func (h *WorkflowHandler) DeleteWebhook(c *gin.Context) {
 	workflowID := c.Param("id")
+	if _, ok := h.loadOwnedWorkflow(c, workflowID); !ok {
+		return
+	}
 	h.db.DB.Where("workflow_id = ?", workflowID).Delete(&models.WebhookTrigger{})
 	c.JSON(http.StatusOK, gin.H{"status": "deleted"})
 }
@@ -82,6 +89,7 @@ func (h *WorkflowHandler) ReceiveWebhook(c *gin.Context) {
 	c.ShouldBindJSON(&payload)
 
 	run := models.WorkflowRun{
+		UserID:       workflow.UserID,
 		WorkflowID:   wh.WorkflowID,
 		WorkflowName: workflow.Name,
 		Status:       models.RunStatusRunning,
@@ -122,7 +130,7 @@ func (h *WorkflowHandler) ReceiveWebhook(c *gin.Context) {
 		var events []executor.ExecutionEvent
 		startTime := time.Now()
 		finalStatus := models.RunStatusCompleted
-		executor.RunWorkflow(context.Background(), ast, keys, runID, func(event executor.ExecutionEvent) {
+		executor.RunWorkflow(context.Background(), ast, keys, runID, workflow.UserID, func(event executor.ExecutionEvent) {
 			event.Timestamp = time.Since(startTime).Milliseconds()
 			events = append(events, event)
 			hub.Global.Publish(runID, event)

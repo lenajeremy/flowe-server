@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"workflow-ai/server/internal/auth"
 	"workflow-ai/server/internal/database/models"
 
 	"github.com/gin-gonic/gin"
@@ -59,17 +60,16 @@ func oauthRedirectURI(provider string) string {
 
 // ── Current user ──────────────────────────────────────────────
 
-// currentUserID resolves the user owning integration connections.
-// Single seam for multi-user support: when auth lands, read the user from
-// the session/token here — the schema and flows are already per-user.
-func currentUserID(_ *gin.Context) string {
-	return models.DefaultUserID
+// currentUserID resolves the session user set by the RequireAuth middleware.
+func currentUserID(c *gin.Context) string {
+	return auth.UserID(c)
 }
 
 // ── CSRF state (in-memory, single instance) ───────────────────
 
 type oauthStateEntry struct {
 	userID  string
+	origin  string // opener origin for the popup's postMessage target
 	expires time.Time
 }
 
@@ -78,7 +78,7 @@ var (
 	oauthStates   = map[string]oauthStateEntry{}
 )
 
-func newOAuthState(userID string) string {
+func newOAuthState(userID, origin string) string {
 	b := make([]byte, 16)
 	_, _ = rand.Read(b)
 	s := hex.EncodeToString(b)
@@ -89,20 +89,31 @@ func newOAuthState(userID string) string {
 			delete(oauthStates, k)
 		}
 	}
-	oauthStates[s] = oauthStateEntry{userID: userID, expires: time.Now().Add(10 * time.Minute)}
+	oauthStates[s] = oauthStateEntry{userID: userID, origin: origin, expires: time.Now().Add(10 * time.Minute)}
 	return s
 }
 
-// consumeOAuthState validates the state and returns the user who started the flow.
-func consumeOAuthState(s string) (string, bool) {
+// consumeOAuthState validates the state and returns the user and opener
+// origin that started the flow.
+func consumeOAuthState(s string) (userID, origin string, ok bool) {
 	oauthStatesMu.Lock()
 	defer oauthStatesMu.Unlock()
-	e, ok := oauthStates[s]
+	e, found := oauthStates[s]
 	delete(oauthStates, s)
-	if !ok || time.Now().After(e.expires) {
-		return "", false
+	if !found || time.Now().After(e.expires) {
+		return "", "", false
 	}
-	return e.userID, true
+	return e.userID, e.origin, true
+}
+
+// openerOrigin extracts the validated ?origin= param the frontend appends
+// when opening an OAuth popup ("" when absent or not allowed).
+func openerOrigin(c *gin.Context) string {
+	origin := strings.TrimRight(c.Query("origin"), "/")
+	if origin != "" && auth.OriginAllowed(origin) {
+		return origin
+	}
+	return ""
 }
 
 // ── Handlers ──────────────────────────────────────────────────
@@ -153,7 +164,7 @@ func (h *WorkflowHandler) ConnectIntegration(c *gin.Context) {
 	q.Set("client_id", clientID)
 	q.Set("redirect_uri", oauthRedirectURI(prov.name))
 	q.Set("response_type", "code")
-	q.Set("state", newOAuthState(currentUserID(c)))
+	q.Set("state", newOAuthState(currentUserID(c), openerOrigin(c)))
 	for k, vs := range prov.extraAuthQ {
 		for _, v := range vs {
 			q.Set(k, v)
@@ -170,18 +181,18 @@ func (h *WorkflowHandler) CallbackIntegration(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "unknown provider"})
 		return
 	}
+	userID, openerOrig, stateOK := consumeOAuthState(c.Query("state"))
 	if errParam := c.Query("error"); errParam != "" {
-		oauthResultPage(c, provider, false, errParam)
+		oauthResultPage(c, provider, openerOrig, false, errParam)
 		return
 	}
-	userID, stateOK := consumeOAuthState(c.Query("state"))
 	if !stateOK {
-		oauthResultPage(c, provider, false, "invalid or expired state — try connecting again")
+		oauthResultPage(c, provider, openerOrig, false, "invalid or expired state — try connecting again")
 		return
 	}
 	code := c.Query("code")
 	if code == "" {
-		oauthResultPage(c, provider, false, "provider returned no code")
+		oauthResultPage(c, provider, openerOrig, false, "provider returned no code")
 		return
 	}
 
@@ -196,7 +207,7 @@ func (h *WorkflowHandler) CallbackIntegration(c *gin.Context) {
 		conn, err = exchangeLinearCode(code)
 	}
 	if err != nil {
-		oauthResultPage(c, provider, false, err.Error())
+		oauthResultPage(c, provider, openerOrig, false, err.Error())
 		return
 	}
 	conn.UserID = userID
@@ -206,10 +217,10 @@ func (h *WorkflowHandler) CallbackIntegration(c *gin.Context) {
 	// insert, and dead tokens shouldn't linger in the table anyway.
 	h.db.DB.Unscoped().Where("user_id = ? AND provider = ?", userID, provider).Delete(&models.IntegrationConnection{})
 	if err := h.db.DB.Create(conn).Error; err != nil {
-		oauthResultPage(c, provider, false, "failed to store connection")
+		oauthResultPage(c, provider, openerOrig, false, "failed to store connection")
 		return
 	}
-	oauthResultPage(c, provider, true, "")
+	oauthResultPage(c, provider, openerOrig, true, "")
 }
 
 // DisconnectIntegration removes the current user's connection for a provider.
@@ -509,7 +520,9 @@ func doOAuthRequest(req *http.Request) ([]byte, error) {
 }
 
 // oauthResultPage notifies the opener window and closes the popup.
-func oauthResultPage(c *gin.Context, provider string, ok bool, errMsg string) {
+// targetOrigin is the opener origin captured at connect time; empty falls
+// back to the configured frontend URL.
+func oauthResultPage(c *gin.Context, provider, targetOrigin string, ok bool, errMsg string) {
 	status := "connected"
 	detail := "You can close this window."
 	if !ok {
@@ -522,11 +535,15 @@ func oauthResultPage(c *gin.Context, provider string, ok bool, errMsg string) {
 		"status":   status,
 		"error":    errMsg,
 	})
+	if targetOrigin == "" {
+		targetOrigin = frontendURL()
+	}
+	target, _ := json.Marshal(targetOrigin)
 	html := `<!doctype html><html><body style="font-family:system-ui;background:#0D0D11;color:#fff;display:flex;align-items:center;justify-content:center;height:100vh;margin:0">
 <div style="text-align:center"><p style="font-size:15px;text-transform:capitalize">` + provider + ` ` + status + `</p>
 <p style="font-size:12px;color:#667179;max-width:420px">` + detail + `</p></div>
 <script>
-if (window.opener) { window.opener.postMessage(` + string(payload) + `, '*'); setTimeout(() => window.close(), 800); }
+if (window.opener) { window.opener.postMessage(` + string(payload) + `, ` + string(target) + `); setTimeout(() => window.close(), 800); }
 </script></body></html>`
 	c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(html))
 }

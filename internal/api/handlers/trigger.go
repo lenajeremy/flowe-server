@@ -39,10 +39,11 @@ func (h *WorkflowHandler) TriggerWorkflow(c *gin.Context) {
 	now := time.Now()
 	h.db.DB.Model(&apiKey).Update("last_used_at", now)
 
-	// Get workflow
+	// Get workflow — the key must belong to the workflow's owner (404, not
+	// 403, so foreign workflow IDs are indistinguishable from missing ones).
 	workflowID := c.Param("workflowId")
 	var workflow models.Workflow
-	if err := h.db.DB.First(&workflow, "id = ?", workflowID).Error; err != nil {
+	if err := h.db.DB.First(&workflow, "id = ?", workflowID).Error; err != nil || workflow.UserID != apiKey.UserID {
 		c.JSON(http.StatusNotFound, gin.H{"error": "workflow not found"})
 		return
 	}
@@ -56,6 +57,7 @@ func (h *WorkflowHandler) TriggerWorkflow(c *gin.Context) {
 
 	// Create run record
 	run := models.WorkflowRun{
+		UserID:       workflow.UserID,
 		WorkflowID:   workflowID,
 		WorkflowName: workflow.Name,
 		Status:       models.RunStatusRunning,
@@ -93,7 +95,7 @@ func (h *WorkflowHandler) TriggerWorkflow(c *gin.Context) {
 
 		go func() {
 			defer close(doneCh)
-			executor.RunWorkflow(context.Background(), ast, keys, runID, func(event executor.ExecutionEvent) {
+			executor.RunWorkflow(context.Background(), ast, keys, runID, workflow.UserID, func(event executor.ExecutionEvent) {
 				event.Timestamp = time.Since(startTime).Milliseconds()
 				events = append(events, event)
 				hub.Global.Publish(runID, event)

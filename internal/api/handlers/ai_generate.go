@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"strings"
@@ -19,10 +20,125 @@ import (
 
 type aiGenerateRequest struct {
 	Prompt       string `json:"prompt"`
+	Model        string `json:"model,omitempty"`
 	CurrentNodes []any  `json:"currentNodes,omitempty"`
 	CurrentEdges []any  `json:"currentEdges,omitempty"`
 	// History is the prior conversation as [{role, content}] pairs (user/assistant text only).
 	History []map[string]any `json:"history,omitempty"`
+}
+
+// ── Chat models ─────────────────────────────────────────────────
+
+// chatProviderSpec describes how to reach one model provider. Anthropic uses
+// its native Messages API; the rest are driven through their OpenAI-compatible
+// chat-completions endpoints so one code path covers all of them.
+type chatProviderSpec struct {
+	Label  string
+	KeyEnv string
+	URL    string // OpenAI-compatible chat completions URL; empty for anthropic
+}
+
+var chatProviders = map[string]chatProviderSpec{
+	"anthropic": {Label: "Anthropic", KeyEnv: "ANTHROPIC_API_KEY"},
+	"openai":    {Label: "OpenAI", KeyEnv: "OPENAI_API_KEY", URL: "https://api.openai.com/v1/chat/completions"},
+	"google":    {Label: "Google", KeyEnv: "GEMINI_API_KEY", URL: "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"},
+	"xai":       {Label: "xAI", KeyEnv: "XAI_API_KEY", URL: "https://api.x.ai/v1/chat/completions"},
+}
+
+// chatModelSpec describes a model the builder chat can use. Thinking config
+// applies to Anthropic models only: Fable 5 / Opus 4.8 / Sonnet 4.6 take
+// adaptive thinking, while Haiku 4.5 only supports manual budgets (adaptive
+// returns a 400).
+type chatModelSpec struct {
+	ID            string         `json:"id"`
+	Name          string         `json:"name"`
+	Description   string         `json:"description"`
+	Provider      string         `json:"provider"`
+	ProviderLabel string         `json:"providerLabel"`
+	KeyEnv        string         `json:"keyEnv"`
+	Available     bool           `json:"available"`
+	Thinking      map[string]any `json:"-"`
+}
+
+var chatModels = []chatModelSpec{
+	{
+		ID: "claude-fable-5", Name: "Fable 5", Provider: "anthropic",
+		Description: "Most capable — complex multi-step workflows",
+		Thinking:    map[string]any{"type": "adaptive", "display": "summarized"},
+	},
+	{
+		ID: "claude-opus-4-8", Name: "Opus 4.8", Provider: "anthropic",
+		Description: "Deep reasoning for demanding builds",
+		Thinking:    map[string]any{"type": "adaptive", "display": "summarized"},
+	},
+	{
+		ID: "claude-sonnet-4-6", Name: "Sonnet 4.6", Provider: "anthropic",
+		Description: "Balanced speed and intelligence",
+		Thinking:    map[string]any{"type": "adaptive", "display": "summarized"},
+	},
+	{
+		ID: "claude-haiku-4-5-20251001", Name: "Haiku 4.5", Provider: "anthropic",
+		Description: "Fastest — quick edits and simple flows",
+		Thinking:    map[string]any{"type": "enabled", "budget_tokens": 8000},
+	},
+	{
+		ID: "gpt-5.5", Name: "GPT-5.5", Provider: "openai",
+		Description: "OpenAI's flagship — strong all-round reasoning",
+	},
+	{
+		ID: "gpt-5.4-mini", Name: "GPT-5.4 Mini", Provider: "openai",
+		Description: "Fast and affordable OpenAI model",
+	},
+	{
+		ID: "gemini-3.1-pro-preview", Name: "Gemini 3.1 Pro", Provider: "google",
+		Description: "Google's most capable model",
+	},
+	{
+		ID: "gemini-3.5-flash", Name: "Gemini 3.5 Flash", Provider: "google",
+		Description: "Fast Google model built for agentic tasks",
+	},
+	{
+		ID: "gemini-3-flash-preview", Name: "Gemini 3 Flash", Provider: "google",
+		Description: "Quick and capable — works on the free tier",
+	},
+	{
+		ID: "grok-4.5", Name: "Grok 4.5", Provider: "xai",
+		Description: "xAI's most intelligent model",
+	},
+	{
+		ID: "grok-4.3", Name: "Grok 4.3", Provider: "xai",
+		Description: "Faster, lower-cost Grok",
+	},
+}
+
+const defaultChatModel = "claude-sonnet-4-6"
+
+func resolveChatModel(id string) chatModelSpec {
+	var fallback chatModelSpec
+	for _, m := range chatModels {
+		if m.ID == id {
+			return m
+		}
+		if m.ID == defaultChatModel {
+			fallback = m
+		}
+	}
+	return fallback
+}
+
+// AIModels returns the models the builder chat may use, so the frontend
+// picker stays in sync with what the server accepts. Models whose provider
+// key is missing from the environment are flagged unavailable.
+func (h *WorkflowHandler) AIModels(c *gin.Context) {
+	out := make([]chatModelSpec, len(chatModels))
+	for i, m := range chatModels {
+		prov := chatProviders[m.Provider]
+		m.ProviderLabel = prov.Label
+		m.KeyEnv = prov.KeyEnv
+		m.Available = os.Getenv(prov.KeyEnv) != ""
+		out[i] = m
+	}
+	c.JSON(http.StatusOK, gin.H{"models": out, "default": defaultChatModel})
 }
 
 // ── HTTP client for Anthropic ───────────────────────────────────
@@ -171,7 +287,7 @@ func getAvailableNodesResult() string {
 			"type": "llm", "label": "LLM", "category": "AI",
 			"description": "Calls an AI language model (OpenAI or Anthropic). Reference upstream outputs in prompts using {{nodeId.output}} template syntax.",
 			"dataFields": map[string]any{
-				"model": "string – 'gpt-4o', 'gpt-4o-mini', 'claude-sonnet-4-6', 'claude-haiku-4-5-20251001'",
+				"model":        "string – 'gpt-4o', 'gpt-4o-mini', 'claude-sonnet-4-6', 'claude-haiku-4-5-20251001'",
 				"systemPrompt": "string – system instructions for the model",
 				"userPrompt":   "string – user message. Use {{nodeId.output}} to inject upstream data",
 				"temperature":  "number – 0 to 1, controls randomness (default 0.7)",
@@ -313,14 +429,15 @@ func (h *WorkflowHandler) AIGenerate(c *gin.Context) {
 		return
 	}
 
-	anthropicKey := os.Getenv("ANTHROPIC_API_KEY")
-	if anthropicKey == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "ANTHROPIC_API_KEY not configured on server"})
+	model := resolveChatModel(req.Model)
+	prov := chatProviders[model.Provider]
+	apiKey := os.Getenv(prov.KeyEnv)
+	if apiKey == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": prov.KeyEnv + " not configured on server"})
 		return
 	}
 
-	// Build user prompt
-	userPrompt := req.Prompt
+	slog.Info("ai generate", "requested", req.Model, "model", model.ID, "provider", model.Provider)
 
 	// Set up SSE
 	c.Header("Content-Type", "text/event-stream")
@@ -334,6 +451,52 @@ func (h *WorkflowHandler) AIGenerate(c *gin.Context) {
 		return
 	}
 
+	if model.Provider == "anthropic" {
+		h.runAnthropicChat(c, flusher, &req, model, apiKey)
+	} else {
+		h.runOpenAIChat(c, flusher, &req, model, apiKey, prov.URL)
+	}
+
+	sendSSE(c.Writer, flusher, "done", "")
+}
+
+// execChatTool runs one builder tool call and returns its result JSON.
+// create_workflow / update_workflow additionally stream their input to the
+// client so the canvas updates immediately.
+func (h *WorkflowHandler) execChatTool(c *gin.Context, flusher http.Flusher, req *aiGenerateRequest, name string, input any) string {
+	switch name {
+	case "get_available_nodes":
+		return getAvailableNodesResult()
+
+	case "create_workflow":
+		inputJSON, _ := json.Marshal(input)
+		sendSSE(c.Writer, flusher, "workflow", string(inputJSON))
+		return `{"status": "success", "message": "Workflow created on the canvas."}`
+
+	case "get_current_workflow":
+		workflowJSON, _ := json.Marshal(map[string]any{
+			"nodes": req.CurrentNodes,
+			"edges": req.CurrentEdges,
+		})
+		return string(workflowJSON)
+
+	case "update_workflow":
+		inputJSON, _ := json.Marshal(input)
+		sendSSE(c.Writer, flusher, "patch", string(inputJSON))
+		return `{"status":"success","message":"Patch applied to canvas."}`
+
+	case "list_integration_resources":
+		m, _ := input.(map[string]any)
+		provider, _ := m["provider"].(string)
+		return h.integrationResourcesForAI(currentUserID(c), provider)
+
+	default:
+		return fmt.Sprintf(`{"error": "unknown tool: %s"}`, name)
+	}
+}
+
+// runAnthropicChat drives the tool loop against the Anthropic Messages API.
+func (h *WorkflowHandler) runAnthropicChat(c *gin.Context, flusher http.Flusher, req *aiGenerateRequest, model chatModelSpec, apiKey string) {
 	allTools := []map[string]any{toolGetNodes, toolGetCurrentWorkflow, toolCreateWorkflow, toolUpdateWorkflow, toolListIntegrationResources}
 
 	// Build message history — prior turns as plain text role/content pairs
@@ -345,26 +508,23 @@ func (h *WorkflowHandler) AIGenerate(c *gin.Context) {
 			messages = append(messages, map[string]any{"role": role, "content": content})
 		}
 	}
-	messages = append(messages, map[string]any{"role": "user", "content": userPrompt})
+	messages = append(messages, map[string]any{"role": "user", "content": req.Prompt})
 
 	// Multi-turn tool loop: keep going until the model stops calling tools
 	for round := 0; round < 5; round++ {
 		sendSSE(c.Writer, flusher, "thinking", statusForRound(round))
 
 		body, _ := json.Marshal(map[string]any{
-			"model":      "claude-sonnet-4-6",
+			"model":      model.ID,
 			"max_tokens": 16000,
-			"thinking": map[string]any{
-				"type":    "adaptive",
-				"display": "summarized",
-			},
-			"stream":   true,
-			"system":   workflowSystemPrompt,
-			"tools":    allTools,
-			"messages": messages,
+			"thinking":   model.Thinking,
+			"stream":     true,
+			"system":     workflowSystemPrompt,
+			"tools":      allTools,
+			"messages":   messages,
 		})
 
-		resp, err := doAnthropicRequest(c, anthropicKey, body)
+		resp, err := doAnthropicRequest(c, apiKey, body)
 		if err != nil {
 			sendSSE(c.Writer, flusher, "error", fmt.Sprintf("Request failed: %v", err))
 			break
@@ -390,58 +550,105 @@ func (h *WorkflowHandler) AIGenerate(c *gin.Context) {
 		var toolResults []any
 		for _, block := range assistantContent {
 			bm, ok := block.(map[string]any)
-			if !ok {
-				continue
-			}
-			if bm["type"] != "tool_use" {
+			if !ok || bm["type"] != "tool_use" {
 				continue
 			}
 			toolName, _ := bm["name"].(string)
 			toolID, _ := bm["id"].(string)
 
-			var output string
-			switch toolName {
-			case "get_available_nodes":
-				output = getAvailableNodesResult()
-			case "create_workflow":
-				// Extract the input and send it as a workflow event
-				inputJSON, _ := json.Marshal(bm["input"])
-				sendSSE(c.Writer, flusher, "workflow", string(inputJSON))
-				output = `{"status": "success", "message": "Workflow created on the canvas."}`
-
-			case "get_current_workflow":
-				currentWorkflow := map[string]any{
-					"nodes": req.CurrentNodes,
-					"edges": req.CurrentEdges,
-				}
-				workflowJSON, _ := json.Marshal(currentWorkflow)
-				output = string(workflowJSON)
-
-			case "update_workflow":
-				inputJSON, _ := json.Marshal(bm["input"])
-				sendSSE(c.Writer, flusher, "patch", string(inputJSON))
-				output = `{"status":"success","message":"Patch applied to canvas."}`
-
-			case "list_integration_resources":
-				input, _ := bm["input"].(map[string]any)
-				provider, _ := input["provider"].(string)
-				output = h.integrationResourcesForAI(currentUserID(c), provider)
-
-			default:
-				output = fmt.Sprintf(`{"error": "unknown tool: %s"}`, toolName)
-			}
-
 			toolResults = append(toolResults, map[string]any{
 				"type":        "tool_result",
 				"tool_use_id": toolID,
-				"content":     output,
+				"content":     h.execChatTool(c, flusher, req, toolName, bm["input"]),
 			})
 		}
 
 		messages = append(messages, map[string]any{"role": "user", "content": toolResults})
 	}
+}
 
-	sendSSE(c.Writer, flusher, "done", "")
+// runOpenAIChat drives the same tool loop against an OpenAI-compatible
+// chat-completions endpoint (OpenAI, Gemini, xAI).
+func (h *WorkflowHandler) runOpenAIChat(c *gin.Context, flusher http.Flusher, req *aiGenerateRequest, model chatModelSpec, apiKey, url string) {
+	messages := []map[string]any{{"role": "system", "content": workflowSystemPrompt}}
+	for _, h := range req.History {
+		role, _ := h["role"].(string)
+		content, _ := h["content"].(string)
+		if (role == "user" || role == "assistant") && content != "" {
+			messages = append(messages, map[string]any{"role": role, "content": content})
+		}
+	}
+	messages = append(messages, map[string]any{"role": "user", "content": req.Prompt})
+
+	for round := 0; round < 5; round++ {
+		sendSSE(c.Writer, flusher, "thinking", statusForRound(round))
+
+		body, _ := json.Marshal(map[string]any{
+			"model":    model.ID,
+			"stream":   true,
+			"messages": messages,
+			"tools":    openAIToolDefs(),
+		})
+
+		resp, err := doOpenAIRequest(c, url, apiKey, body)
+		if err != nil {
+			sendSSE(c.Writer, flusher, "error", fmt.Sprintf("Request failed: %v", err))
+			break
+		}
+
+		content, toolCalls, err := consumeOpenAIStream(c, resp, flusher)
+		resp.Body.Close()
+		if err != nil {
+			sendSSE(c.Writer, flusher, "error", fmt.Sprintf("Stream error: %v", err))
+			break
+		}
+
+		assistantMsg := map[string]any{"role": "assistant", "content": content}
+		if len(toolCalls) > 0 {
+			assistantMsg["tool_calls"] = toolCalls
+		}
+		messages = append(messages, assistantMsg)
+
+		if len(toolCalls) == 0 {
+			// Model is done — no more tool calls
+			break
+		}
+
+		for _, tc := range toolCalls {
+			fn, _ := tc["function"].(map[string]any)
+			name, _ := fn["name"].(string)
+			args, _ := fn["arguments"].(string)
+
+			var input any
+			if err := json.Unmarshal([]byte(args), &input); err != nil {
+				input = map[string]any{}
+			}
+
+			messages = append(messages, map[string]any{
+				"role":         "tool",
+				"tool_call_id": tc["id"],
+				"content":      h.execChatTool(c, flusher, req, name, input),
+			})
+		}
+	}
+}
+
+// openAIToolDefs converts the Anthropic-format tool definitions to the
+// OpenAI function-calling format.
+func openAIToolDefs() []map[string]any {
+	anthropicTools := []map[string]any{toolGetNodes, toolGetCurrentWorkflow, toolCreateWorkflow, toolUpdateWorkflow, toolListIntegrationResources}
+	out := make([]map[string]any, 0, len(anthropicTools))
+	for _, t := range anthropicTools {
+		out = append(out, map[string]any{
+			"type": "function",
+			"function": map[string]any{
+				"name":        t["name"],
+				"description": t["description"],
+				"parameters":  t["input_schema"],
+			},
+		})
+	}
+	return out
 }
 
 func statusForRound(round int) string {
@@ -556,6 +763,110 @@ func consumeStream(c *gin.Context, resp *http.Response, flusher http.Flusher) (s
 	return stopReason, contentBlocks, nil
 }
 
+// consumeOpenAIStream reads an OpenAI-compatible SSE stream, forwards text
+// (and reasoning, when the provider exposes it) to the client, and returns
+// the accumulated assistant text plus any tool calls.
+func consumeOpenAIStream(c *gin.Context, resp *http.Response, flusher http.Flusher) (string, []map[string]any, error) {
+	if resp.StatusCode != http.StatusOK {
+		raw, _ := io.ReadAll(resp.Body)
+		return "", nil, fmt.Errorf("provider %d: %s", resp.StatusCode, truncate(string(raw), 500))
+	}
+
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+
+	var (
+		content string
+		calls   []map[string]any // ordered tool calls
+		byIndex = map[int]map[string]any{}
+	)
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		data := strings.TrimPrefix(line, "data: ")
+		if data == "[DONE]" {
+			break
+		}
+
+		var chunk openAIStreamChunk
+		if err := json.Unmarshal([]byte(data), &chunk); err != nil || len(chunk.Choices) == 0 {
+			continue
+		}
+		delta := chunk.Choices[0].Delta
+
+		if delta.Reasoning != "" {
+			sendSSE(c.Writer, flusher, "thinking", delta.Reasoning)
+		}
+		if delta.Content != "" {
+			sendSSE(c.Writer, flusher, "text", delta.Content)
+			content += delta.Content
+		}
+		for _, tc := range delta.ToolCalls {
+			// Match an existing call by ID when given (Gemini repeats complete
+			// entries without an index); otherwise by index (OpenAI streams
+			// continuation deltas with an index but no ID).
+			var call map[string]any
+			if tc.ID != "" {
+				for _, existing := range calls {
+					if existing["id"] == tc.ID {
+						call = existing
+						break
+					}
+				}
+			} else {
+				call = byIndex[tc.Index]
+			}
+			if call == nil {
+				call = map[string]any{
+					"id":       tc.ID,
+					"type":     "function",
+					"function": map[string]any{"name": "", "arguments": ""},
+				}
+				byIndex[tc.Index] = call
+				calls = append(calls, call)
+			}
+			fn := call["function"].(map[string]any)
+			if tc.Function.Name != "" {
+				fn["name"] = fn["name"].(string) + tc.Function.Name
+			}
+			if tc.Function.Arguments != "" {
+				fn["arguments"] = fn["arguments"].(string) + tc.Function.Arguments
+			}
+			// Gemini attaches thought signatures here and rejects follow-up
+			// requests that don't echo them back on the assistant message.
+			if len(tc.ExtraContent) > 0 {
+				var ec any
+				if json.Unmarshal(tc.ExtraContent, &ec) == nil {
+					call["extra_content"] = ec
+				}
+			}
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return content, calls, fmt.Errorf("scanner: %w", err)
+	}
+	return content, calls, nil
+}
+
+func doOpenAIRequest(c *gin.Context, url, apiKey string, body []byte) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(c.Request.Context(), http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+
+	resp, err := anthropicClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("request failed: %w", err)
+	}
+	return resp, nil
+}
+
 func doAnthropicRequest(c *gin.Context, apiKey string, body []byte) (*http.Response, error) {
 	req, err := http.NewRequestWithContext(c.Request.Context(), http.MethodPost,
 		"https://api.anthropic.com/v1/messages", bytes.NewReader(body))
@@ -591,12 +902,33 @@ func truncate(s string, max int) string {
 	return s[:max] + "..."
 }
 
+// ── OpenAI-compatible streaming types ───────────────────────────
+
+type openAIStreamChunk struct {
+	Choices []struct {
+		Delta struct {
+			Content   string `json:"content"`
+			Reasoning string `json:"reasoning_content"` // xAI-style; absent elsewhere
+			ToolCalls []struct {
+				Index        int             `json:"index"`
+				ID           string          `json:"id"`
+				ExtraContent json.RawMessage `json:"extra_content"` // Gemini thought signatures
+				Function     struct {
+					Name      string `json:"name"`
+					Arguments string `json:"arguments"`
+				} `json:"function"`
+			} `json:"tool_calls"`
+		} `json:"delta"`
+		FinishReason string `json:"finish_reason"`
+	} `json:"choices"`
+}
+
 // ── Anthropic streaming types ───────────────────────────────────
 
 type streamEvent struct {
-	Type         string        `json:"type"`
-	ContentBlock *streamBlock  `json:"content_block,omitempty"`
-	Delta        *streamDelta  `json:"delta,omitempty"`
+	Type         string       `json:"type"`
+	ContentBlock *streamBlock `json:"content_block,omitempty"`
+	Delta        *streamDelta `json:"delta,omitempty"`
 }
 
 type streamBlock struct {

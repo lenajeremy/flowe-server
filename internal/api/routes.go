@@ -4,6 +4,7 @@ import (
 	"net/http"
 
 	"workflow-ai/server/internal/api/handlers"
+	"workflow-ai/server/internal/auth"
 	"workflow-ai/server/internal/database"
 
 	"github.com/gin-gonic/gin"
@@ -23,7 +24,41 @@ func InitServer(port int, db *database.DBClient, rdb *redis.Client) {
 	})
 
 	wh := handlers.NewWorkflowHandler(db, rdb)
-	api := r.Group("/api")
+
+	// Auth — public by nature (they establish the session)
+	authGroup := r.Group("/api/auth")
+	{
+		authGroup.POST("/email/start", wh.AuthEmailStart)
+		authGroup.POST("/email/verify", wh.AuthEmailVerify)
+		authGroup.GET("/google/connect", wh.AuthGoogleConnect)
+		authGroup.GET("/google/callback", wh.AuthGoogleCallback)
+		authGroup.GET("/me", wh.AuthMe)
+		authGroup.POST("/logout", wh.AuthLogout)
+	}
+
+	// Public endpoints: reachable without a session.
+	// - webhooks + trigger authenticate by token / API key
+	// - runs + approve/reject are capability URLs (unguessable UUIDv4 run IDs)
+	//   because approval emails link non-users straight to /run/<id>
+	// - the integrations OAuth callback arrives via provider redirect with no
+	//   cookie guarantee; its CSRF state (bound to the initiating user) is the guard
+	public := r.Group("/api")
+	{
+		public.GET("/runs/:id", wh.GetRun)
+		public.GET("/runs/:id/stream", wh.StreamRun)
+		public.POST("/runs/:runId/node/:nodeId/approve", wh.ApproveRun)
+		public.POST("/runs/:runId/node/:nodeId/reject", wh.RejectRun)
+
+		public.POST("/trigger/:workflowId", wh.TriggerWorkflow)
+
+		public.GET("/webhooks/:token", wh.WebhookInfo)
+		public.POST("/webhooks/:token", wh.ReceiveWebhook)
+
+		public.GET("/integrations/:provider/callback", wh.CallbackIntegration)
+	}
+
+	// Everything else requires a session.
+	api := r.Group("/api", auth.RequireAuth(rdb))
 	{
 		api.POST("/run", wh.Run)
 
@@ -38,24 +73,15 @@ func InitServer(port int, db *database.DBClient, rdb *redis.Client) {
 		api.GET("/workflows/:id/events", wh.WorkflowEvents)
 		api.GET("/workflows/:id/runs/active", wh.GetActiveRun)
 		api.GET("/workflows/:id/runs", wh.ListRuns)
-		api.GET("/runs/:id", wh.GetRun)
-		api.GET("/runs/:id/stream", wh.StreamRun)
-		api.POST("/runs/:runId/node/:nodeId/approve", wh.ApproveRun)
-		api.POST("/runs/:runId/node/:nodeId/reject", wh.RejectRun)
-
-		// Programmatic trigger
-		api.POST("/trigger/:workflowId", wh.TriggerWorkflow)
 
 		// API keys
 		api.GET("/apikeys", wh.ListApiKeys)
 		api.POST("/apikeys", wh.CreateApiKey)
 		api.DELETE("/apikeys/:id", wh.DeleteApiKey)
 
-		// Webhook triggers
+		// Webhook trigger management
 		api.GET("/workflows/:id/webhook", wh.GetWebhook)
 		api.DELETE("/workflows/:id/webhook", wh.DeleteWebhook)
-		api.GET("/webhooks/:token", wh.WebhookInfo)
-		api.POST("/webhooks/:token", wh.ReceiveWebhook)
 
 		// Scheduled triggers
 		api.GET("/workflows/:id/schedule", wh.GetSchedule)
@@ -64,6 +90,7 @@ func InitServer(port int, db *database.DBClient, rdb *redis.Client) {
 
 		// AI workflow generation
 		api.POST("/ai/generate-workflow", wh.AIGenerate)
+		api.GET("/ai/models", wh.AIModels)
 
 		// AI chat history per workflow
 		api.GET("/workflows/:id/chat", wh.GetWorkflowChat)
@@ -77,7 +104,6 @@ func InitServer(port int, db *database.DBClient, rdb *redis.Client) {
 		// Integration OAuth connections (Notion, Linear)
 		api.GET("/integrations", wh.ListIntegrations)
 		api.GET("/integrations/:provider/connect", wh.ConnectIntegration)
-		api.GET("/integrations/:provider/callback", wh.CallbackIntegration)
 		api.GET("/integrations/:provider/resources", wh.IntegrationResources)
 		api.DELETE("/integrations/:provider", wh.DisconnectIntegration)
 	}

@@ -11,6 +11,9 @@ import (
 // GET /api/workflows/:id/versions
 func (h *WorkflowHandler) ListVersions(c *gin.Context) {
 	workflowID := c.Param("id")
+	if _, ok := h.loadOwnedWorkflow(c, workflowID); !ok {
+		return
+	}
 	var versions []models.WorkflowVersion
 	if err := h.db.DB.Where("workflow_id = ?", workflowID).Order("version DESC").Find(&versions).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -23,9 +26,8 @@ func (h *WorkflowHandler) ListVersions(c *gin.Context) {
 func (h *WorkflowHandler) SaveVersion(c *gin.Context) {
 	workflowID := c.Param("id")
 
-	var workflow models.Workflow
-	if err := h.db.DB.First(&workflow, "id = ?", workflowID).Error; err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "workflow not found"})
+	workflow, ok := h.loadOwnedWorkflow(c, workflowID)
+	if !ok {
 		return
 	}
 
@@ -43,6 +45,7 @@ func (h *WorkflowHandler) SaveVersion(c *gin.Context) {
 	}
 
 	version := models.WorkflowVersion{
+		UserID:     workflow.UserID,
 		WorkflowID: workflowID,
 		Version:    int(count) + 1,
 		Nodes:      workflow.Nodes,
@@ -60,6 +63,9 @@ func (h *WorkflowHandler) SaveVersion(c *gin.Context) {
 func (h *WorkflowHandler) RestoreVersion(c *gin.Context) {
 	workflowID := c.Param("id")
 	versionID := c.Param("versionId")
+	if _, ok := h.loadOwnedWorkflow(c, workflowID); !ok {
+		return
+	}
 
 	var version models.WorkflowVersion
 	if err := h.db.DB.Where("id = ? AND workflow_id = ?", versionID, workflowID).First(&version).Error; err != nil {

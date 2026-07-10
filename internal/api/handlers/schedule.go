@@ -128,7 +128,7 @@ func (h *WorkflowHandler) runWorkflowByID(workflowID string) {
 	ast := executor.WorkflowAST{Version: "1.0", Name: workflow.Name, Nodes: nodes, Edges: edges}
 	keys := executor.APIKeys{Anthropic: os.Getenv("ANTHROPIC_API_KEY"), OpenAI: os.Getenv("OPENAI_API_KEY"), Brave: os.Getenv("BRAVE_API_KEY"), Jina: os.Getenv("JINA_API_KEY")}
 
-	run := models.WorkflowRun{WorkflowID: workflowID, WorkflowName: workflow.Name, Status: models.RunStatusRunning}
+	run := models.WorkflowRun{UserID: workflow.UserID, WorkflowID: workflowID, WorkflowName: workflow.Name, Status: models.RunStatusRunning}
 	h.db.DB.Create(&run)
 	runID := run.ID.String()
 
@@ -138,7 +138,9 @@ func (h *WorkflowHandler) runWorkflowByID(workflowID string) {
 	var events []executor.ExecutionEvent
 	startTime := time.Now()
 	finalStatus := models.RunStatusCompleted
-	executor.RunWorkflow(context.Background(), ast, keys, runID, func(ev executor.ExecutionEvent) {
+	// The schedule fires with no request context — the loaded workflow's
+	// owner is what routes integration tokens to the right user.
+	executor.RunWorkflow(context.Background(), ast, keys, runID, workflow.UserID, func(ev executor.ExecutionEvent) {
 		ev.Timestamp = time.Since(startTime).Milliseconds()
 		events = append(events, ev)
 		hub.Global.Publish(runID, ev)
@@ -157,6 +159,9 @@ func (h *WorkflowHandler) runWorkflowByID(workflowID string) {
 // GET /api/workflows/:id/schedule
 func (h *WorkflowHandler) GetSchedule(c *gin.Context) {
 	workflowID := c.Param("id")
+	if _, ok := h.loadOwnedWorkflow(c, workflowID); !ok {
+		return
+	}
 	var sched models.ScheduledTrigger
 	if err := h.db.DB.Where("workflow_id = ?", workflowID).First(&sched).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "no schedule"})
@@ -168,6 +173,10 @@ func (h *WorkflowHandler) GetSchedule(c *gin.Context) {
 // POST /api/workflows/:id/schedule
 func (h *WorkflowHandler) SetSchedule(c *gin.Context) {
 	workflowID := c.Param("id")
+	wf, ok := h.loadOwnedWorkflow(c, workflowID)
+	if !ok {
+		return
+	}
 	var body struct {
 		Frequency  string `json:"frequency"`
 		RunTime    string `json:"run_time"`
@@ -208,6 +217,7 @@ func (h *WorkflowHandler) SetSchedule(c *gin.Context) {
 	var sched models.ScheduledTrigger
 	if err := h.db.DB.Where("workflow_id = ?", workflowID).First(&sched).Error; err != nil {
 		sched = models.ScheduledTrigger{
+			UserID:     wf.UserID,
 			WorkflowID: workflowID,
 			Frequency:  body.Frequency,
 			RunTime:    body.RunTime,
@@ -237,6 +247,9 @@ func (h *WorkflowHandler) SetSchedule(c *gin.Context) {
 // DELETE /api/workflows/:id/schedule
 func (h *WorkflowHandler) DeleteSchedule(c *gin.Context) {
 	workflowID := c.Param("id")
+	if _, ok := h.loadOwnedWorkflow(c, workflowID); !ok {
+		return
+	}
 	h.db.DB.Where("workflow_id = ?", workflowID).Delete(&models.ScheduledTrigger{})
 	c.JSON(http.StatusOK, gin.H{"status": "deleted"})
 }

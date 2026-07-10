@@ -19,9 +19,10 @@ import (
 	"github.com/resend/resend-go/v2"
 )
 
-// IntegrationTokenLookup resolves a stored OAuth token for a provider
-// (notion, linear). Set by main.go; used when a node has no manual token.
-var IntegrationTokenLookup func(provider string) string
+// IntegrationTokenLookup resolves the workflow owner's stored OAuth token
+// for a provider (notion, linear). Set by main.go; used when a node has no
+// manual token.
+var IntegrationTokenLookup func(userID, provider string) string
 
 // ── Approval channels ──────────────────────────────────────────
 
@@ -384,7 +385,7 @@ func topoSort(nodes []WorkflowASTNode, edges []WorkflowASTEdge) []string {
 
 // ── Execute single node ────────────────────────────────────────
 
-func executeNode(ctx context.Context, node WorkflowASTNode, outputs map[string]string, edges []WorkflowASTEdge, keys APIKeys, runID string, emit func(ExecutionEvent)) (string, error) {
+func executeNode(ctx context.Context, node WorkflowASTNode, outputs map[string]string, edges []WorkflowASTEdge, keys APIKeys, runID, ownerID string, emit func(ExecutionEvent)) (string, error) {
 	d := node.Data
 	switch d.NodeType {
 	case NodeTypeTextInput:
@@ -639,7 +640,7 @@ func executeNode(ctx context.Context, node WorkflowASTNode, outputs map[string]s
 	case NodeTypeNotion:
 		token := substituteTemplates(d.IntegrationToken, outputs)
 		if token == "" && IntegrationTokenLookup != nil {
-			token = IntegrationTokenLookup("notion")
+			token = IntegrationTokenLookup(ownerID, "notion")
 		}
 		if token == "" {
 			return "", fmt.Errorf("Notion is not connected — use Connect Notion in the node settings")
@@ -665,7 +666,7 @@ func executeNode(ctx context.Context, node WorkflowASTNode, outputs map[string]s
 	case NodeTypeLinear:
 		token := substituteTemplates(d.IntegrationToken, outputs)
 		if token == "" && IntegrationTokenLookup != nil {
-			token = IntegrationTokenLookup("linear")
+			token = IntegrationTokenLookup(ownerID, "linear")
 		}
 		if token == "" {
 			return "", fmt.Errorf("Linear is not connected — use Connect Linear in the node settings")
@@ -782,7 +783,9 @@ func extractLoopItems(input, field string) []string {
 
 // ── Run workflow ──────────────────────────────────────────────
 
-func RunWorkflow(ctx context.Context, workflow WorkflowAST, keys APIKeys, runID string, emit EmitFn) {
+// RunWorkflow executes a workflow AST. ownerID is the workflow owner's user
+// ID, used to resolve their integration connections (OAuth tokens).
+func RunWorkflow(ctx context.Context, workflow WorkflowAST, keys APIKeys, runID, ownerID string, emit EmitFn) {
 	start := time.Now()
 
 	mk := func(t ExecutionEventType, node *WorkflowASTNode, output *string, msg string) ExecutionEvent {
@@ -904,7 +907,7 @@ func RunWorkflow(ctx context.Context, workflow WorkflowAST, keys APIKeys, runID 
 					}
 					iterLabel := fmt.Sprintf("[%d/%d] %s", i+1, len(items), bodyNode.Data.Label)
 					emit(mk(EventNodeStarted, &bodyNode, nil, iterLabel))
-					out, err := executeNode(ctx, bodyNode, iterOutputs, edges, keys, runID, emit)
+					out, err := executeNode(ctx, bodyNode, iterOutputs, edges, keys, runID, ownerID, emit)
 					if err != nil {
 						emit(mk(EventNodeError, &bodyNode, nil, "Error: "+err.Error()))
 						lastOut = fmt.Sprintf(`{"error":%q}`, err.Error())
@@ -943,7 +946,7 @@ func RunWorkflow(ctx context.Context, workflow WorkflowAST, keys APIKeys, runID 
 		// ── Normal node execution ─────────────────────────────
 		emit(mk(EventNodeStarted, &node, nil, node.Data.Label))
 
-		out, err := executeNode(ctx, node, outputs, edges, keys, runID, emit)
+		out, err := executeNode(ctx, node, outputs, edges, keys, runID, ownerID, emit)
 		if err != nil {
 			emit(mk(EventNodeError, &node, nil, "Error: "+err.Error()))
 			emit(mk(EventWorkflowError, nil, nil, fmt.Sprintf("Workflow failed at %q", node.Data.Label)))

@@ -18,6 +18,9 @@ import (
 // The frontend subscribes to this so it can attach to a run stream before the run completes.
 func (h *WorkflowHandler) WorkflowEvents(c *gin.Context) {
 	workflowID := c.Param("id")
+	if _, ok := h.loadOwnedWorkflow(c, workflowID); !ok {
+		return
+	}
 
 	c.Header("Content-Type", "text/event-stream")
 	c.Header("Cache-Control", "no-cache")
@@ -51,6 +54,9 @@ func (h *WorkflowHandler) WorkflowEvents(c *gin.Context) {
 // GET /api/workflows/:id/runs/active — returns the currently-running run for a workflow (if any)
 func (h *WorkflowHandler) GetActiveRun(c *gin.Context) {
 	workflowID := c.Param("id")
+	if _, ok := h.loadOwnedWorkflow(c, workflowID); !ok {
+		return
+	}
 	var run models.WorkflowRun
 	err := h.db.DB.
 		Where("workflow_id = ? AND status = ?", workflowID, models.RunStatusRunning).
@@ -66,6 +72,9 @@ func (h *WorkflowHandler) GetActiveRun(c *gin.Context) {
 // GET /api/workflows/:id/runs
 func (h *WorkflowHandler) ListRuns(c *gin.Context) {
 	workflowID := c.Param("id")
+	if _, ok := h.loadOwnedWorkflow(c, workflowID); !ok {
+		return
+	}
 	var runs []models.WorkflowRun
 	if err := h.db.DB.Where("workflow_id = ?", workflowID).Order("created_at DESC").Limit(50).Find(&runs).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
