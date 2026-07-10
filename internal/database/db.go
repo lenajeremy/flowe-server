@@ -35,6 +35,16 @@ func NewDBClient() (*DBClient, error) {
 
 func (c *DBClient) Setup() error {
 	slog.Info("running database migrations")
+	// Early builds keyed integration connections by provider alone; the index
+	// must go before AutoMigrate adds the per-user composite one.
+	if c.DB.Migrator().HasIndex(&models.IntegrationConnection{}, "idx_integration_connections_provider") {
+		_ = c.DB.Migrator().DropIndex(&models.IntegrationConnection{}, "idx_integration_connections_provider")
+	}
+	// Purge soft-deleted connections — they still occupy the unique index and
+	// block reconnects (early builds soft-deleted on disconnect).
+	if c.DB.Migrator().HasTable(&models.IntegrationConnection{}) {
+		c.DB.Unscoped().Where("deleted_at IS NOT NULL").Delete(&models.IntegrationConnection{})
+	}
 	return c.DB.AutoMigrate(
 		&models.WorkflowRun{},
 		&models.Workflow{},
@@ -43,5 +53,6 @@ func (c *DBClient) Setup() error {
 		&models.WebhookTrigger{},
 		&models.ScheduledTrigger{},
 		&models.WorkflowChat{},
+		&models.IntegrationConnection{},
 	)
 }

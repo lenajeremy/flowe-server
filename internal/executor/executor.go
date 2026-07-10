@@ -17,11 +17,11 @@ import (
 	"time"
 
 	"github.com/resend/resend-go/v2"
-	"workflow-ai/server/internal/n8n"
 )
 
-// N8NClient is set by main.go after the n8n service becomes available.
-var N8NClient *n8n.Client
+// IntegrationTokenLookup resolves a stored OAuth token for a provider
+// (notion, linear). Set by main.go; used when a node has no manual token.
+var IntegrationTokenLookup func(provider string) string
 
 // ── Approval channels ──────────────────────────────────────────
 
@@ -177,7 +177,9 @@ type openAIImageURL struct {
 }
 type openAIResponse struct {
 	Choices []struct {
-		Message struct{ Content string `json:"content"` } `json:"message"`
+		Message struct {
+			Content string `json:"content"`
+		} `json:"message"`
 	} `json:"choices"`
 }
 
@@ -635,65 +637,57 @@ func executeNode(ctx context.Context, node WorkflowASTNode, outputs map[string]s
 		return `{"trigger":"scheduled","time":"` + time.Now().Format(time.RFC3339) + `"}`, nil
 
 	case NodeTypeNotion:
-		if N8NClient == nil {
-			return "", fmt.Errorf("n8n integration not configured")
-		}
 		token := substituteTemplates(d.IntegrationToken, outputs)
+		if token == "" && IntegrationTokenLookup != nil {
+			token = IntegrationTokenLookup("notion")
+		}
 		if token == "" {
-			return "", fmt.Errorf("Notion integration token not set")
+			return "", fmt.Errorf("Notion is not connected — use Connect Notion in the node settings")
 		}
-		op := d.IntegrationOp
-		var webhookPath string
-		payload := map[string]any{"token": token}
-		switch op {
+		switch d.IntegrationOp {
 		case "create_page":
-			webhookPath = "notion-create-page"
-			payload["databaseId"] = substituteTemplates(d.NotionDatabaseId, outputs)
-			payload["title"] = substituteTemplates(d.NotionTitle, outputs)
-			payload["content"] = substituteTemplates(d.NotionContent, outputs)
+			return notionCreatePage(ctx, token,
+				substituteTemplates(d.NotionDatabaseId, outputs),
+				substituteTemplates(d.NotionTitle, outputs),
+				substituteTemplates(d.NotionContent, outputs))
 		case "query_database":
-			webhookPath = "notion-query-database"
-			payload["databaseId"] = substituteTemplates(d.NotionDatabaseId, outputs)
-			payload["filter"] = substituteTemplates(d.NotionFilter, outputs)
+			return notionQueryDatabase(ctx, token,
+				substituteTemplates(d.NotionDatabaseId, outputs),
+				substituteTemplates(d.NotionFilter, outputs))
 		case "append_blocks":
-			webhookPath = "notion-append-blocks"
-			payload["pageId"] = substituteTemplates(d.NotionPageId, outputs)
-			payload["content"] = substituteTemplates(d.NotionContent, outputs)
+			return notionAppendBlocks(ctx, token,
+				substituteTemplates(d.NotionPageId, outputs),
+				substituteTemplates(d.NotionContent, outputs))
 		default:
-			return "", fmt.Errorf("unknown Notion operation: %s", op)
+			return "", fmt.Errorf("unknown Notion operation: %s", d.IntegrationOp)
 		}
-		return N8NClient.CallWebhook(ctx, webhookPath, payload)
 
 	case NodeTypeLinear:
-		if N8NClient == nil {
-			return "", fmt.Errorf("n8n integration not configured")
-		}
 		token := substituteTemplates(d.IntegrationToken, outputs)
+		if token == "" && IntegrationTokenLookup != nil {
+			token = IntegrationTokenLookup("linear")
+		}
 		if token == "" {
-			return "", fmt.Errorf("Linear API key not set")
+			return "", fmt.Errorf("Linear is not connected — use Connect Linear in the node settings")
 		}
-		op := d.IntegrationOp
-		var webhookPath string
-		payload := map[string]any{"token": token}
-		switch op {
+		switch d.IntegrationOp {
 		case "create_issue":
-			webhookPath = "linear-create-issue"
-			payload["teamId"] = substituteTemplates(d.LinearTeamId, outputs)
-			payload["title"] = substituteTemplates(d.LinearTitle, outputs)
-			payload["description"] = substituteTemplates(d.LinearDescription, outputs)
-			payload["priority"] = d.LinearPriority
+			return linearCreateIssue(ctx, token,
+				substituteTemplates(d.LinearTeamId, outputs),
+				substituteTemplates(d.LinearTitle, outputs),
+				substituteTemplates(d.LinearDescription, outputs),
+				d.LinearPriority)
 		case "get_issues":
-			webhookPath = "linear-get-issues"
-			payload["teamId"] = substituteTemplates(d.LinearTeamId, outputs)
-			payload["limit"] = d.LinearLimit
+			return linearGetIssues(ctx, token,
+				substituteTemplates(d.LinearTeamId, outputs),
+				d.LinearLimit)
 		case "create_comment":
-			webhookPath = "linear-create-comment"
-			payload["issueId"] = substituteTemplates(d.LinearIssueId, outputs)
-			payload["body"] = substituteTemplates(d.LinearCommentBody, outputs)
+			return linearCreateComment(ctx, token,
+				substituteTemplates(d.LinearIssueId, outputs),
+				substituteTemplates(d.LinearCommentBody, outputs))
 		default:
-			return "", fmt.Errorf("unknown Linear operation: %s", op)
+			return "", fmt.Errorf("unknown Linear operation: %s", d.IntegrationOp)
 		}
-		return N8NClient.CallWebhook(ctx, webhookPath, payload)
 	}
 	return "", fmt.Errorf("unknown node type: %s", d.NodeType)
 }

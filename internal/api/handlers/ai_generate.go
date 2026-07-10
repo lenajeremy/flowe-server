@@ -89,6 +89,21 @@ var toolUpdateWorkflow = map[string]any{
 	},
 }
 
+var toolListIntegrationResources = map[string]any{
+	"name":        "list_integration_resources",
+	"description": "Lists the user's connected integrations (Notion, Linear) and the concrete resources each exposes — Notion databases and pages, Linear teams — with their IDs and names. ALWAYS call this before configuring a notion or linear node so you can set real IDs (notionDatabaseId, notionPageId, linearTeamId) instead of placeholders. If a provider is not connected, leave the ID empty and tell the user to hit Connect in the node settings. Never ask the user to paste API tokens — OAuth connections are used automatically.",
+	"input_schema": map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"provider": map[string]any{
+				"type":        "string",
+				"enum":        []string{"notion", "linear"},
+				"description": "Which provider to inspect. Omit to list both.",
+			},
+		},
+	},
+}
+
 var toolCreateWorkflow = map[string]any{
 	"name":        "create_workflow",
 	"description": "Creates a workflow on the user's canvas. Call this with the nodes and edges arrays to build the workflow. The workflow will appear on the canvas immediately.",
@@ -212,13 +227,15 @@ func getAvailableNodesResult() string {
 		{
 			"type": "notion", "label": "Notion", "category": "Integrations",
 			"description": "Notion API: create pages, query databases, append blocks.",
-			"dataFields":  map[string]any{"integrationOp": "'create_page'|'query_database'|'append_blocks'", "integrationToken": "string (user fills in UI)", "notionDatabaseId": "string", "notionPageId": "string", "notionTitle": "string (templates ok)", "notionContent": "string (templates ok)", "notionFilter": "string – JSON filter"},
+			"dataFields":  map[string]any{"integrationOp": "'create_page'|'query_database'|'append_blocks'", "notionDatabaseId": "string – REAL id from list_integration_resources", "notionPageId": "string – REAL id from list_integration_resources", "notionTitle": "string (templates ok)", "notionContent": "string (templates ok)", "notionFilter": "string – JSON filter"},
+			"auth":        "OAuth connection used automatically — never set integrationToken; call list_integration_resources for real database/page IDs",
 			"handles":     map[string]any{"inputs": []string{"target (left)"}, "outputs": []string{"source (right)"}},
 		},
 		{
 			"type": "linear", "label": "Linear", "category": "Integrations",
 			"description": "Linear API: create issues, list issues, create comments.",
-			"dataFields":  map[string]any{"integrationOp": "'create_issue'|'get_issues'|'create_comment'", "integrationToken": "string (user fills in UI)", "linearTeamId": "string", "linearIssueId": "string", "linearTitle": "string", "linearDescription": "string", "linearPriority": "number 0-4", "linearCommentBody": "string", "linearLimit": "number"},
+			"dataFields":  map[string]any{"integrationOp": "'create_issue'|'get_issues'|'create_comment'", "linearTeamId": "string – REAL id from list_integration_resources", "linearIssueId": "string", "linearTitle": "string", "linearDescription": "string", "linearPriority": "number 0-4", "linearCommentBody": "string", "linearLimit": "number"},
+			"auth":        "OAuth connection used automatically — never set integrationToken; call list_integration_resources for real team IDs",
 			"handles":     map[string]any{"inputs": []string{"target (left)"}, "outputs": []string{"source (right)"}},
 		},
 		{
@@ -280,7 +297,12 @@ Rules:
 - Every node's data MUST include nodeType (matching the node type) and label.
 - For branch nodes, edges need sourceHandle "true" or "false".
 - Space new nodes ~250px apart from existing ones.
-- After calling create_workflow or update_workflow, explain what you did and what the user needs to configure.`
+- After calling create_workflow or update_workflow, explain what you did and what the user needs to configure.
+
+Integrations (notion, linear):
+- Auth is handled by OAuth connections — NEVER set integrationToken and never ask the user for API keys.
+- Before placing or editing a notion/linear node, call list_integration_resources and use the REAL resource IDs (notionDatabaseId, notionPageId, linearTeamId) from the response. Mention the resource by name when you explain the workflow.
+- If the provider is not connected, still build the node but leave the resource ID empty and tell the user to click Connect in the node's settings panel, then ask you to fill in the target resource.`
 
 // ── Handler ─────────────────────────────────────────────────────
 
@@ -312,7 +334,7 @@ func (h *WorkflowHandler) AIGenerate(c *gin.Context) {
 		return
 	}
 
-	allTools := []map[string]any{toolGetNodes, toolGetCurrentWorkflow, toolCreateWorkflow, toolUpdateWorkflow}
+	allTools := []map[string]any{toolGetNodes, toolGetCurrentWorkflow, toolCreateWorkflow, toolUpdateWorkflow, toolListIntegrationResources}
 
 	// Build message history — prior turns as plain text role/content pairs
 	var messages []map[string]any
@@ -333,8 +355,8 @@ func (h *WorkflowHandler) AIGenerate(c *gin.Context) {
 			"model":      "claude-sonnet-4-6",
 			"max_tokens": 16000,
 			"thinking": map[string]any{
-				"type":          "enabled",
-				"budget_tokens": 10000,
+				"type":    "adaptive",
+				"display": "summarized",
 			},
 			"stream":   true,
 			"system":   workflowSystemPrompt,
@@ -355,17 +377,9 @@ func (h *WorkflowHandler) AIGenerate(c *gin.Context) {
 			break
 		}
 
-		// Append assistant message — strip thinking blocks since the API
-		// requires a signature field on them that we don't capture from streaming.
-		var filteredContent []any
-		for _, block := range assistantContent {
-			bm, ok := block.(map[string]any)
-			if ok && bm["type"] == "thinking" {
-				continue
-			}
-			filteredContent = append(filteredContent, block)
-		}
-		messages = append(messages, map[string]any{"role": "assistant", "content": filteredContent})
+		// Append assistant message with thinking blocks intact — the API requires
+		// them (with their signatures) to be passed back unchanged on tool-use turns.
+		messages = append(messages, map[string]any{"role": "assistant", "content": assistantContent})
 
 		if stopReason != "tool_use" {
 			// Model is done — no more tool calls
@@ -407,6 +421,11 @@ func (h *WorkflowHandler) AIGenerate(c *gin.Context) {
 				inputJSON, _ := json.Marshal(bm["input"])
 				sendSSE(c.Writer, flusher, "patch", string(inputJSON))
 				output = `{"status":"success","message":"Patch applied to canvas."}`
+
+			case "list_integration_resources":
+				input, _ := bm["input"].(map[string]any)
+				provider, _ := input["provider"].(string)
+				output = h.integrationResourcesForAI(currentUserID(c), provider)
 
 			default:
 				output = fmt.Sprintf(`{"error": "unknown tool: %s"}`, toolName)
@@ -482,6 +501,10 @@ func consumeStream(c *gin.Context, resp *http.Response, flusher http.Flusher) (s
 				}
 				if event.ContentBlock.Type == "thinking" {
 					currentBlock["thinking"] = ""
+					currentBlock["signature"] = ""
+				}
+				if event.ContentBlock.Type == "redacted_thinking" {
+					currentBlock["data"] = event.ContentBlock.Data
 				}
 				if event.ContentBlock.Type == "text" {
 					currentBlock["text"] = ""
@@ -499,6 +522,8 @@ func consumeStream(c *gin.Context, resp *http.Response, flusher http.Flusher) (s
 					currentBlock["text"] = currentBlock["text"].(string) + event.Delta.Text
 				case "input_json_delta":
 					toolInputBuf.WriteString(event.Delta.PartialJSON)
+				case "signature_delta":
+					currentBlock["signature"] = currentBlock["signature"].(string) + event.Delta.Signature
 				}
 			}
 
@@ -575,15 +600,17 @@ type streamEvent struct {
 }
 
 type streamBlock struct {
-	Type string `json:"type"` // "thinking", "text", "tool_use"
+	Type string `json:"type"` // "thinking", "redacted_thinking", "text", "tool_use"
 	ID   string `json:"id,omitempty"`
 	Name string `json:"name,omitempty"`
+	Data string `json:"data,omitempty"` // redacted_thinking payload
 }
 
 type streamDelta struct {
 	Type        string `json:"type"`
 	Text        string `json:"text,omitempty"`
 	Thinking    string `json:"thinking,omitempty"`
+	Signature   string `json:"signature,omitempty"`
 	PartialJSON string `json:"partial_json,omitempty"`
 	StopReason  string `json:"stop_reason,omitempty"`
 }

@@ -114,9 +114,9 @@ func (h *WorkflowHandler) TriggerWorkflow(c *gin.Context) {
 
 		eventsJSON, _ := json.Marshal(events)
 		h.db.DB.Model(&run).Updates(map[string]interface{}{
-			"status":    status,
-			"error_msg": errMsg,
-			"events":    models.JSONB(eventsJSON),
+			"status":        status,
+			"error_message": errMsg,
+			"events":        models.JSONB(eventsJSON),
 		})
 		hub.Global.ClearBuffer(runID)
 	}()

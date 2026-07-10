@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 
 	"workflow-ai/server/internal/database/models"
@@ -16,7 +17,7 @@ func (h *WorkflowHandler) GetWorkflowChat(c *gin.Context) {
 
 	var chat models.WorkflowChat
 	err := h.db.DB.Where("workflow_id = ?", workflowID).First(&chat).Error
-	if err == gorm.ErrRecordNotFound {
+	if errors.Is(err, gorm.ErrRecordNotFound) {
 		c.JSON(http.StatusOK, gin.H{"messages": []any{}})
 		return
 	}
@@ -25,7 +26,7 @@ func (h *WorkflowHandler) GetWorkflowChat(c *gin.Context) {
 		return
 	}
 
-	var msgs []any
+	var msgs []interface{}
 	_ = json.Unmarshal(chat.Messages, &msgs)
 	c.JSON(http.StatusOK, gin.H{"messages": msgs})
 }
@@ -46,7 +47,7 @@ func (h *WorkflowHandler) SaveWorkflowChat(c *gin.Context) {
 
 	var chat models.WorkflowChat
 	err := h.db.DB.Where("workflow_id = ?", workflowID).First(&chat).Error
-	if err == gorm.ErrRecordNotFound {
+	if errors.Is(err, gorm.ErrRecordNotFound) {
 		chat = models.WorkflowChat{
 			WorkflowID: workflowID,
 			Messages:   raw,

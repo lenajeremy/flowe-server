@@ -73,6 +73,13 @@ func InitServer(port int, db *database.DBClient, rdb *redis.Client) {
 		api.GET("/workflows/:id/versions", wh.ListVersions)
 		api.POST("/workflows/:id/versions", wh.SaveVersion)
 		api.POST("/workflows/:id/versions/:versionId/restore", wh.RestoreVersion)
+
+		// Integration OAuth connections (Notion, Linear)
+		api.GET("/integrations", wh.ListIntegrations)
+		api.GET("/integrations/:provider/connect", wh.ConnectIntegration)
+		api.GET("/integrations/:provider/callback", wh.CallbackIntegration)
+		api.GET("/integrations/:provider/resources", wh.IntegrationResources)
+		api.DELETE("/integrations/:provider", wh.DisconnectIntegration)
 	}
 
 	wh.StartScheduler()

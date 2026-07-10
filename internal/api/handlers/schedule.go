@@ -121,7 +121,7 @@ func (h *WorkflowHandler) runWorkflowByID(workflowID string) {
 	}
 	if !hasScheduledNode {
 		slog.Warn("scheduler: workflow has no scheduledTrigger node, disabling schedule", "workflow_id", workflowID)
-		h.db.DB.Where("workflow_id = ?", workflowID).Updates(map[string]interface{}{"enabled": false})
+		h.db.DB.Model(&models.ScheduledTrigger{}).Where("workflow_id = ?", workflowID).Update("enabled", false)
 		return
 	}
 
