@@ -69,18 +69,33 @@ func (h *WorkflowHandler) GetActiveRun(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"run_id": run.ID.String()})
 }
 
+// runSummary is the run-history payload: status + timing only. The full
+// event log (JSONB, often large) is served by GetRun when a run is opened.
+type runSummary struct {
+	ID           string    `json:"id"`
+	WorkflowID   string    `json:"workflow_id"`
+	WorkflowName string    `json:"workflow_name"`
+	Status       string    `json:"status"`
+	ErrorMessage string    `json:"error_message,omitempty"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
+}
+
 // GET /api/workflows/:id/runs
 func (h *WorkflowHandler) ListRuns(c *gin.Context) {
 	workflowID := c.Param("id")
 	if _, ok := h.loadOwnedWorkflow(c, workflowID); !ok {
 		return
 	}
-	var runs []models.WorkflowRun
-	if err := h.db.DB.Where("workflow_id = ?", workflowID).Order("created_at DESC").Limit(50).Find(&runs).Error; err != nil {
+	summaries := []runSummary{}
+	if err := h.db.DB.Model(&models.WorkflowRun{}).
+		Select("id, workflow_id, workflow_name, status, error_message, created_at, updated_at").
+		Where("workflow_id = ?", workflowID).
+		Order("created_at DESC").Limit(50).Scan(&summaries).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	c.JSON(http.StatusOK, runs)
+	c.JSON(http.StatusOK, summaries)
 }
 
 // GET /api/runs/:id

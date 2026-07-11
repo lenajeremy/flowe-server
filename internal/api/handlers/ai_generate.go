@@ -207,14 +207,14 @@ var toolUpdateWorkflow = map[string]any{
 
 var toolListIntegrationResources = map[string]any{
 	"name":        "list_integration_resources",
-	"description": "Lists the user's connected integrations (Notion, Linear) and the concrete resources each exposes — Notion databases and pages, Linear teams — with their IDs and names. ALWAYS call this before configuring a notion or linear node so you can set real IDs (notionDatabaseId, notionPageId, linearTeamId) instead of placeholders. If a provider is not connected, leave the ID empty and tell the user to hit Connect in the node settings. Never ask the user to paste API tokens — OAuth connections are used automatically.",
+	"description": "Lists the user's connected integrations and the concrete resources each exposes — Notion databases/pages, Linear teams/projects, GitHub repos, GitLab projects, Gmail labels, Stripe prices, Shopify products — with their IDs and names. ALWAYS call this before configuring an integration node so you can set real IDs (notionDatabaseId, linearTeamId, githubRepo, gitlabProjectId, stripePriceId, …) instead of placeholders. If a provider is not connected, leave the ID empty and tell the user to hit Connect in the node settings. Never ask the user to paste API tokens — OAuth connections are used automatically.",
 	"input_schema": map[string]any{
 		"type": "object",
 		"properties": map[string]any{
 			"provider": map[string]any{
 				"type":        "string",
-				"enum":        []string{"notion", "linear"},
-				"description": "Which provider to inspect. Omit to list both.",
+				"enum":        []string{"notion", "linear", "github", "gitlab", "gmail", "stripe", "shopify"},
+				"description": "Which provider to inspect. Omit to list all.",
 			},
 		},
 	},
@@ -342,16 +342,51 @@ func getAvailableNodesResult() string {
 		},
 		{
 			"type": "notion", "label": "Notion", "category": "Integrations",
-			"description": "Notion API: create pages, query databases, append blocks.",
-			"dataFields":  map[string]any{"integrationOp": "'create_page'|'query_database'|'append_blocks'", "notionDatabaseId": "string – REAL id from list_integration_resources", "notionPageId": "string – REAL id from list_integration_resources", "notionTitle": "string (templates ok)", "notionContent": "string (templates ok)", "notionFilter": "string – JSON filter"},
+			"description": "Notion API: create/update pages, query databases, read page content, search, append blocks, add comments.",
+			"dataFields":  map[string]any{"integrationOp": "'create_page'|'query_database'|'append_blocks'|'update_page'|'get_page_content'|'search'|'add_comment'", "notionDatabaseId": "string – REAL id from list_integration_resources", "notionPageId": "string – REAL id from list_integration_resources", "notionTitle": "string (templates ok)", "notionContent": "string (templates ok)", "notionFilter": "string – JSON filter", "notionQuery": "string – search text", "notionProperties": "string – JSON object of page properties for update_page"},
 			"auth":        "OAuth connection used automatically — never set integrationToken; call list_integration_resources for real database/page IDs",
 			"handles":     map[string]any{"inputs": []string{"target (left)"}, "outputs": []string{"source (right)"}},
 		},
 		{
 			"type": "linear", "label": "Linear", "category": "Integrations",
-			"description": "Linear API: create issues, list issues, create comments.",
-			"dataFields":  map[string]any{"integrationOp": "'create_issue'|'get_issues'|'create_comment'", "linearTeamId": "string – REAL id from list_integration_resources", "linearIssueId": "string", "linearTitle": "string", "linearDescription": "string", "linearPriority": "number 0-4", "linearCommentBody": "string", "linearLimit": "number"},
-			"auth":        "OAuth connection used automatically — never set integrationToken; call list_integration_resources for real team IDs",
+			"description": "Linear API: create/update/get issues, search issues, list projects, create comments.",
+			"dataFields":  map[string]any{"integrationOp": "'create_issue'|'get_issues'|'create_comment'|'update_issue'|'search_issues'|'list_projects'|'get_issue'", "linearTeamId": "string – REAL id from list_integration_resources", "linearIssueId": "string", "linearTitle": "string", "linearDescription": "string", "linearPriority": "number 0-4", "linearCommentBody": "string", "linearLimit": "number", "linearStateId": "string – workflow state id for update_issue", "linearAssigneeId": "string", "linearQuery": "string – search text", "linearProjectId": "string – REAL id from list_integration_resources"},
+			"auth":        "OAuth connection used automatically — never set integrationToken; call list_integration_resources for real team/project IDs",
+			"handles":     map[string]any{"inputs": []string{"target (left)"}, "outputs": []string{"source (right)"}},
+		},
+		{
+			"type": "github", "label": "GitHub", "category": "Integrations",
+			"description": "GitHub API: create/list issues, comment on issues, list and inspect pull requests.",
+			"dataFields":  map[string]any{"integrationOp": "'create_issue'|'list_issues'|'create_comment'|'list_pull_requests'|'get_pull_request'", "githubRepo": "string – 'owner/name', REAL value from list_integration_resources", "githubTitle": "string (templates ok)", "githubBody": "string (templates ok)", "githubIssueNumber": "string – issue number for comments", "githubLabels": "string – comma-separated", "githubState": "'open'|'closed'|'all' (default open)", "githubLimit": "number (default 10)", "githubPrNumber": "string – PR number for get_pull_request"},
+			"auth":        "OAuth connection used automatically — never set integrationToken; call list_integration_resources for real repo names",
+			"handles":     map[string]any{"inputs": []string{"target (left)"}, "outputs": []string{"source (right)"}},
+		},
+		{
+			"type": "gitlab", "label": "GitLab", "category": "Integrations",
+			"description": "GitLab API: create/list issues, comment on issues, list and inspect merge requests.",
+			"dataFields":  map[string]any{"integrationOp": "'create_issue'|'list_issues'|'create_comment'|'list_merge_requests'|'get_merge_request'", "gitlabProjectId": "string – REAL id from list_integration_resources", "gitlabTitle": "string (templates ok)", "gitlabDescription": "string (templates ok)", "gitlabIssueIid": "string – issue iid for comments", "gitlabLabels": "string – comma-separated", "gitlabState": "'opened'|'closed'|'all'", "gitlabLimit": "number (default 10)", "gitlabMrIid": "string – MR iid for get_merge_request"},
+			"auth":        "OAuth connection used automatically — never set integrationToken; call list_integration_resources for real project IDs",
+			"handles":     map[string]any{"inputs": []string{"target (left)"}, "outputs": []string{"source (right)"}},
+		},
+		{
+			"type": "gmail", "label": "Gmail", "category": "Integrations",
+			"description": "Gmail API: send email from the user's own address, search/list messages, read a message, create drafts.",
+			"dataFields":  map[string]any{"integrationOp": "'send_email'|'list_messages'|'get_message'|'create_draft'", "gmailTo": "string (templates ok)", "gmailCc": "string", "gmailSubject": "string (templates ok)", "gmailBody": "string (templates ok)", "gmailQuery": "string – Gmail search syntax e.g. 'is:unread newer_than:1d'", "gmailMessageId": "string – for get_message", "gmailLimit": "number (default 10)"},
+			"auth":        "OAuth connection used automatically — never set integrationToken. Prefer gmail over the generic emailSend node when the user wants mail sent from their own Gmail address or wants to read their inbox.",
+			"handles":     map[string]any{"inputs": []string{"target (left)"}, "outputs": []string{"source (right)"}},
+		},
+		{
+			"type": "stripe", "label": "Stripe", "category": "Integrations",
+			"description": "Stripe API: list customers/payments/invoices, check balance, create payment links.",
+			"dataFields":  map[string]any{"integrationOp": "'list_customers'|'list_payments'|'list_invoices'|'get_balance'|'create_payment_link'", "stripeLimit": "number (default 10)", "stripeCustomerEmail": "string – optional filter for list_customers", "stripePriceId": "string – REAL id from list_integration_resources, required for create_payment_link", "stripeQuantity": "number (default 1)"},
+			"auth":        "OAuth connection used automatically — never set integrationToken; call list_integration_resources for real price IDs",
+			"handles":     map[string]any{"inputs": []string{"target (left)"}, "outputs": []string{"source (right)"}},
+		},
+		{
+			"type": "shopify", "label": "Shopify", "category": "Integrations",
+			"description": "Shopify Admin API: list/get orders, list/create products, list customers.",
+			"dataFields":  map[string]any{"integrationOp": "'list_orders'|'get_order'|'list_products'|'create_product'|'list_customers'", "shopifyOrderId": "string – for get_order", "shopifyLimit": "number (default 10)", "shopifyStatus": "'open'|'closed'|'any' (orders filter)", "shopifyTitle": "string – product title (templates ok)", "shopifyDescription": "string – product description (templates ok)", "shopifyPrice": "string – product price"},
+			"auth":        "OAuth connection used automatically — never set integrationToken. The connected shop domain is used automatically.",
 			"handles":     map[string]any{"inputs": []string{"target (left)"}, "outputs": []string{"source (right)"}},
 		},
 		{
@@ -415,10 +450,11 @@ Rules:
 - Space new nodes ~250px apart from existing ones.
 - After calling create_workflow or update_workflow, explain what you did and what the user needs to configure.
 
-Integrations (notion, linear):
+Integrations (notion, linear, github, gitlab, gmail, stripe, shopify):
 - Auth is handled by OAuth connections — NEVER set integrationToken and never ask the user for API keys.
-- Before placing or editing a notion/linear node, call list_integration_resources and use the REAL resource IDs (notionDatabaseId, notionPageId, linearTeamId) from the response. Mention the resource by name when you explain the workflow.
-- If the provider is not connected, still build the node but leave the resource ID empty and tell the user to click Connect in the node's settings panel, then ask you to fill in the target resource.`
+- Before placing or editing an integration node, call list_integration_resources and use the REAL resource IDs (notionDatabaseId, notionPageId, linearTeamId, linearProjectId, githubRepo, gitlabProjectId, stripePriceId) from the response. Mention the resource by name when you explain the workflow.
+- If the provider is not connected, still build the node but leave the resource ID empty and tell the user to click Connect in the node's settings panel, then ask you to fill in the target resource.
+- Prefer the gmail node over emailSend when the user wants mail sent from their own address or wants to read/search their inbox.`
 
 // ── Handler ─────────────────────────────────────────────────────
 

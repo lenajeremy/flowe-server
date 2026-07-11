@@ -293,7 +293,7 @@ func oauthRedirectBase() string {
 
 // GET /api/auth/google/callback
 func (h *WorkflowHandler) AuthGoogleCallback(c *gin.Context) {
-	_, openerOrig, stateOK := consumeOAuthState(c.Query("state"))
+	_, openerOrig, _, stateOK := consumeOAuthState(c.Query("state"))
 	if !stateOK {
 		authResultPage(c, openerOrig, false, "Sign-in session expired — please try again.")
 		return

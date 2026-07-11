@@ -2,11 +2,22 @@ package handlers
 
 import (
 	"net/http"
+	"time"
 
 	"workflow-ai/server/internal/database/models"
 
 	"github.com/gin-gonic/gin"
 )
+
+// versionSummary is the version-list payload: snapshot metadata only. The
+// node/edge JSONB of a snapshot is only ever applied server-side on restore.
+type versionSummary struct {
+	ID         string    `json:"id"`
+	WorkflowID string    `json:"workflow_id"`
+	Version    int       `json:"version"`
+	Name       string    `json:"name"`
+	CreatedAt  time.Time `json:"created_at"`
+}
 
 // GET /api/workflows/:id/versions
 func (h *WorkflowHandler) ListVersions(c *gin.Context) {
@@ -14,12 +25,15 @@ func (h *WorkflowHandler) ListVersions(c *gin.Context) {
 	if _, ok := h.loadOwnedWorkflow(c, workflowID); !ok {
 		return
 	}
-	var versions []models.WorkflowVersion
-	if err := h.db.DB.Where("workflow_id = ?", workflowID).Order("version DESC").Find(&versions).Error; err != nil {
+	summaries := []versionSummary{}
+	if err := h.db.DB.Model(&models.WorkflowVersion{}).
+		Select("id, workflow_id, version, name, created_at").
+		Where("workflow_id = ?", workflowID).
+		Order("version DESC").Scan(&summaries).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	c.JSON(http.StatusOK, versions)
+	c.JSON(http.StatusOK, summaries)
 }
 
 // POST /api/workflows/:id/versions  — snapshot current workflow state

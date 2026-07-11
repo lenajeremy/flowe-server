@@ -19,10 +19,11 @@ import (
 	"github.com/resend/resend-go/v2"
 )
 
-// IntegrationTokenLookup resolves the workflow owner's stored OAuth token
-// for a provider (notion, linear). Set by main.go; used when a node has no
-// manual token.
-var IntegrationTokenLookup func(userID, provider string) string
+// IntegrationCredsLookup resolves the workflow owner's stored OAuth
+// credentials for a provider. workspace is the tenant identifier where the
+// API needs one (e.g. the Shopify shop domain); empty otherwise. Set by
+// main.go; used when a node has no manual token.
+var IntegrationCredsLookup func(userID, provider string) (token, workspace string)
 
 // ── Approval channels ──────────────────────────────────────────
 
@@ -639,8 +640,8 @@ func executeNode(ctx context.Context, node WorkflowASTNode, outputs map[string]s
 
 	case NodeTypeNotion:
 		token := substituteTemplates(d.IntegrationToken, outputs)
-		if token == "" && IntegrationTokenLookup != nil {
-			token = IntegrationTokenLookup(ownerID, "notion")
+		if token == "" && IntegrationCredsLookup != nil {
+			token, _ = IntegrationCredsLookup(ownerID, "notion")
 		}
 		if token == "" {
 			return "", fmt.Errorf("Notion is not connected — use Connect Notion in the node settings")
@@ -659,14 +660,28 @@ func executeNode(ctx context.Context, node WorkflowASTNode, outputs map[string]s
 			return notionAppendBlocks(ctx, token,
 				substituteTemplates(d.NotionPageId, outputs),
 				substituteTemplates(d.NotionContent, outputs))
+		case "update_page":
+			return notionUpdatePage(ctx, token,
+				substituteTemplates(d.NotionPageId, outputs),
+				substituteTemplates(d.NotionProperties, outputs))
+		case "get_page_content":
+			return notionGetPageContent(ctx, token,
+				substituteTemplates(d.NotionPageId, outputs))
+		case "search":
+			return notionSearch(ctx, token,
+				substituteTemplates(d.NotionQuery, outputs))
+		case "add_comment":
+			return notionAddComment(ctx, token,
+				substituteTemplates(d.NotionPageId, outputs),
+				substituteTemplates(d.NotionContent, outputs))
 		default:
 			return "", fmt.Errorf("unknown Notion operation: %s", d.IntegrationOp)
 		}
 
 	case NodeTypeLinear:
 		token := substituteTemplates(d.IntegrationToken, outputs)
-		if token == "" && IntegrationTokenLookup != nil {
-			token = IntegrationTokenLookup(ownerID, "linear")
+		if token == "" && IntegrationCredsLookup != nil {
+			token, _ = IntegrationCredsLookup(ownerID, "linear")
 		}
 		if token == "" {
 			return "", fmt.Errorf("Linear is not connected — use Connect Linear in the node settings")
@@ -686,9 +701,81 @@ func executeNode(ctx context.Context, node WorkflowASTNode, outputs map[string]s
 			return linearCreateComment(ctx, token,
 				substituteTemplates(d.LinearIssueId, outputs),
 				substituteTemplates(d.LinearCommentBody, outputs))
+		case "update_issue":
+			return linearUpdateIssue(ctx, token, substituteTemplates(d.LinearIssueId, outputs), linearUpdateInput{
+				Title:       substituteTemplates(d.LinearTitle, outputs),
+				Description: substituteTemplates(d.LinearDescription, outputs),
+				Priority:    d.LinearPriority,
+				StateID:     substituteTemplates(d.LinearStateId, outputs),
+				AssigneeID:  substituteTemplates(d.LinearAssigneeId, outputs),
+				ProjectID:   substituteTemplates(d.LinearProjectId, outputs),
+			})
+		case "search_issues":
+			return linearSearchIssues(ctx, token,
+				substituteTemplates(d.LinearQuery, outputs),
+				d.LinearLimit)
+		case "list_projects":
+			return linearListProjects(ctx, token)
+		case "get_issue":
+			return linearGetIssue(ctx, token,
+				substituteTemplates(d.LinearIssueId, outputs))
 		default:
 			return "", fmt.Errorf("unknown Linear operation: %s", d.IntegrationOp)
 		}
+
+	case NodeTypeGithub:
+		token := substituteTemplates(d.IntegrationToken, outputs)
+		if token == "" && IntegrationCredsLookup != nil {
+			token, _ = IntegrationCredsLookup(ownerID, "github")
+		}
+		if token == "" {
+			return "", fmt.Errorf("GitHub is not connected — use Connect GitHub in the node settings")
+		}
+		return runGithub(ctx, token, d, outputs)
+
+	case NodeTypeGitlab:
+		token := substituteTemplates(d.IntegrationToken, outputs)
+		if token == "" && IntegrationCredsLookup != nil {
+			token, _ = IntegrationCredsLookup(ownerID, "gitlab")
+		}
+		if token == "" {
+			return "", fmt.Errorf("GitLab is not connected — use Connect GitLab in the node settings")
+		}
+		return runGitlab(ctx, token, d, outputs)
+
+	case NodeTypeGmail:
+		token := substituteTemplates(d.IntegrationToken, outputs)
+		if token == "" && IntegrationCredsLookup != nil {
+			token, _ = IntegrationCredsLookup(ownerID, "gmail")
+		}
+		if token == "" {
+			return "", fmt.Errorf("Gmail is not connected — use Connect Gmail in the node settings")
+		}
+		return runGmail(ctx, token, d, outputs)
+
+	case NodeTypeStripe:
+		token := substituteTemplates(d.IntegrationToken, outputs)
+		if token == "" && IntegrationCredsLookup != nil {
+			token, _ = IntegrationCredsLookup(ownerID, "stripe")
+		}
+		if token == "" {
+			return "", fmt.Errorf("Stripe is not connected — use Connect Stripe in the node settings")
+		}
+		return runStripe(ctx, token, d, outputs)
+
+	case NodeTypeShopify:
+		token := substituteTemplates(d.IntegrationToken, outputs)
+		var shop string
+		if token == "" && IntegrationCredsLookup != nil {
+			token, shop = IntegrationCredsLookup(ownerID, "shopify")
+		}
+		if token == "" {
+			return "", fmt.Errorf("Shopify is not connected — use Connect Shopify in the node settings")
+		}
+		if shop == "" {
+			return "", fmt.Errorf("Shopify shop domain is missing — reconnect the store")
+		}
+		return runShopify(ctx, token, shop, d, outputs)
 	}
 	return "", fmt.Errorf("unknown node type: %s", d.NodeType)
 }

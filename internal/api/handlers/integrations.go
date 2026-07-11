@@ -18,6 +18,7 @@ import (
 	"workflow-ai/server/internal/database/models"
 
 	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
 )
 
 // OAuth connections for third-party integrations (Notion, Linear).
@@ -48,7 +49,51 @@ var oauthProviders = map[string]oauthProvider{
 		secretEnv:    "LINEAR_CLIENT_SECRET",
 		extraAuthQ:   url.Values{"scope": {"read,write"}, "prompt": {"consent"}},
 	},
+	"github": {
+		name:         "github",
+		authorizeURL: "https://github.com/login/oauth/authorize",
+		clientIDEnv:  "GITHUB_CLIENT_ID",
+		secretEnv:    "GITHUB_CLIENT_SECRET",
+		extraAuthQ:   url.Values{"scope": {"repo"}},
+	},
+	"gitlab": {
+		name:         "gitlab",
+		authorizeURL: "https://gitlab.com/oauth/authorize",
+		clientIDEnv:  "GITLAB_CLIENT_ID",
+		secretEnv:    "GITLAB_CLIENT_SECRET",
+		extraAuthQ:   url.Values{"scope": {"api"}},
+	},
+	"gmail": {
+		name:         "gmail",
+		authorizeURL: "https://accounts.google.com/o/oauth2/v2/auth",
+		clientIDEnv:  "GOOGLE_CLIENT_ID", // Gmail reuses the Google sign-in app
+		secretEnv:    "GOOGLE_CLIENT_SECRET",
+		// access_type=offline + prompt=consent are required to receive a
+		// refresh token (Google only returns one on first consent otherwise).
+		extraAuthQ: url.Values{
+			"scope":       {"https://www.googleapis.com/auth/gmail.modify"},
+			"access_type": {"offline"},
+			"prompt":      {"consent"},
+		},
+	},
+	"stripe": {
+		name:         "stripe",
+		authorizeURL: "https://connect.stripe.com/oauth/authorize",
+		clientIDEnv:  "STRIPE_CLIENT_ID", // ca_… Connect client id
+		secretEnv:    "STRIPE_CLIENT_SECRET",
+		extraAuthQ:   url.Values{"scope": {"read_write"}},
+	},
+	// Shopify's authorize URL is per-shop, so ConnectIntegration/Callback
+	// handle it specially; this entry exists for availability + resource routing.
+	"shopify": {
+		name:        "shopify",
+		clientIDEnv: "SHOPIFY_CLIENT_ID",
+		secretEnv:   "SHOPIFY_CLIENT_SECRET",
+	},
 }
+
+// allProviders is the stable iteration order for status/resource listings.
+var allProviders = []string{"notion", "linear", "github", "gitlab", "gmail", "stripe", "shopify"}
 
 func oauthRedirectURI(provider string) string {
 	base := os.Getenv("OAUTH_REDIRECT_BASE")
@@ -70,6 +115,7 @@ func currentUserID(c *gin.Context) string {
 type oauthStateEntry struct {
 	userID  string
 	origin  string // opener origin for the popup's postMessage target
+	shop    string // shopify shop domain (empty for other providers)
 	expires time.Time
 }
 
@@ -79,6 +125,10 @@ var (
 )
 
 func newOAuthState(userID, origin string) string {
+	return newOAuthStateShop(userID, origin, "")
+}
+
+func newOAuthStateShop(userID, origin, shop string) string {
 	b := make([]byte, 16)
 	_, _ = rand.Read(b)
 	s := hex.EncodeToString(b)
@@ -89,21 +139,21 @@ func newOAuthState(userID, origin string) string {
 			delete(oauthStates, k)
 		}
 	}
-	oauthStates[s] = oauthStateEntry{userID: userID, origin: origin, expires: time.Now().Add(10 * time.Minute)}
+	oauthStates[s] = oauthStateEntry{userID: userID, origin: origin, shop: shop, expires: time.Now().Add(10 * time.Minute)}
 	return s
 }
 
-// consumeOAuthState validates the state and returns the user and opener
-// origin that started the flow.
-func consumeOAuthState(s string) (userID, origin string, ok bool) {
+// consumeOAuthState validates the state and returns the user, opener origin,
+// and shop domain (shopify only) that started the flow.
+func consumeOAuthState(s string) (userID, origin, shop string, ok bool) {
 	oauthStatesMu.Lock()
 	defer oauthStatesMu.Unlock()
 	e, found := oauthStates[s]
 	delete(oauthStates, s)
 	if !found || time.Now().After(e.expires) {
-		return "", "", false
+		return "", "", "", false
 	}
-	return e.userID, e.origin, true
+	return e.userID, e.origin, e.shop, true
 }
 
 // openerOrigin extracts the validated ?origin= param the frontend appends
@@ -129,7 +179,7 @@ func (h *WorkflowHandler) ListIntegrations(c *gin.Context) {
 	}
 
 	out := []gin.H{}
-	for _, p := range []string{"notion", "linear"} {
+	for _, p := range allProviders {
 		prov := oauthProviders[p]
 		conn, connected := byProvider[p]
 		entry := gin.H{
@@ -160,6 +210,24 @@ func (h *WorkflowHandler) ConnectIntegration(c *gin.Context) {
 		return
 	}
 
+	// Shopify authorizes against the shop's own domain, which the frontend
+	// supplies as ?shop=. The domain is validated and carried in the state so
+	// the callback can exchange the code against the same shop.
+	if provider := prov.name; provider == "shopify" {
+		shop, err := normalizeShopDomain(c.Query("shop"))
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		q := url.Values{}
+		q.Set("client_id", clientID)
+		q.Set("redirect_uri", oauthRedirectURI(provider))
+		q.Set("scope", "read_orders,read_products,write_products,read_customers")
+		q.Set("state", newOAuthStateShop(currentUserID(c), openerOrigin(c), shop))
+		c.Redirect(http.StatusFound, "https://"+shop+"/admin/oauth/authorize?"+q.Encode())
+		return
+	}
+
 	q := url.Values{}
 	q.Set("client_id", clientID)
 	q.Set("redirect_uri", oauthRedirectURI(prov.name))
@@ -181,7 +249,7 @@ func (h *WorkflowHandler) CallbackIntegration(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "unknown provider"})
 		return
 	}
-	userID, openerOrig, stateOK := consumeOAuthState(c.Query("state"))
+	userID, openerOrig, shop, stateOK := consumeOAuthState(c.Query("state"))
 	if errParam := c.Query("error"); errParam != "" {
 		oauthResultPage(c, provider, openerOrig, false, errParam)
 		return
@@ -205,6 +273,16 @@ func (h *WorkflowHandler) CallbackIntegration(c *gin.Context) {
 		conn, err = exchangeNotionCode(code)
 	case "linear":
 		conn, err = exchangeLinearCode(code)
+	case "github":
+		conn, err = exchangeGithubCode(code)
+	case "gitlab":
+		conn, err = exchangeGitlabCode(code)
+	case "gmail":
+		conn, err = exchangeGmailCode(code)
+	case "stripe":
+		conn, err = exchangeStripeCode(code)
+	case "shopify":
+		conn, err = exchangeShopifyCode(code, shop)
 	}
 	if err != nil {
 		oauthResultPage(c, provider, openerOrig, false, err.Error())
@@ -242,32 +320,42 @@ type integrationResource struct {
 	Type string `json:"type"`
 }
 
-// IntegrationResources lists what the connected account exposes:
-// Notion → databases and pages the user shared with the integration;
-// Linear → teams in the authorized workspace.
+// listProviderResources resolves fresh credentials and returns the concrete
+// resources a connected provider exposes. Every fetch goes through
+// FreshAccessToken so expiring tokens (gmail, gitlab) refresh transparently.
+func (h *WorkflowHandler) listProviderResources(userID, provider string) ([]integrationResource, error) {
+	token, workspace := FreshAccessToken(h.db.DB, userID, provider)
+	if token == "" {
+		return nil, fmt.Errorf("%s is not connected", provider)
+	}
+	switch provider {
+	case "notion":
+		return notionResources(token)
+	case "linear":
+		return linearResources(token)
+	case "github":
+		return githubResources(token)
+	case "gitlab":
+		return gitlabResources(token)
+	case "gmail":
+		return gmailResources(token)
+	case "stripe":
+		return stripeResources(token)
+	case "shopify":
+		return shopifyResources(token, workspace)
+	}
+	return []integrationResource{}, nil
+}
+
+// IntegrationResources lists what the connected account exposes (databases,
+// pages, repos, projects, labels, prices, products, …) for the resource picker.
 func (h *WorkflowHandler) IntegrationResources(c *gin.Context) {
 	provider := c.Param("provider")
 	if _, ok := oauthProviders[provider]; !ok {
 		c.JSON(http.StatusNotFound, gin.H{"error": "unknown provider"})
 		return
 	}
-	var conn models.IntegrationConnection
-	if err := h.db.DB.Where("user_id = ? AND provider = ?", currentUserID(c), provider).
-		First(&conn).Error; err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": provider + " is not connected"})
-		return
-	}
-
-	var (
-		resources []integrationResource
-		err       error
-	)
-	switch provider {
-	case "notion":
-		resources, err = notionResources(conn.AccessToken)
-	case "linear":
-		resources, err = linearResources(conn.AccessToken)
-	}
+	resources, err := h.listProviderResources(currentUserID(c), provider)
 	if err != nil {
 		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
 		return
@@ -337,7 +425,7 @@ func notionResources(token string) ([]integrationResource, error) {
 }
 
 func linearResources(token string) ([]integrationResource, error) {
-	body := `{"query":"{ teams { nodes { id name key } } }"}`
+	body := `{"query":"{ teams { nodes { id name key } } projects(first: 50) { nodes { id name } } }"}`
 	req, _ := http.NewRequest(http.MethodPost, "https://api.linear.app/graphql", strings.NewReader(body))
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
@@ -354,12 +442,18 @@ func linearResources(token string) ([]integrationResource, error) {
 					Key  string `json:"key"`
 				} `json:"nodes"`
 			} `json:"teams"`
+			Projects struct {
+				Nodes []struct {
+					ID   string `json:"id"`
+					Name string `json:"name"`
+				} `json:"nodes"`
+			} `json:"projects"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(raw, &res); err != nil {
 		return nil, fmt.Errorf("parse linear teams: %w", err)
 	}
-	out := make([]integrationResource, 0, len(res.Data.Teams.Nodes))
+	out := make([]integrationResource, 0, len(res.Data.Teams.Nodes)+len(res.Data.Projects.Nodes))
 	for _, t := range res.Data.Teams.Nodes {
 		name := t.Name
 		if t.Key != "" {
@@ -367,14 +461,17 @@ func linearResources(token string) ([]integrationResource, error) {
 		}
 		out = append(out, integrationResource{ID: t.ID, Name: name, Type: "team"})
 	}
+	for _, p := range res.Data.Projects.Nodes {
+		out = append(out, integrationResource{ID: p.ID, Name: p.Name, Type: "project"})
+	}
 	return out, nil
 }
 
 // integrationResourcesForAI returns connection status + resources as JSON for
 // the AI builder's list_integration_resources tool.
 func (h *WorkflowHandler) integrationResourcesForAI(userID, provider string) string {
-	providers := []string{"notion", "linear"}
-	if provider == "notion" || provider == "linear" {
+	providers := allProviders
+	if _, ok := oauthProviders[provider]; ok {
 		providers = []string{provider}
 	}
 	out := map[string]any{}
@@ -388,17 +485,7 @@ func (h *WorkflowHandler) integrationResourcesForAI(userID, provider string) str
 			continue
 		}
 		entry := map[string]any{"connected": true, "workspace": conn.WorkspaceName}
-		var (
-			resources []integrationResource
-			err       error
-		)
-		switch p {
-		case "notion":
-			resources, err = notionResources(conn.AccessToken)
-		case "linear":
-			resources, err = linearResources(conn.AccessToken)
-		}
-		if err != nil {
+		if resources, err := h.listProviderResources(userID, p); err != nil {
 			entry["error"] = err.Error()
 		} else {
 			entry["resources"] = resources
@@ -546,4 +633,78 @@ func oauthResultPage(c *gin.Context, provider, targetOrigin string, ok bool, err
 if (window.opener) { window.opener.postMessage(` + string(payload) + `, ` + string(target) + `); setTimeout(() => window.close(), 800); }
 </script></body></html>`
 	c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(html))
+}
+
+// ── Credential access with transparent refresh ────────────────
+
+// FreshAccessToken returns a valid access token and workspace/tenant
+// identifier for a user's provider connection, refreshing expiring tokens
+// (gmail, gitlab) transparently and persisting the rotated credentials.
+// Returns empty strings when no connection exists.
+func FreshAccessToken(db *gorm.DB, userID, provider string) (token, workspace string) {
+	var conn models.IntegrationConnection
+	if err := db.Where("user_id = ? AND provider = ?", userID, provider).First(&conn).Error; err != nil {
+		return "", ""
+	}
+	// Non-expiring token (or no expiry recorded): use as-is.
+	if conn.ExpiresAt == nil || time.Until(*conn.ExpiresAt) > 2*time.Minute || conn.RefreshToken == "" {
+		return conn.AccessToken, conn.WorkspaceID
+	}
+	// Expiring soon — refresh. (Backend-auth expansion implements the
+	// per-provider refresh exchange; see refreshConnection.)
+	if refreshed, err := refreshConnection(db, &conn); err == nil {
+		return refreshed.AccessToken, refreshed.WorkspaceID
+	}
+	return conn.AccessToken, conn.WorkspaceID
+}
+
+// refreshConnection exchanges the stored refresh token for a new access token
+// (gmail via Google, gitlab). It persists the rotated access token, expiry,
+// and (when the provider returns one) refresh token, then returns the updated
+// connection. Providers without refresh flows return the connection unchanged.
+func refreshConnection(db *gorm.DB, conn *models.IntegrationConnection) (*models.IntegrationConnection, error) {
+	var tokenURL, clientIDEnv, secretEnv string
+	switch conn.Provider {
+	case "gmail":
+		tokenURL, clientIDEnv, secretEnv = "https://oauth2.googleapis.com/token", "GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET"
+	case "gitlab":
+		tokenURL, clientIDEnv, secretEnv = "https://gitlab.com/oauth/token", "GITLAB_CLIENT_ID", "GITLAB_CLIENT_SECRET"
+	default:
+		return conn, nil
+	}
+
+	form := url.Values{}
+	form.Set("grant_type", "refresh_token")
+	form.Set("refresh_token", conn.RefreshToken)
+	form.Set("client_id", os.Getenv(clientIDEnv))
+	form.Set("client_secret", os.Getenv(secretEnv))
+
+	req, _ := http.NewRequest(http.MethodPost, tokenURL, strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	raw, err := doOAuthRequest(req)
+	if err != nil {
+		return nil, err
+	}
+	var tok struct {
+		AccessToken  string `json:"access_token"`
+		RefreshToken string `json:"refresh_token"`
+		ExpiresIn    int64  `json:"expires_in"`
+	}
+	if json.Unmarshal(raw, &tok) != nil || tok.AccessToken == "" {
+		return nil, fmt.Errorf("%s token refresh returned no access token", conn.Provider)
+	}
+
+	updates := map[string]any{"access_token": tok.AccessToken}
+	conn.AccessToken = tok.AccessToken
+	if tok.ExpiresIn > 0 {
+		exp := time.Now().Add(time.Duration(tok.ExpiresIn) * time.Second)
+		conn.ExpiresAt = &exp
+		updates["expires_at"] = exp
+	}
+	if tok.RefreshToken != "" { // gitlab rotates the refresh token; google does not
+		conn.RefreshToken = tok.RefreshToken
+		updates["refresh_token"] = tok.RefreshToken
+	}
+	db.Model(&models.IntegrationConnection{}).Where("id = ?", conn.ID).Updates(updates)
+	return conn, nil
 }

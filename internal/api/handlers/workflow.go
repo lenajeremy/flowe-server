@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"workflow-ai/server/config"
 	"workflow-ai/server/internal/auth"
@@ -185,16 +186,28 @@ func (h *WorkflowHandler) Update(c *gin.Context) {
 	c.JSON(http.StatusOK, wf)
 }
 
+// workflowSummary is the list payload: metadata only. Nodes/edges are heavy
+// JSONB and belong to GetOne — the list view never renders them.
+type workflowSummary struct {
+	ID        string    `json:"id"`
+	Name      string    `json:"name"`
+	NodeCount int       `json:"node_count"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
 // List — GET /api/workflows
 func (h *WorkflowHandler) List(c *gin.Context) {
-	var workflows []models.Workflow
-	if err := h.db.DB.Where("user_id = ?", auth.UserID(c)).
-		Order("updated_at desc").Find(&workflows).Error; err != nil {
+	summaries := []workflowSummary{}
+	if err := h.db.DB.Model(&models.Workflow{}).
+		Select("id, name, jsonb_array_length(nodes) AS node_count, created_at, updated_at").
+		Where("user_id = ?", auth.UserID(c)).
+		Order("updated_at desc").Scan(&summaries).Error; err != nil {
 		slog.Error("failed to list workflows", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list workflows"})
 		return
 	}
-	c.JSON(http.StatusOK, workflows)
+	c.JSON(http.StatusOK, summaries)
 }
 
 // GetOne — GET /api/workflows/:id

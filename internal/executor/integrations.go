@@ -89,6 +89,110 @@ func notionAppendBlocks(ctx context.Context, token, pageID, content string) (str
 	})
 }
 
+func notionUpdatePage(ctx context.Context, token, pageID, propertiesJSON string) (string, error) {
+	var props any
+	if err := json.Unmarshal([]byte(propertiesJSON), &props); err != nil {
+		return "", fmt.Errorf("notionProperties must be a JSON object: %w", err)
+	}
+	return notionCall(ctx, token, http.MethodPatch, "/pages/"+pageID, map[string]any{"properties": props})
+}
+
+func notionSearch(ctx context.Context, token, query string) (string, error) {
+	return notionCall(ctx, token, http.MethodPost, "/search", map[string]any{"query": query, "page_size": 25})
+}
+
+func notionAddComment(ctx context.Context, token, pageID, content string) (string, error) {
+	return notionCall(ctx, token, http.MethodPost, "/comments", map[string]any{
+		"parent":    map[string]any{"page_id": pageID},
+		"rich_text": []any{map[string]any{"text": map[string]any{"content": content}}},
+	})
+}
+
+// notionGetPageContent fetches a page's blocks and returns a readable text
+// rendering of paragraph/heading/list/todo content alongside the raw JSON.
+func notionGetPageContent(ctx context.Context, token, pageID string) (string, error) {
+	raw, err := notionCall(ctx, token, http.MethodGet, "/blocks/"+pageID+"/children?page_size=100", nil)
+	if err != nil {
+		return "", err
+	}
+	var res struct {
+		Results []struct {
+			Type      string `json:"type"`
+			Paragraph *struct {
+				RichText []struct {
+					PlainText string `json:"plain_text"`
+				} `json:"rich_text"`
+			} `json:"paragraph"`
+			Heading1 *notionRichHolder `json:"heading_1"`
+			Heading2 *notionRichHolder `json:"heading_2"`
+			Heading3 *notionRichHolder `json:"heading_3"`
+			Bulleted *notionRichHolder `json:"bulleted_list_item"`
+			Numbered *notionRichHolder `json:"numbered_list_item"`
+			ToDo     *notionRichHolder `json:"to_do"`
+			Quote    *notionRichHolder `json:"quote"`
+			Callout  *notionRichHolder `json:"callout"`
+		} `json:"results"`
+	}
+	if json.Unmarshal([]byte(raw), &res) != nil {
+		return raw, nil // fall back to raw JSON if the shape surprises us
+	}
+	var text strings.Builder
+	appendRich := func(prefix string, h *notionRichHolder) {
+		if h == nil {
+			return
+		}
+		line := prefix
+		for _, t := range h.RichText {
+			line += t.PlainText
+		}
+		if strings.TrimSpace(line) != prefix {
+			text.WriteString(line + "\n")
+		}
+	}
+	for _, b := range res.Results {
+		switch b.Type {
+		case "paragraph":
+			if b.Paragraph != nil {
+				line := ""
+				for _, t := range b.Paragraph.RichText {
+					line += t.PlainText
+				}
+				if line != "" {
+					text.WriteString(line + "\n")
+				}
+			}
+		case "heading_1":
+			appendRich("# ", b.Heading1)
+		case "heading_2":
+			appendRich("## ", b.Heading2)
+		case "heading_3":
+			appendRich("### ", b.Heading3)
+		case "bulleted_list_item":
+			appendRich("• ", b.Bulleted)
+		case "numbered_list_item":
+			appendRich("- ", b.Numbered)
+		case "to_do":
+			appendRich("[ ] ", b.ToDo)
+		case "quote":
+			appendRich("> ", b.Quote)
+		case "callout":
+			appendRich("", b.Callout)
+		}
+	}
+	return fmt.Sprintf(`{"text":%s,"raw":%s}`, jsonString(text.String()), raw), nil
+}
+
+type notionRichHolder struct {
+	RichText []struct {
+		PlainText string `json:"plain_text"`
+	} `json:"rich_text"`
+}
+
+func jsonString(s string) string {
+	b, _ := json.Marshal(s)
+	return string(b)
+}
+
 func paragraphBlock(content string) map[string]any {
 	return map[string]any{
 		"object": "block",
@@ -168,6 +272,69 @@ func linearCreateComment(ctx context.Context, token, issueID, body string) (stri
 		commentCreate(input: { issueId: $issueId, body: $body }) { success comment { id body } }
 	}`
 	return linearCall(ctx, token, query, map[string]any{"issueId": issueID, "body": body})
+}
+
+type linearUpdateInput struct {
+	Title       string
+	Description string
+	Priority    int
+	StateID     string
+	AssigneeID  string
+	ProjectID   string
+}
+
+// linearUpdateIssue updates only the fields the caller provided (empty strings
+// are omitted so a partial edit doesn't blank out other fields).
+func linearUpdateIssue(ctx context.Context, token, issueID string, in linearUpdateInput) (string, error) {
+	input := map[string]any{}
+	if in.Title != "" {
+		input["title"] = in.Title
+	}
+	if in.Description != "" {
+		input["description"] = in.Description
+	}
+	if in.Priority > 0 {
+		input["priority"] = in.Priority
+	}
+	if in.StateID != "" {
+		input["stateId"] = in.StateID
+	}
+	if in.AssigneeID != "" {
+		input["assigneeId"] = in.AssigneeID
+	}
+	if in.ProjectID != "" {
+		input["projectId"] = in.ProjectID
+	}
+	const query = `mutation UpdateIssue($id: String!, $input: IssueUpdateInput!) {
+		issueUpdate(id: $id, input: $input) { success issue { id identifier title url } }
+	}`
+	return linearCall(ctx, token, query, map[string]any{"id": issueID, "input": input})
+}
+
+func linearSearchIssues(ctx context.Context, token, query string, limit any) (string, error) {
+	const q = `query SearchIssues($term: String!, $first: Int) {
+		searchIssues(term: $term, first: $first) {
+			nodes { id identifier title description state { name } priority url }
+		}
+	}`
+	return linearCall(ctx, token, q, map[string]any{"term": query, "first": toInt(limit, 10)})
+}
+
+func linearListProjects(ctx context.Context, token string) (string, error) {
+	const q = `query Projects { projects(first: 50) { nodes { id name description state } } }`
+	return linearCall(ctx, token, q, map[string]any{})
+}
+
+func linearGetIssue(ctx context.Context, token, issueID string) (string, error) {
+	const q = `query GetIssue($id: String!) {
+		issue(id: $id) {
+			id identifier title description priority url
+			state { name }
+			assignee { name }
+			comments { nodes { body user { name } } }
+		}
+	}`
+	return linearCall(ctx, token, q, map[string]any{"id": issueID})
 }
 
 func toInt(v any, fallback int) int {

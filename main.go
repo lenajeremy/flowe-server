@@ -6,6 +6,7 @@ import (
 
 	"workflow-ai/server/config"
 	"workflow-ai/server/internal/api"
+	"workflow-ai/server/internal/api/handlers"
 	"workflow-ai/server/internal/database"
 	"workflow-ai/server/internal/database/models"
 	rdb "workflow-ai/server/internal/database/redis"
@@ -50,18 +51,14 @@ func main() {
 
 	redisClient := rdb.New()
 
-	// Notion/Linear nodes fall back to the workflow owner's stored OAuth
-	// connection when the node config carries no manual token.
-	executor.IntegrationTokenLookup = func(userID, provider string) string {
+	// Integration nodes fall back to the workflow owner's stored OAuth
+	// connection when the node config carries no manual token. FreshAccessToken
+	// transparently refreshes expiring tokens (gmail, gitlab).
+	executor.IntegrationCredsLookup = func(userID, provider string) (string, string) {
 		if userID == "" {
-			return ""
+			return "", ""
 		}
-		var conn models.IntegrationConnection
-		if err := dbClient.DB.Where("user_id = ? AND provider = ?", userID, provider).
-			First(&conn).Error; err != nil {
-			return ""
-		}
-		return conn.AccessToken
+		return handlers.FreshAccessToken(dbClient.DB, userID, provider)
 	}
 
 	const port = 8080

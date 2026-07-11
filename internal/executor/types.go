@@ -17,6 +17,11 @@ const (
 	NodeTypeScheduledTrigger NodeType = "scheduledTrigger"
 	NodeTypeNotion           NodeType = "notion"
 	NodeTypeLinear           NodeType = "linear"
+	NodeTypeGithub           NodeType = "github"
+	NodeTypeGitlab           NodeType = "gitlab"
+	NodeTypeGmail            NodeType = "gmail"
+	NodeTypeStripe           NodeType = "stripe"
+	NodeTypeShopify          NodeType = "shopify"
 )
 
 type FlowNodeData struct {
@@ -68,6 +73,8 @@ type FlowNodeData struct {
 	NotionTitle      string `json:"notionTitle,omitempty"`
 	NotionContent    string `json:"notionContent,omitempty"`
 	NotionFilter     string `json:"notionFilter,omitempty"`
+	NotionQuery      string `json:"notionQuery,omitempty"`
+	NotionProperties string `json:"notionProperties,omitempty"`
 
 	// linear
 	LinearTeamId      string `json:"linearTeamId,omitempty"`
@@ -77,6 +84,53 @@ type FlowNodeData struct {
 	LinearPriority    int    `json:"linearPriority,omitempty"`
 	LinearCommentBody string `json:"linearCommentBody,omitempty"`
 	LinearLimit       int    `json:"linearLimit,omitempty"`
+	LinearStateId     string `json:"linearStateId,omitempty"`
+	LinearAssigneeId  string `json:"linearAssigneeId,omitempty"`
+	LinearQuery       string `json:"linearQuery,omitempty"`
+	LinearProjectId   string `json:"linearProjectId,omitempty"`
+
+	// github
+	GithubRepo        string `json:"githubRepo,omitempty"`
+	GithubTitle       string `json:"githubTitle,omitempty"`
+	GithubBody        string `json:"githubBody,omitempty"`
+	GithubIssueNumber string `json:"githubIssueNumber,omitempty"`
+	GithubLabels      string `json:"githubLabels,omitempty"`
+	GithubState       string `json:"githubState,omitempty"`
+	GithubLimit       int    `json:"githubLimit,omitempty"`
+	GithubPrNumber    string `json:"githubPrNumber,omitempty"`
+
+	// gitlab
+	GitlabProjectId   string `json:"gitlabProjectId,omitempty"`
+	GitlabTitle       string `json:"gitlabTitle,omitempty"`
+	GitlabDescription string `json:"gitlabDescription,omitempty"`
+	GitlabIssueIid    string `json:"gitlabIssueIid,omitempty"`
+	GitlabLabels      string `json:"gitlabLabels,omitempty"`
+	GitlabState       string `json:"gitlabState,omitempty"`
+	GitlabLimit       int    `json:"gitlabLimit,omitempty"`
+	GitlabMrIid       string `json:"gitlabMrIid,omitempty"`
+
+	// gmail
+	GmailTo        string `json:"gmailTo,omitempty"`
+	GmailCc        string `json:"gmailCc,omitempty"`
+	GmailSubject   string `json:"gmailSubject,omitempty"`
+	GmailBody      string `json:"gmailBody,omitempty"`
+	GmailQuery     string `json:"gmailQuery,omitempty"`
+	GmailMessageId string `json:"gmailMessageId,omitempty"`
+	GmailLimit     int    `json:"gmailLimit,omitempty"`
+
+	// stripe
+	StripeLimit         int    `json:"stripeLimit,omitempty"`
+	StripeCustomerEmail string `json:"stripeCustomerEmail,omitempty"`
+	StripePriceId       string `json:"stripePriceId,omitempty"`
+	StripeQuantity      int    `json:"stripeQuantity,omitempty"`
+
+	// shopify
+	ShopifyOrderId     string `json:"shopifyOrderId,omitempty"`
+	ShopifyLimit       int    `json:"shopifyLimit,omitempty"`
+	ShopifyStatus      string `json:"shopifyStatus,omitempty"`
+	ShopifyTitle       string `json:"shopifyTitle,omitempty"`
+	ShopifyDescription string `json:"shopifyDescription,omitempty"`
+	ShopifyPrice       string `json:"shopifyPrice,omitempty"`
 }
 
 type Position struct {
