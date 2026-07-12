@@ -234,11 +234,12 @@ func (h *WorkflowHandler) AuthEmailVerify(c *gin.Context) {
 		return
 	}
 
-	if err := h.startSession(c, user); err != nil {
+	token, err := h.startSession(c, user)
+	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not sign you in"})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"user": publicUser(user)})
+	c.JSON(http.StatusOK, gin.H{"user": publicUser(user), "token": token})
 }
 
 func (h *WorkflowHandler) findOrCreateUserByEmail(email string) (*models.User, error) {
@@ -254,14 +255,15 @@ func (h *WorkflowHandler) findOrCreateUserByEmail(email string) (*models.User, e
 	return &user, nil
 }
 
-func (h *WorkflowHandler) startSession(c *gin.Context, user *models.User) error {
+// startSession creates a Redis session and returns the raw bearer token the
+// client stores and sends back as `Authorization: Bearer <token>`.
+func (h *WorkflowHandler) startSession(c *gin.Context, user *models.User) (string, error) {
 	token, err := auth.CreateSession(c.Request.Context(), h.redis, user.ID.String())
 	if err != nil {
 		slog.Error("auth: create session failed", "error", err)
-		return err
+		return "", err
 	}
-	auth.SetSessionCookie(c, token)
-	return nil
+	return token, nil
 }
 
 // ── Google OAuth ────────────────────────────────────────────────
@@ -295,38 +297,39 @@ func oauthRedirectBase() string {
 func (h *WorkflowHandler) AuthGoogleCallback(c *gin.Context) {
 	_, openerOrig, _, stateOK := consumeOAuthState(c.Query("state"))
 	if !stateOK {
-		authResultPage(c, openerOrig, false, "Sign-in session expired — please try again.")
+		authResultPage(c, openerOrig, "", false, "Sign-in session expired — please try again.")
 		return
 	}
 	if errParam := c.Query("error"); errParam != "" {
-		authResultPage(c, openerOrig, false, "Google sign-in was cancelled.")
+		authResultPage(c, openerOrig, "", false, "Google sign-in was cancelled.")
 		return
 	}
 	code := c.Query("code")
 	if code == "" {
-		authResultPage(c, openerOrig, false, "Google did not return an authorization code.")
+		authResultPage(c, openerOrig, "", false, "Google did not return an authorization code.")
 		return
 	}
 
 	claims, err := exchangeGoogleCode(code)
 	if err != nil {
 		slog.Error("auth: google exchange failed", "error", err)
-		authResultPage(c, openerOrig, false, "Could not verify your Google account.")
+		authResultPage(c, openerOrig, "", false, "Could not verify your Google account.")
 		return
 	}
 
 	user, err := h.upsertGoogleUser(claims)
 	if err != nil {
 		slog.Error("auth: google upsert failed", "error", err)
-		authResultPage(c, openerOrig, false, "Could not sign you in.")
+		authResultPage(c, openerOrig, "", false, "Could not sign you in.")
 		return
 	}
 
-	if err := h.startSession(c, user); err != nil {
-		authResultPage(c, openerOrig, false, "Could not sign you in.")
+	token, err := h.startSession(c, user)
+	if err != nil {
+		authResultPage(c, openerOrig, "", false, "Could not sign you in.")
 		return
 	}
-	authResultPage(c, openerOrig, true, "")
+	authResultPage(c, openerOrig, token, true, "")
 }
 
 type googleClaims struct {
@@ -435,10 +438,11 @@ func (h *WorkflowHandler) fillProfile(user *models.User, claims *googleClaims) {
 	}
 }
 
-// authResultPage notifies the login page (popup opener) and closes.
-// postMessage targets the opener origin captured at connect time (falling
-// back to the configured frontend URL), never '*'.
-func authResultPage(c *gin.Context, targetOrigin string, ok bool, errMsg string) {
+// authResultPage notifies the login page (popup opener) and closes. On success
+// it hands the session bearer token to the opener via postMessage (targeting
+// the opener origin captured at connect time, never '*'), which the SPA stores
+// for Authorization headers.
+func authResultPage(c *gin.Context, targetOrigin, token string, ok bool, errMsg string) {
 	status := "ok"
 	detail := "You're signed in — this window will close."
 	if !ok {
@@ -449,6 +453,7 @@ func authResultPage(c *gin.Context, targetOrigin string, ok bool, errMsg string)
 		"type":   "auth-oauth",
 		"status": status,
 		"error":  errMsg,
+		"token":  token,
 	})
 	if targetOrigin == "" {
 		targetOrigin = frontendURL()
@@ -465,24 +470,22 @@ if (window.opener) { window.opener.postMessage(` + string(payload) + `, ` + stri
 
 // ── Me / logout ─────────────────────────────────────────────────
 
-// GET /api/auth/me — public route; resolves the cookie itself so it can
+// GET /api/auth/me — public route; resolves the bearer token itself so it can
 // return a clean 401 JSON body instead of the middleware's.
 func (h *WorkflowHandler) AuthMe(c *gin.Context) {
-	cookie, err := c.Cookie(auth.SessionCookie)
-	if err != nil || cookie == "" {
+	token := auth.BearerToken(c)
+	if token == "" {
 		c.JSON(http.StatusUnauthorized, gin.H{"user": nil})
 		return
 	}
-	userID, ok := auth.GetSession(c.Request.Context(), h.redis, cookie)
+	userID, ok := auth.GetSession(c.Request.Context(), h.redis, token)
 	if !ok {
-		auth.ClearSessionCookie(c)
 		c.JSON(http.StatusUnauthorized, gin.H{"user": nil})
 		return
 	}
 	var user models.User
 	if err := h.db.DB.First(&user, "id = ?", userID).Error; err != nil {
-		auth.DestroySession(c.Request.Context(), h.redis, cookie)
-		auth.ClearSessionCookie(c)
+		auth.DestroySession(c.Request.Context(), h.redis, token)
 		c.JSON(http.StatusUnauthorized, gin.H{"user": nil})
 		return
 	}
@@ -491,9 +494,8 @@ func (h *WorkflowHandler) AuthMe(c *gin.Context) {
 
 // POST /api/auth/logout
 func (h *WorkflowHandler) AuthLogout(c *gin.Context) {
-	if cookie, err := c.Cookie(auth.SessionCookie); err == nil && cookie != "" {
-		auth.DestroySession(c.Request.Context(), h.redis, cookie)
+	if token := auth.BearerToken(c); token != "" {
+		auth.DestroySession(c.Request.Context(), h.redis, token)
 	}
-	auth.ClearSessionCookie(c)
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }

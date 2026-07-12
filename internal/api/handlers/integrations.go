@@ -224,7 +224,7 @@ func (h *WorkflowHandler) ConnectIntegration(c *gin.Context) {
 		q.Set("redirect_uri", oauthRedirectURI(provider))
 		q.Set("scope", "read_orders,read_products,write_products,read_customers")
 		q.Set("state", newOAuthStateShop(currentUserID(c), openerOrigin(c), shop))
-		c.Redirect(http.StatusFound, "https://"+shop+"/admin/oauth/authorize?"+q.Encode())
+		c.JSON(http.StatusOK, gin.H{"url": "https://" + shop + "/admin/oauth/authorize?" + q.Encode()})
 		return
 	}
 
@@ -238,7 +238,9 @@ func (h *WorkflowHandler) ConnectIntegration(c *gin.Context) {
 			q.Set(k, v)
 		}
 	}
-	c.Redirect(http.StatusFound, prov.authorizeURL+"?"+q.Encode())
+	// Return the authorize URL (not a 302) so the SPA can call this with an
+	// Authorization header, then open the URL in the popup it already spawned.
+	c.JSON(http.StatusOK, gin.H{"url": prov.authorizeURL + "?" + q.Encode()})
 }
 
 // CallbackIntegration exchanges the authorization code, stores the token, and

@@ -2,6 +2,7 @@ package auth
 
 import (
 	"net/http"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/redis/go-redis/v9"
@@ -9,18 +10,27 @@ import (
 
 const ctxUserID = "auth.userID"
 
-// RequireAuth rejects requests without a valid session cookie and stores the
+// BearerToken extracts the session token from the Authorization header
+// ("Bearer <token>"); returns "" when absent or malformed.
+func BearerToken(c *gin.Context) string {
+	h := c.GetHeader("Authorization")
+	if len(h) > 7 && strings.EqualFold(h[:7], "Bearer ") {
+		return strings.TrimSpace(h[7:])
+	}
+	return ""
+}
+
+// RequireAuth rejects requests without a valid bearer token and stores the
 // resolved user ID on the context for UserID(c).
 func RequireAuth(rdb *redis.Client) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		cookie, err := c.Cookie(SessionCookie)
-		if err != nil || cookie == "" {
+		token := BearerToken(c)
+		if token == "" {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "authentication required"})
 			return
 		}
-		userID, ok := GetSession(c.Request.Context(), rdb, cookie)
+		userID, ok := GetSession(c.Request.Context(), rdb, token)
 		if !ok {
-			ClearSessionCookie(c)
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "session expired"})
 			return
 		}
