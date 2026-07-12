@@ -72,6 +72,19 @@ func cookieSecure() bool {
 	return os.Getenv("COOKIE_SECURE") == "true"
 }
 
+// sameSiteMode picks the cookie's SameSite policy. In production the frontend
+// and API live on different registrable domains (e.g. *.vercel.app frontend,
+// *.railway.app API), so the browser treats auth requests as cross-site and
+// drops a Lax cookie — SameSite=None is required, which browsers only honour
+// with Secure. In local dev (COOKIE_SECURE unset) both origins are localhost,
+// where Lax works and None would be rejected for lacking Secure.
+func sameSiteMode() http.SameSite {
+	if cookieSecure() {
+		return http.SameSiteNoneMode
+	}
+	return http.SameSiteLaxMode
+}
+
 // SetSessionCookie attaches the session cookie to the response.
 // http.SetCookie is used directly so SameSite is explicit.
 func SetSessionCookie(c *gin.Context, token string) {
@@ -82,7 +95,7 @@ func SetSessionCookie(c *gin.Context, token string) {
 		MaxAge:   int(sessionTTL.Seconds()),
 		HttpOnly: true,
 		Secure:   cookieSecure(),
-		SameSite: http.SameSiteLaxMode,
+		SameSite: sameSiteMode(),
 	})
 }
 
@@ -95,6 +108,6 @@ func ClearSessionCookie(c *gin.Context) {
 		MaxAge:   -1,
 		HttpOnly: true,
 		Secure:   cookieSecure(),
-		SameSite: http.SameSiteLaxMode,
+		SameSite: sameSiteMode(),
 	})
 }
