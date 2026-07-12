@@ -22,6 +22,12 @@ const (
 	NodeTypeGmail            NodeType = "gmail"
 	NodeTypeStripe           NodeType = "stripe"
 	NodeTypeShopify          NodeType = "shopify"
+	NodeTypeGoogleCalendar   NodeType = "googlecalendar"
+	NodeTypeOutlook          NodeType = "outlook"
+	NodeTypeSlack            NodeType = "slack"
+	NodeTypeGoogleDrive      NodeType = "googledrive"
+	NodeTypeGoogleDocs       NodeType = "googledocs"
+	NodeTypeGoogleSheets     NodeType = "googlesheets"
 )
 
 type FlowNodeData struct {
@@ -131,6 +137,50 @@ type FlowNodeData struct {
 	ShopifyTitle       string `json:"shopifyTitle,omitempty"`
 	ShopifyDescription string `json:"shopifyDescription,omitempty"`
 	ShopifyPrice       string `json:"shopifyPrice,omitempty"`
+
+	// googlecalendar
+	GCalCalendarId  string `json:"gcalCalendarId,omitempty"`
+	GCalEventId     string `json:"gcalEventId,omitempty"`
+	GCalSummary     string `json:"gcalSummary,omitempty"`
+	GCalDescription string `json:"gcalDescription,omitempty"`
+	GCalStart       string `json:"gcalStart,omitempty"` // RFC3339, e.g. 2026-07-20T15:00:00Z
+	GCalEnd         string `json:"gcalEnd,omitempty"`
+	GCalAttendees   string `json:"gcalAttendees,omitempty"` // comma-separated emails
+	GCalLimit       int    `json:"gcalLimit,omitempty"`
+
+	// outlook
+	OutlookTo        string `json:"outlookTo,omitempty"`
+	OutlookCc        string `json:"outlookCc,omitempty"`
+	OutlookSubject   string `json:"outlookSubject,omitempty"`
+	OutlookBody      string `json:"outlookBody,omitempty"`
+	OutlookQuery     string `json:"outlookQuery,omitempty"`
+	OutlookMessageId string `json:"outlookMessageId,omitempty"`
+	OutlookLimit     int    `json:"outlookLimit,omitempty"`
+	OutlookStart     string `json:"outlookStart,omitempty"`
+	OutlookEnd       string `json:"outlookEnd,omitempty"`
+
+	// slack
+	SlackChannel string `json:"slackChannel,omitempty"`
+	SlackText    string `json:"slackText,omitempty"`
+	SlackLimit   int    `json:"slackLimit,omitempty"`
+
+	// googledrive
+	GDriveFileId   string `json:"gdriveFileId,omitempty"`
+	GDriveName     string `json:"gdriveName,omitempty"`
+	GDriveQuery    string `json:"gdriveQuery,omitempty"`
+	GDriveParentId string `json:"gdriveParentId,omitempty"`
+	GDriveLimit    int    `json:"gdriveLimit,omitempty"`
+
+	// googledocs
+	GDocsDocumentId string `json:"gdocsDocumentId,omitempty"`
+	GDocsTitle      string `json:"gdocsTitle,omitempty"`
+	GDocsText       string `json:"gdocsText,omitempty"`
+
+	// googlesheets
+	GSheetsSpreadsheetId string `json:"gsheetsSpreadsheetId,omitempty"`
+	GSheetsRange         string `json:"gsheetsRange,omitempty"`  // A1 notation, e.g. Sheet1!A1:C10
+	GSheetsValues        string `json:"gsheetsValues,omitempty"` // comma-separated cells for one row
+	GSheetsTitle         string `json:"gsheetsTitle,omitempty"`
 }
 
 type Position struct {

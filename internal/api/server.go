@@ -3,6 +3,8 @@ package api
 import (
 	"fmt"
 	"log/slog"
+	"net/http"
+	"time"
 
 	"workflow-ai/server/internal/database"
 
@@ -29,7 +31,18 @@ func NewServer(port int, db *database.DBClient, rdb *redis.Client) *Server {
 func (s *Server) Start(port int) {
 	addr := fmt.Sprintf(":%d", port)
 	slog.Info("server starting", "addr", addr)
-	if err := s.routerEngine.Run(addr); err != nil {
+	// Explicit timeouts harden against Slowloris and idle-connection exhaustion.
+	// No WriteTimeout: responses stream via SSE (runs, AI chat) for minutes and
+	// a write deadline would cut them off. MaxHeaderBytes caps header size;
+	// request-body size is capped by BodyLimit middleware.
+	srv := &http.Server{
+		Addr:              addr,
+		Handler:           s.routerEngine,
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       120 * time.Second,
+		MaxHeaderBytes:    1 << 20, // 1 MiB
+	}
+	if err := srv.ListenAndServe(); err != nil {
 		slog.Error("server stopped", "error", err)
 	}
 }

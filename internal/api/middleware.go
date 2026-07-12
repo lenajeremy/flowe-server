@@ -8,6 +8,16 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+// BodyLimit caps the request body to guard against memory-exhaustion DoS from
+// oversized POST/PUT payloads. It only bounds the request body, so SSE/
+// streaming responses are unaffected.
+func BodyLimit(max int64) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, max)
+		c.Next()
+	}
+}
+
 // CorsMiddleware allows credentialed requests from permitted origins: the
 // FRONTEND_URL allowlist plus any loopback origin (see auth.OriginAllowed) so
 // dev servers on dynamic ports keep working. Cookies require echoing the

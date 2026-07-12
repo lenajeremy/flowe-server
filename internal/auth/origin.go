@@ -23,6 +23,12 @@ func OriginAllowed(origin string) bool {
 		}
 	}
 
+	// Loopback convenience is for local dev only. In production
+	// (APP_ENV=production) the allowlist is FRONTEND_URL exact matches only.
+	if os.Getenv("APP_ENV") == "production" {
+		return false
+	}
+
 	u, err := url.Parse(origin)
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
 		return false

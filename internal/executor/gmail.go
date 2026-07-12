@@ -113,9 +113,16 @@ func runGmail(ctx context.Context, token string, d FlowNodeData, outputs map[str
 	}
 }
 
+// stripHeader removes CR/LF so a template-supplied value can't inject extra
+// SMTP headers (Bcc, etc.) or a premature body — header (CRLF) injection.
+func stripHeader(s string) string {
+	return strings.NewReplacer("\r", "", "\n", "").Replace(s)
+}
+
 // gmailBuildRaw assembles a UTF-8 text/plain RFC 2822 message and base64url-
 // encodes it (no padding) as the Gmail API expects.
 func gmailBuildRaw(to, cc, subject, body string) string {
+	to, cc, subject = stripHeader(to), stripHeader(cc), stripHeader(subject)
 	var b strings.Builder
 	b.WriteString("To: " + to + "\r\n")
 	if cc != "" {

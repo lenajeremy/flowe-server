@@ -37,6 +37,11 @@ func (h *WorkflowHandler) Run(c *gin.Context) {
 	}
 
 	uid := auth.UserID(c)
+	// Per-user cap: runs execute LLM/HTTP work, so throttle abuse.
+	if !auth.Allow(c.Request.Context(), h.redis, "rl:run:"+uid, 60, time.Minute) {
+		c.JSON(http.StatusTooManyRequests, gin.H{"error": "too many runs — try again in a minute"})
+		return
+	}
 	// A run attributed to a saved workflow must target one the user owns.
 	if req.WorkflowID != "" {
 		if _, ok := h.loadOwnedWorkflow(c, req.WorkflowID); !ok {

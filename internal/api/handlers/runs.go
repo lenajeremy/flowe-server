@@ -7,12 +7,35 @@ import (
 	"net/http"
 	"time"
 
+	"workflow-ai/server/internal/auth"
 	"workflow-ai/server/internal/database/models"
 	"workflow-ai/server/internal/executor"
 	"workflow-ai/server/internal/hub"
 
 	"github.com/gin-gonic/gin"
 )
+
+// optionalUserID resolves the caller from a bearer token on a public
+// (non-RequireAuth) route, returning "" when unauthenticated.
+func (h *WorkflowHandler) optionalUserID(c *gin.Context) string {
+	token := auth.BearerToken(c)
+	if token == "" {
+		return ""
+	}
+	uid, _ := auth.GetSession(c.Request.Context(), h.redis, token)
+	return uid
+}
+
+// canViewRun authorizes access to a run served over a capability URL. The owner
+// always sees it; anyone else (e.g. a non-user opening an approval-email link)
+// only while the run is recent — so a leaked link can't expose old run output,
+// which may contain sensitive node data, indefinitely.
+func (h *WorkflowHandler) canViewRun(c *gin.Context, run *models.WorkflowRun) bool {
+	if uid := h.optionalUserID(c); uid != "" && run.UserID == uid {
+		return true
+	}
+	return time.Since(run.CreatedAt) < 14*24*time.Hour
+}
 
 // GET /api/workflows/:id/events — SSE stream that fires once per run start for this workflow.
 // The frontend subscribes to this so it can attach to a run stream before the run completes.
@@ -106,6 +129,10 @@ func (h *WorkflowHandler) GetRun(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "run not found"})
 		return
 	}
+	if !h.canViewRun(c, &run) {
+		c.JSON(http.StatusNotFound, gin.H{"error": "run not found"})
+		return
+	}
 	c.JSON(http.StatusOK, run)
 }
 
@@ -115,6 +142,10 @@ func (h *WorkflowHandler) StreamRun(c *gin.Context) {
 
 	var run models.WorkflowRun
 	if err := h.db.DB.First(&run, "id = ?", runID).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "run not found"})
+		return
+	}
+	if !h.canViewRun(c, &run) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "run not found"})
 		return
 	}

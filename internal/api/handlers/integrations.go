@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"html"
 	"io"
 	"net/http"
 	"net/url"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"workflow-ai/server/internal/auth"
+	"workflow-ai/server/internal/cryptobox"
 	"workflow-ai/server/internal/database/models"
 
 	"github.com/gin-gonic/gin"
@@ -83,6 +85,70 @@ var oauthProviders = map[string]oauthProvider{
 		secretEnv:    "STRIPE_CLIENT_SECRET",
 		extraAuthQ:   url.Values{"scope": {"read_write"}},
 	},
+	// Google Calendar/Drive/Docs/Sheets all reuse the Google sign-in app,
+	// differing only in scope. access_type=offline + prompt=consent are needed
+	// to receive a refresh token on first consent.
+	"googlecalendar": {
+		name:         "googlecalendar",
+		authorizeURL: "https://accounts.google.com/o/oauth2/v2/auth",
+		clientIDEnv:  "GOOGLE_CLIENT_ID",
+		secretEnv:    "GOOGLE_CLIENT_SECRET",
+		extraAuthQ: url.Values{
+			"scope":       {"https://www.googleapis.com/auth/calendar"},
+			"access_type": {"offline"},
+			"prompt":      {"consent"},
+		},
+	},
+	"googledrive": {
+		name:         "googledrive",
+		authorizeURL: "https://accounts.google.com/o/oauth2/v2/auth",
+		clientIDEnv:  "GOOGLE_CLIENT_ID",
+		secretEnv:    "GOOGLE_CLIENT_SECRET",
+		extraAuthQ: url.Values{
+			"scope":       {"https://www.googleapis.com/auth/drive"},
+			"access_type": {"offline"},
+			"prompt":      {"consent"},
+		},
+	},
+	"googledocs": {
+		name:         "googledocs",
+		authorizeURL: "https://accounts.google.com/o/oauth2/v2/auth",
+		clientIDEnv:  "GOOGLE_CLIENT_ID",
+		secretEnv:    "GOOGLE_CLIENT_SECRET",
+		extraAuthQ: url.Values{
+			"scope":       {"https://www.googleapis.com/auth/documents https://www.googleapis.com/auth/drive"},
+			"access_type": {"offline"},
+			"prompt":      {"consent"},
+		},
+	},
+	"googlesheets": {
+		name:         "googlesheets",
+		authorizeURL: "https://accounts.google.com/o/oauth2/v2/auth",
+		clientIDEnv:  "GOOGLE_CLIENT_ID",
+		secretEnv:    "GOOGLE_CLIENT_SECRET",
+		extraAuthQ: url.Values{
+			"scope":       {"https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/drive"},
+			"access_type": {"offline"},
+			"prompt":      {"consent"},
+		},
+	},
+	"outlook": {
+		name:         "outlook",
+		authorizeURL: "https://login.microsoftonline.com/common/oauth2/v2.0/authorize",
+		clientIDEnv:  "MICROSOFT_CLIENT_ID",
+		secretEnv:    "MICROSOFT_CLIENT_SECRET",
+		// offline_access yields a refresh token; the rest cover mail + calendar.
+		extraAuthQ: url.Values{
+			"scope": {"offline_access Mail.ReadWrite Mail.Send Calendars.ReadWrite User.Read"},
+		},
+	},
+	"slack": {
+		name:         "slack",
+		authorizeURL: "https://slack.com/oauth/v2/authorize",
+		clientIDEnv:  "SLACK_CLIENT_ID",
+		secretEnv:    "SLACK_CLIENT_SECRET",
+		extraAuthQ:   url.Values{"scope": {"chat:write,channels:read,channels:history,groups:read"}},
+	},
 	// Shopify's authorize URL is per-shop, so ConnectIntegration/Callback
 	// handle it specially; this entry exists for availability + resource routing.
 	"shopify": {
@@ -93,7 +159,11 @@ var oauthProviders = map[string]oauthProvider{
 }
 
 // allProviders is the stable iteration order for status/resource listings.
-var allProviders = []string{"notion", "linear", "github", "gitlab", "gmail", "stripe", "shopify"}
+var allProviders = []string{
+	"notion", "linear", "github", "gitlab", "gmail",
+	"googlecalendar", "googledrive", "googledocs", "googlesheets",
+	"outlook", "slack", "stripe", "shopify",
+}
 
 func oauthRedirectURI(provider string) string {
 	base := os.Getenv("OAUTH_REDIRECT_BASE")
@@ -285,6 +355,12 @@ func (h *WorkflowHandler) CallbackIntegration(c *gin.Context) {
 		conn, err = exchangeStripeCode(code)
 	case "shopify":
 		conn, err = exchangeShopifyCode(code, shop)
+	case "googlecalendar", "googledrive", "googledocs", "googlesheets":
+		conn, err = exchangeGoogleServiceCode(provider, code)
+	case "outlook":
+		conn, err = exchangeOutlookCode(code)
+	case "slack":
+		conn, err = exchangeSlackCode(code)
 	}
 	if err != nil {
 		oauthResultPage(c, provider, openerOrig, false, err.Error())
@@ -345,6 +421,16 @@ func (h *WorkflowHandler) listProviderResources(userID, provider string) ([]inte
 		return stripeResources(token)
 	case "shopify":
 		return shopifyResources(token, workspace)
+	case "googlecalendar":
+		return googleCalendarResources(token)
+	case "googledrive":
+		return googleDriveResources(token)
+	case "outlook":
+		return outlookResources(token)
+	case "slack":
+		return slackResources(token)
+	// googledocs / googlesheets expose no pickable resource list (drive.file
+	// scope only sees app-created files) — they fall through to empty.
 	}
 	return []integrationResource{}, nil
 }
@@ -628,13 +714,15 @@ func oauthResultPage(c *gin.Context, provider, targetOrigin string, ok bool, err
 		targetOrigin = frontendURL()
 	}
 	target, _ := json.Marshal(targetOrigin)
-	html := `<!doctype html><html><body style="font-family:system-ui;background:#0D0D11;color:#fff;display:flex;align-items:center;justify-content:center;height:100vh;margin:0">
-<div style="text-align:center"><p style="font-size:15px;text-transform:capitalize">` + provider + ` ` + status + `</p>
-<p style="font-size:12px;color:#667179;max-width:420px">` + detail + `</p></div>
+	// Escape everything interpolated into HTML — detail derives from the
+	// provider's `error` query param, so raw interpolation would be reflected XSS.
+	safeHTML := `<!doctype html><html><body style="font-family:system-ui;background:#0D0D11;color:#fff;display:flex;align-items:center;justify-content:center;height:100vh;margin:0">
+<div style="text-align:center"><p style="font-size:15px;text-transform:capitalize">` + html.EscapeString(provider) + ` ` + status + `</p>
+<p style="font-size:12px;color:#667179;max-width:420px">` + html.EscapeString(detail) + `</p></div>
 <script>
 if (window.opener) { window.opener.postMessage(` + string(payload) + `, ` + string(target) + `); setTimeout(() => window.close(), 800); }
 </script></body></html>`
-	c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(html))
+	c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(safeHTML))
 }
 
 // ── Credential access with transparent refresh ────────────────
@@ -671,6 +759,10 @@ func refreshConnection(db *gorm.DB, conn *models.IntegrationConnection) (*models
 		tokenURL, clientIDEnv, secretEnv = "https://oauth2.googleapis.com/token", "GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET"
 	case "gitlab":
 		tokenURL, clientIDEnv, secretEnv = "https://gitlab.com/oauth/token", "GITLAB_CLIENT_ID", "GITLAB_CLIENT_SECRET"
+	case "googlecalendar", "googledrive", "googledocs", "googlesheets":
+		tokenURL, clientIDEnv, secretEnv = "https://oauth2.googleapis.com/token", "GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET"
+	case "outlook":
+		tokenURL, clientIDEnv, secretEnv = "https://login.microsoftonline.com/common/oauth2/v2.0/token", "MICROSOFT_CLIENT_ID", "MICROSOFT_CLIENT_SECRET"
 	default:
 		return conn, nil
 	}
@@ -696,7 +788,9 @@ func refreshConnection(db *gorm.DB, conn *models.IntegrationConnection) (*models
 		return nil, fmt.Errorf("%s token refresh returned no access token", conn.Provider)
 	}
 
-	updates := map[string]any{"access_token": tok.AccessToken}
+	// A map update bypasses the model's BeforeSave hook, so encrypt the token
+	// values explicitly here. The in-memory conn keeps plaintext for the caller.
+	updates := map[string]any{"access_token": cryptobox.Encrypt(tok.AccessToken)}
 	conn.AccessToken = tok.AccessToken
 	if tok.ExpiresIn > 0 {
 		exp := time.Now().Add(time.Duration(tok.ExpiresIn) * time.Second)
@@ -705,7 +799,7 @@ func refreshConnection(db *gorm.DB, conn *models.IntegrationConnection) (*models
 	}
 	if tok.RefreshToken != "" { // gitlab rotates the refresh token; google does not
 		conn.RefreshToken = tok.RefreshToken
-		updates["refresh_token"] = tok.RefreshToken
+		updates["refresh_token"] = cryptobox.Encrypt(tok.RefreshToken)
 	}
 	db.Model(&models.IntegrationConnection{}).Where("id = ?", conn.ID).Updates(updates)
 	return conn, nil

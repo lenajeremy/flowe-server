@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"html"
 	"io"
 	"log/slog"
 	"math/big"
@@ -459,13 +460,13 @@ func authResultPage(c *gin.Context, targetOrigin, token string, ok bool, errMsg 
 		targetOrigin = frontendURL()
 	}
 	target, _ := json.Marshal(targetOrigin)
-	html := `<!doctype html><html><body style="font-family:system-ui;background:#0D0D11;color:#fff;display:flex;align-items:center;justify-content:center;height:100vh;margin:0">
+	safeHTML := `<!doctype html><html><body style="font-family:system-ui;background:#0D0D11;color:#fff;display:flex;align-items:center;justify-content:center;height:100vh;margin:0">
 <div style="text-align:center"><p style="font-size:15px">Google sign-in</p>
-<p style="font-size:12px;color:#667179;max-width:420px">` + detail + `</p></div>
+<p style="font-size:12px;color:#667179;max-width:420px">` + html.EscapeString(detail) + `</p></div>
 <script>
 if (window.opener) { window.opener.postMessage(` + string(payload) + `, ` + string(target) + `); setTimeout(() => window.close(), 800); }
 </script></body></html>`
-	c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(html))
+	c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(safeHTML))
 }
 
 // ── Me / logout ─────────────────────────────────────────────────

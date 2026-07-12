@@ -506,6 +506,10 @@ func executeNode(ctx context.Context, node WorkflowASTNode, outputs map[string]s
 
 	case NodeTypeHTTPRequest:
 		url := substituteTemplates(d.URL, outputs)
+		// Only real web schemes — blocks file://, gopher://, etc.
+		if !strings.HasPrefix(url, "http://") && !strings.HasPrefix(url, "https://") {
+			return "", fmt.Errorf("URL must start with http:// or https://")
+		}
 		method := d.Method
 		if method == "" {
 			method = "GET"
@@ -528,13 +532,14 @@ func executeNode(ctx context.Context, node WorkflowASTNode, outputs map[string]s
 				}
 			}
 		}
-		client := &http.Client{Timeout: 30 * time.Second}
+		client := ssrfSafeClient(30 * time.Second)
 		resp, err := client.Do(req)
 		if err != nil {
 			return "", err
 		}
 		defer resp.Body.Close()
-		respBytes, err := io.ReadAll(resp.Body)
+		// Cap the response body to avoid memory exhaustion from a hostile endpoint.
+		respBytes, err := io.ReadAll(io.LimitReader(resp.Body, 10<<20))
 		if err != nil {
 			return "", err
 		}
@@ -776,6 +781,66 @@ func executeNode(ctx context.Context, node WorkflowASTNode, outputs map[string]s
 			return "", fmt.Errorf("Shopify shop domain is missing — reconnect the store")
 		}
 		return runShopify(ctx, token, shop, d, outputs)
+
+	case NodeTypeGoogleCalendar:
+		token := substituteTemplates(d.IntegrationToken, outputs)
+		if token == "" && IntegrationCredsLookup != nil {
+			token, _ = IntegrationCredsLookup(ownerID, "googlecalendar")
+		}
+		if token == "" {
+			return "", fmt.Errorf("Google Calendar is not connected — use Connect Google Calendar in the node settings")
+		}
+		return runGoogleCalendar(ctx, token, d, outputs)
+
+	case NodeTypeOutlook:
+		token := substituteTemplates(d.IntegrationToken, outputs)
+		if token == "" && IntegrationCredsLookup != nil {
+			token, _ = IntegrationCredsLookup(ownerID, "outlook")
+		}
+		if token == "" {
+			return "", fmt.Errorf("Outlook is not connected — use Connect Outlook in the node settings")
+		}
+		return runOutlook(ctx, token, d, outputs)
+
+	case NodeTypeSlack:
+		token := substituteTemplates(d.IntegrationToken, outputs)
+		if token == "" && IntegrationCredsLookup != nil {
+			token, _ = IntegrationCredsLookup(ownerID, "slack")
+		}
+		if token == "" {
+			return "", fmt.Errorf("Slack is not connected — use Connect Slack in the node settings")
+		}
+		return runSlack(ctx, token, d, outputs)
+
+	case NodeTypeGoogleDrive:
+		token := substituteTemplates(d.IntegrationToken, outputs)
+		if token == "" && IntegrationCredsLookup != nil {
+			token, _ = IntegrationCredsLookup(ownerID, "googledrive")
+		}
+		if token == "" {
+			return "", fmt.Errorf("Google Drive is not connected — use Connect Google Drive in the node settings")
+		}
+		return runGoogleDrive(ctx, token, d, outputs)
+
+	case NodeTypeGoogleDocs:
+		token := substituteTemplates(d.IntegrationToken, outputs)
+		if token == "" && IntegrationCredsLookup != nil {
+			token, _ = IntegrationCredsLookup(ownerID, "googledocs")
+		}
+		if token == "" {
+			return "", fmt.Errorf("Google Docs is not connected — use Connect Google Docs in the node settings")
+		}
+		return runGoogleDocs(ctx, token, d, outputs)
+
+	case NodeTypeGoogleSheets:
+		token := substituteTemplates(d.IntegrationToken, outputs)
+		if token == "" && IntegrationCredsLookup != nil {
+			token, _ = IntegrationCredsLookup(ownerID, "googlesheets")
+		}
+		if token == "" {
+			return "", fmt.Errorf("Google Sheets is not connected — use Connect Google Sheets in the node settings")
+		}
+		return runGoogleSheets(ctx, token, d, outputs)
 	}
 	return "", fmt.Errorf("unknown node type: %s", d.NodeType)
 }

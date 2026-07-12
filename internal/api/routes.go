@@ -17,6 +17,7 @@ func InitServer(port int, db *database.DBClient, rdb *redis.Client) {
 
 	r.Use(gin.Logger())
 	r.Use(gin.Recovery())
+	r.Use(BodyLimit(10 << 20)) // 10 MiB request-body cap
 	r.Use(CorsMiddleware())
 
 	r.GET("/health", func(c *gin.Context) {

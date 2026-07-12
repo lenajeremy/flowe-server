@@ -13,6 +13,8 @@ import (
 	"strings"
 	"time"
 
+	"workflow-ai/server/internal/auth"
+
 	"github.com/gin-gonic/gin"
 )
 
@@ -213,7 +215,7 @@ var toolListIntegrationResources = map[string]any{
 		"properties": map[string]any{
 			"provider": map[string]any{
 				"type":        "string",
-				"enum":        []string{"notion", "linear", "github", "gitlab", "gmail", "stripe", "shopify"},
+				"enum":        []string{"notion", "linear", "github", "gitlab", "gmail", "googlecalendar", "googledrive", "googledocs", "googlesheets", "outlook", "slack", "stripe", "shopify"},
 				"description": "Which provider to inspect. Omit to list all.",
 			},
 		},
@@ -390,6 +392,48 @@ func getAvailableNodesResult() string {
 			"handles":     map[string]any{"inputs": []string{"target (left)"}, "outputs": []string{"source (right)"}},
 		},
 		{
+			"type": "googlecalendar", "label": "Google Calendar", "category": "Integrations",
+			"description": "Google Calendar API: list upcoming events, create an event (with attendees), delete an event.",
+			"dataFields":  map[string]any{"integrationOp": "'list_events'|'create_event'|'delete_event'", "gcalCalendarId": "string – calendar id from list_integration_resources (default 'primary')", "gcalEventId": "string – for delete_event", "gcalSummary": "string – event title (templates ok)", "gcalDescription": "string (templates ok)", "gcalStart": "string – RFC3339 e.g. 2026-07-20T15:00:00Z", "gcalEnd": "string – RFC3339", "gcalAttendees": "string – comma-separated emails", "gcalLimit": "number (default 10)"},
+			"auth":        "OAuth connection used automatically — never set integrationToken.",
+			"handles":     map[string]any{"inputs": []string{"target (left)"}, "outputs": []string{"source (right)"}},
+		},
+		{
+			"type": "outlook", "label": "Outlook", "category": "Integrations",
+			"description": "Microsoft Outlook (Graph): send email, list/search messages, read a message, create a calendar event.",
+			"dataFields":  map[string]any{"integrationOp": "'send_email'|'list_messages'|'get_message'|'create_event'", "outlookTo": "string (templates ok)", "outlookCc": "string", "outlookSubject": "string (templates ok)", "outlookBody": "string – HTML (templates ok)", "outlookQuery": "string – search text for list_messages", "outlookMessageId": "string – for get_message", "outlookLimit": "number (default 10)", "outlookStart": "string – RFC3339 for create_event", "outlookEnd": "string – RFC3339 for create_event"},
+			"auth":        "OAuth connection used automatically — never set integrationToken.",
+			"handles":     map[string]any{"inputs": []string{"target (left)"}, "outputs": []string{"source (right)"}},
+		},
+		{
+			"type": "slack", "label": "Slack", "category": "Integrations",
+			"description": "Slack: post a message to a channel, list channels, read recent channel history.",
+			"dataFields":  map[string]any{"integrationOp": "'send_message'|'list_channels'|'get_channel_history'", "slackChannel": "string – channel id (e.g. C0123) from list_integration_resources", "slackText": "string – message text (templates ok)", "slackLimit": "number (default 100/20)"},
+			"auth":        "OAuth connection used automatically — never set integrationToken.",
+			"handles":     map[string]any{"inputs": []string{"target (left)"}, "outputs": []string{"source (right)"}},
+		},
+		{
+			"type": "googledrive", "label": "Google Drive", "category": "Integrations",
+			"description": "Google Drive API: list/search files, get file metadata, create a folder, delete a file.",
+			"dataFields":  map[string]any{"integrationOp": "'list_files'|'search'|'get_file'|'create_folder'|'delete_file'", "gdriveFileId": "string – for get_file/delete_file", "gdriveName": "string – folder name for create_folder", "gdriveQuery": "string – Drive query, e.g. \"name contains 'report'\"", "gdriveParentId": "string – parent folder id (from list_integration_resources)", "gdriveLimit": "number (default 20)"},
+			"auth":        "OAuth connection used automatically — never set integrationToken.",
+			"handles":     map[string]any{"inputs": []string{"target (left)"}, "outputs": []string{"source (right)"}},
+		},
+		{
+			"type": "googledocs", "label": "Google Docs", "category": "Integrations",
+			"description": "Google Docs API: create a document, read a document's text, append text to a document.",
+			"dataFields":  map[string]any{"integrationOp": "'create_document'|'get_document'|'append_text'", "gdocsDocumentId": "string – for get_document/append_text", "gdocsTitle": "string – title for create_document (templates ok)", "gdocsText": "string – text to append (templates ok)"},
+			"auth":        "OAuth connection used automatically — never set integrationToken.",
+			"handles":     map[string]any{"inputs": []string{"target (left)"}, "outputs": []string{"source (right)"}},
+		},
+		{
+			"type": "googlesheets", "label": "Google Sheets", "category": "Integrations",
+			"description": "Google Sheets API: read a range, append a row, update a range, create a spreadsheet.",
+			"dataFields":  map[string]any{"integrationOp": "'read_range'|'append_row'|'update_range'|'create_spreadsheet'", "gsheetsSpreadsheetId": "string – for read/append/update", "gsheetsRange": "string – A1 notation e.g. Sheet1!A1:C10", "gsheetsValues": "string – comma-separated cells for one row (templates ok)", "gsheetsTitle": "string – title for create_spreadsheet"},
+			"auth":        "OAuth connection used automatically — never set integrationToken.",
+			"handles":     map[string]any{"inputs": []string{"target (left)"}, "outputs": []string{"source (right)"}},
+		},
+		{
 			"type": "textOutput", "label": "Text Output", "category": "Outputs",
 			"description": "Displays the final result of the pipeline.",
 			"dataFields":  map[string]any{"label": "string – display name"},
@@ -462,6 +506,12 @@ func (h *WorkflowHandler) AIGenerate(c *gin.Context) {
 	var req aiGenerateRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
+		return
+	}
+
+	// Per-user cap: each call spends paid LLM tokens, so throttle abuse.
+	if !auth.Allow(c.Request.Context(), h.redis, "rl:ai:"+auth.UserID(c), 30, time.Minute) {
+		c.JSON(http.StatusTooManyRequests, gin.H{"error": "too many requests — try again in a minute"})
 		return
 	}
 
