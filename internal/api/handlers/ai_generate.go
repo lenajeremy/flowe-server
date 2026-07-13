@@ -407,8 +407,8 @@ func getAvailableNodesResult() string {
 		},
 		{
 			"type": "slack", "label": "Slack", "category": "Integrations",
-			"description": "Slack: post a message to a channel, list channels, read recent channel history.",
-			"dataFields":  map[string]any{"integrationOp": "'send_message'|'list_channels'|'get_channel_history'", "slackChannel": "string – channel id (e.g. C0123) from list_integration_resources", "slackText": "string – message text (templates ok)", "slackLimit": "number (default 100/20)"},
+			"description": "Slack: post a message to a channel (as the bot or as the connected user), send a direct message (always as the user), list channels, read recent conversation history (channels, DMs, and group chats — DM/group reads use the connected user's identity).",
+			"dataFields":  map[string]any{"integrationOp": "'send_message'|'send_dm'|'list_channels'|'get_channel_history'", "slackChannel": "string – channel id (e.g. C0123) from list_integration_resources", "slackText": "string – message text (templates ok)", "slackSendAs": "'bot' (default) | 'user' – identity for send_message", "slackBotName": "string – optional display-name override for bot sends", "slackUserId": "string – DM recipient user id (e.g. U0123) from list_integration_resources", "slackLimit": "number (default 100/20)"},
 			"auth":        "OAuth connection used automatically — never set integrationToken.",
 			"handles":     map[string]any{"inputs": []string{"target (left)"}, "outputs": []string{"source (right)"}},
 		},

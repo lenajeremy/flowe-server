@@ -163,6 +163,9 @@ type FlowNodeData struct {
 	SlackChannel string `json:"slackChannel,omitempty"`
 	SlackText    string `json:"slackText,omitempty"`
 	SlackLimit   int    `json:"slackLimit,omitempty"`
+	SlackSendAs  string `json:"slackSendAs,omitempty"`  // "bot" (default) | "user"
+	SlackUserId  string `json:"slackUserId,omitempty"`  // DM recipient (send_dm)
+	SlackBotName string `json:"slackBotName,omitempty"` // display-name override for bot sends (chat:write.customize)
 
 	// googledrive
 	GDriveFileId   string `json:"gdriveFileId,omitempty"`

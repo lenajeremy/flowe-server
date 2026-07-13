@@ -21,10 +21,14 @@ type IntegrationConnection struct {
 	Provider      string     `json:"provider"       gorm:"not null;uniqueIndex:idx_integration_user_provider"`
 	AccessToken   string     `json:"-"              gorm:"not null"`
 	RefreshToken  string     `json:"-"`
-	ExpiresAt     *time.Time `json:"-"`
-	WorkspaceName string     `json:"workspace_name"`
-	WorkspaceID   string     `json:"workspace_id"`
-	Scope         string     `json:"scope"`
+	// UserAccessToken is a second grant acting as the human who connected
+	// (Slack xoxp- tokens) for providers where actions can run either as the
+	// bot or on the user's behalf. Empty for providers without user grants.
+	UserAccessToken string     `json:"-"`
+	ExpiresAt       *time.Time `json:"-"`
+	WorkspaceName   string     `json:"workspace_name"`
+	WorkspaceID     string     `json:"workspace_id"`
+	Scope           string     `json:"scope"`
 }
 
 // BeforeSave encrypts tokens on the way to the database. Encrypt is idempotent
@@ -32,6 +36,7 @@ type IntegrationConnection struct {
 func (c *IntegrationConnection) BeforeSave(_ *gorm.DB) error {
 	c.AccessToken = cryptobox.Encrypt(c.AccessToken)
 	c.RefreshToken = cryptobox.Encrypt(c.RefreshToken)
+	c.UserAccessToken = cryptobox.Encrypt(c.UserAccessToken)
 	return nil
 }
 
@@ -40,6 +45,7 @@ func (c *IntegrationConnection) BeforeSave(_ *gorm.DB) error {
 func (c *IntegrationConnection) AfterSave(_ *gorm.DB) error {
 	c.AccessToken = cryptobox.Decrypt(c.AccessToken)
 	c.RefreshToken = cryptobox.Decrypt(c.RefreshToken)
+	c.UserAccessToken = cryptobox.Decrypt(c.UserAccessToken)
 	return nil
 }
 
@@ -48,5 +54,6 @@ func (c *IntegrationConnection) AfterSave(_ *gorm.DB) error {
 func (c *IntegrationConnection) AfterFind(_ *gorm.DB) error {
 	c.AccessToken = cryptobox.Decrypt(c.AccessToken)
 	c.RefreshToken = cryptobox.Decrypt(c.RefreshToken)
+	c.UserAccessToken = cryptobox.Decrypt(c.UserAccessToken)
 	return nil
 }

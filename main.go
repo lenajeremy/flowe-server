@@ -60,6 +60,12 @@ func main() {
 		}
 		return handlers.FreshAccessToken(dbClient.DB, userID, provider)
 	}
+	executor.IntegrationUserTokenLookup = func(userID, provider string) string {
+		if userID == "" {
+			return ""
+		}
+		return handlers.UserGrantToken(dbClient.DB, userID, provider)
+	}
 
 	const port = 8080
 	api.InitServer(port, dbClient, redisClient)

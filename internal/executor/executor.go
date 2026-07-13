@@ -25,6 +25,12 @@ import (
 // main.go; used when a node has no manual token.
 var IntegrationCredsLookup func(userID, provider string) (token, workspace string)
 
+// IntegrationUserTokenLookup resolves the workflow owner's user-identity
+// grant (e.g. Slack xoxp- token) for providers whose actions can run either
+// as the bot or on the connecting human's behalf. Set by main.go; returns ""
+// when the connection predates user grants.
+var IntegrationUserTokenLookup func(userID, provider string) string
+
 // ── Approval channels ──────────────────────────────────────────
 
 var (
@@ -840,7 +846,11 @@ func executeNode(ctx context.Context, node WorkflowASTNode, outputs map[string]s
 		if token == "" {
 			return "", fmt.Errorf("Slack is not connected — use Connect Slack in the node settings")
 		}
-		return runSlack(ctx, token, d, outputs)
+		userToken := ""
+		if IntegrationUserTokenLookup != nil {
+			userToken = IntegrationUserTokenLookup(ownerID, "slack")
+		}
+		return runSlack(ctx, token, userToken, d, outputs)
 
 	case NodeTypeGoogleDrive:
 		token := substituteTemplates(d.IntegrationToken, outputs)

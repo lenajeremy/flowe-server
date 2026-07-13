@@ -241,6 +241,9 @@ func exchangeSlackCode(code string) (*models.IntegrationConnection, error) {
 			ID   string `json:"id"`
 			Name string `json:"name"`
 		} `json:"team"`
+		AuthedUser struct {
+			AccessToken string `json:"access_token"` // user token (xoxp-…), from user_scope
+		} `json:"authed_user"`
 	}
 	if err := json.Unmarshal(raw, &tok); err != nil {
 		return nil, fmt.Errorf("parse slack token: %w", err)
@@ -249,15 +252,20 @@ func exchangeSlackCode(code string) (*models.IntegrationConnection, error) {
 		return nil, fmt.Errorf("slack token exchange failed: %s", tok.Error)
 	}
 	return &models.IntegrationConnection{
-		Provider:      "slack",
-		AccessToken:   tok.AccessToken,
-		Scope:         tok.Scope,
-		WorkspaceName: tok.Team.Name,
-		WorkspaceID:   tok.Team.ID,
+		Provider:        "slack",
+		AccessToken:     tok.AccessToken,
+		UserAccessToken: tok.AuthedUser.AccessToken,
+		Scope:           tok.Scope,
+		WorkspaceName:   tok.Team.Name,
+		WorkspaceID:     tok.Team.ID,
 	}, nil
 }
 
-func slackResources(token string) ([]integrationResource, error) {
+// slackResources lists everything pickable in a Slack node: channels (bot
+// token), workspace members for the DM recipient picker, and — via the user
+// token, since bots are never members of them — the connecting user's DMs and
+// group chats, surfaced as type "channel" so history/send can target them.
+func slackResources(token, userToken string) ([]integrationResource, error) {
 	req, _ := http.NewRequest(http.MethodGet, "https://slack.com/api/conversations.list?limit=200&exclude_archived=true&types=public_channel,private_channel", nil)
 	req.Header.Set("Authorization", "Bearer "+token)
 	raw, err := doOAuthRequest(req)
@@ -282,5 +290,117 @@ func slackResources(token string) ([]integrationResource, error) {
 	for _, ch := range res.Channels {
 		out = append(out, integrationResource{ID: ch.ID, Name: "#" + ch.Name, Type: "channel"})
 	}
+	// Workspace members for the DM recipient picker. Best-effort: connections
+	// made before the users:read scope was requested get missing_scope here,
+	// which must not break the channel picker.
+	users, usersErr := slackUsers(token)
+	if usersErr == nil {
+		out = append(out, users...)
+	}
+	// The user's own DMs and group chats (user token; best-effort likewise).
+	if userToken != "" {
+		nameOf := make(map[string]string, len(users))
+		for _, u := range users {
+			nameOf[u.ID] = strings.TrimPrefix(u.Name, "@")
+		}
+		if dms, err := slackDMs(userToken, nameOf); err == nil {
+			out = append(out, dms...)
+		}
+	}
 	return out, nil
+}
+
+// slackDMs lists the user's direct and group-message conversations. nameOf
+// maps user IDs to display names for labelling DM entries.
+func slackDMs(userToken string, nameOf map[string]string) ([]integrationResource, error) {
+	req, _ := http.NewRequest(http.MethodGet, "https://slack.com/api/conversations.list?limit=200&exclude_archived=true&types=im,mpim", nil)
+	req.Header.Set("Authorization", "Bearer "+userToken)
+	raw, err := doOAuthRequest(req)
+	if err != nil {
+		return nil, err
+	}
+	var res struct {
+		OK       bool   `json:"ok"`
+		Error    string `json:"error"`
+		Channels []struct {
+			ID     string `json:"id"`
+			Name   string `json:"name"`
+			IsIM   bool   `json:"is_im"`
+			IsMpim bool   `json:"is_mpim"`
+			User   string `json:"user"` // im only: the other participant
+		} `json:"channels"`
+	}
+	if err := json.Unmarshal(raw, &res); err != nil {
+		return nil, fmt.Errorf("parse slack dms: %w", err)
+	}
+	if !res.OK {
+		return nil, fmt.Errorf("slack dms error: %s", res.Error)
+	}
+	out := make([]integrationResource, 0, len(res.Channels))
+	for _, ch := range res.Channels {
+		switch {
+		case ch.IsIM:
+			if ch.User == "USLACKBOT" {
+				continue
+			}
+			name := firstNonEmptyStr(nameOf[ch.User], ch.User)
+			out = append(out, integrationResource{ID: ch.ID, Name: "DM: @" + name, Type: "channel"})
+		case ch.IsMpim:
+			// mpdm-alice--bob--carol-1 → "Group: alice, bob, carol"
+			name := strings.TrimPrefix(ch.Name, "mpdm-")
+			if i := strings.LastIndex(name, "-"); i > 0 {
+				name = name[:i]
+			}
+			name = strings.ReplaceAll(name, "--", ", ")
+			out = append(out, integrationResource{ID: ch.ID, Name: "Group: " + name, Type: "channel"})
+		}
+	}
+	return out, nil
+}
+
+func slackUsers(token string) ([]integrationResource, error) {
+	req, _ := http.NewRequest(http.MethodGet, "https://slack.com/api/users.list?limit=200", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	raw, err := doOAuthRequest(req)
+	if err != nil {
+		return nil, err
+	}
+	var res struct {
+		OK      bool   `json:"ok"`
+		Error   string `json:"error"`
+		Members []struct {
+			ID      string `json:"id"`
+			Name    string `json:"name"`
+			Deleted bool   `json:"deleted"`
+			IsBot   bool   `json:"is_bot"`
+			Profile struct {
+				DisplayName string `json:"display_name"`
+				RealName    string `json:"real_name"`
+			} `json:"profile"`
+		} `json:"members"`
+	}
+	if err := json.Unmarshal(raw, &res); err != nil {
+		return nil, fmt.Errorf("parse slack users: %w", err)
+	}
+	if !res.OK {
+		return nil, fmt.Errorf("slack users error: %s", res.Error)
+	}
+	out := make([]integrationResource, 0, len(res.Members))
+	for _, m := range res.Members {
+		if m.Deleted || m.IsBot || m.ID == "USLACKBOT" {
+			continue
+		}
+		name := firstNonEmptyStr(m.Profile.DisplayName, m.Profile.RealName, m.Name)
+		out = append(out, integrationResource{ID: m.ID, Name: "@" + name, Type: "user"})
+	}
+	return out, nil
+}
+
+func firstNonEmptyStr(vals ...string) string {
+	for _, v := range vals {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
 }

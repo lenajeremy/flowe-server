@@ -147,7 +147,16 @@ var oauthProviders = map[string]oauthProvider{
 		authorizeURL: "https://slack.com/oauth/v2/authorize",
 		clientIDEnv:  "SLACK_CLIENT_ID",
 		secretEnv:    "SLACK_CLIENT_SECRET",
-		extraAuthQ:   url.Values{"scope": {"chat:write,channels:read,channels:history,groups:read"}},
+		// scope = bot token grants; user_scope = a second token acting as the
+		// human who connected, so sends can run "as me" (users:read powers the
+		// DM recipient picker).
+		// chat:write.customize lets bot sends override the display name/icon;
+		// the im/mpim user scopes let workflows list and read the connecting
+		// user's DMs and group chats (bots are never members of those).
+		extraAuthQ: url.Values{
+			"scope":      {"chat:write,chat:write.customize,channels:read,channels:history,groups:read,users:read"},
+			"user_scope": {"chat:write,im:write,im:read,im:history,mpim:read,mpim:history"},
+		},
 	},
 	// Shopify's authorize URL is per-shop, so ConnectIntegration/Callback
 	// handle it specially; this entry exists for availability + resource routing.
@@ -428,7 +437,7 @@ func (h *WorkflowHandler) listProviderResources(userID, provider string) ([]inte
 	case "outlook":
 		return outlookResources(token)
 	case "slack":
-		return slackResources(token)
+		return slackResources(token, UserGrantToken(h.db.DB, userID, "slack"))
 	// googledocs / googlesheets expose no pickable resource list (drive.file
 	// scope only sees app-created files) — they fall through to empty.
 	}
@@ -746,6 +755,17 @@ func FreshAccessToken(db *gorm.DB, userID, provider string) (token, workspace st
 		return refreshed.AccessToken, refreshed.WorkspaceID
 	}
 	return conn.AccessToken, conn.WorkspaceID
+}
+
+// UserGrantToken returns the stored user-identity token (e.g. Slack xoxp-)
+// for acting on the connecting human's behalf, or "" when the connection
+// predates user grants. These tokens don't expire, so no refresh path.
+func UserGrantToken(db *gorm.DB, userID, provider string) string {
+	var conn models.IntegrationConnection
+	if err := db.Where("user_id = ? AND provider = ?", userID, provider).First(&conn).Error; err != nil {
+		return ""
+	}
+	return conn.UserAccessToken
 }
 
 // refreshConnection exchanges the stored refresh token for a new access token
