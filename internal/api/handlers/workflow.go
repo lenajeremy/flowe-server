@@ -130,6 +130,8 @@ type workflowBody struct {
 	Name  string          `json:"name"  binding:"required"`
 	Nodes json.RawMessage `json:"nodes"`
 	Edges json.RawMessage `json:"edges"`
+	// Pointer: editor saves omit it, and that must not blank a stored value.
+	Description *string `json:"description"`
 }
 
 // loadOwnedWorkflow fetches a workflow only if it belongs to the session
@@ -157,6 +159,9 @@ func (h *WorkflowHandler) Create(c *gin.Context) {
 		Nodes:  models.JSONB(body.Nodes),
 		Edges:  models.JSONB(body.Edges),
 	}
+	if body.Description != nil {
+		wf.Description = *body.Description
+	}
 	if err := h.db.DB.Create(wf).Error; err != nil {
 		slog.Error("failed to create workflow", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to save workflow"})
@@ -182,6 +187,9 @@ func (h *WorkflowHandler) Update(c *gin.Context) {
 	wf.Name = body.Name
 	wf.Nodes = models.JSONB(body.Nodes)
 	wf.Edges = models.JSONB(body.Edges)
+	if body.Description != nil {
+		wf.Description = *body.Description
+	}
 
 	if err := h.db.DB.Save(wf).Error; err != nil {
 		slog.Error("failed to update workflow", "id", id, "error", err)
@@ -194,18 +202,23 @@ func (h *WorkflowHandler) Update(c *gin.Context) {
 // workflowSummary is the list payload: metadata only. Nodes/edges are heavy
 // JSONB and belong to GetOne — the list view never renders them.
 type workflowSummary struct {
-	ID        string    `json:"id"`
-	Name      string    `json:"name"`
-	NodeCount int       `json:"node_count"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	ID          string       `json:"id"`
+	Name        string       `json:"name"`
+	Description string       `json:"description"`
+	NodeCount   int          `json:"node_count"`
+	NodeTypes   models.JSONB `json:"node_types"` // distinct node types, for card icons
+	CreatedAt   time.Time    `json:"created_at"`
+	UpdatedAt   time.Time    `json:"updated_at"`
 }
 
 // List — GET /api/workflows
 func (h *WorkflowHandler) List(c *gin.Context) {
 	summaries := []workflowSummary{}
 	if err := h.db.DB.Model(&models.Workflow{}).
-		Select("id, name, jsonb_array_length(nodes) AS node_count, created_at, updated_at").
+		Select(`id, name, description, jsonb_array_length(nodes) AS node_count,
+			(SELECT COALESCE(jsonb_agg(DISTINCT n->'data'->>'nodeType'), '[]'::jsonb)
+			 FROM jsonb_array_elements(nodes) n) AS node_types,
+			created_at, updated_at`).
 		Where("user_id = ?", auth.UserID(c)).
 		Order("updated_at desc").Scan(&summaries).Error; err != nil {
 		slog.Error("failed to list workflows", "error", err)

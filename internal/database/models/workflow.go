@@ -29,8 +29,11 @@ type Workflow struct {
 	BaseModel
 	UserID string `json:"user_id" gorm:"type:uuid;not null;index"`
 	Name   string `json:"name"  gorm:"not null;index"`
-	Nodes  JSONB  `json:"nodes" gorm:"type:jsonb;not null;default:'[]'"`
-	Edges  JSONB  `json:"edges" gorm:"type:jsonb;not null;default:'[]'"`
+	// Description is the user's own words for the flow — the AI-builder prompt
+	// that created it, shown on the dashboard card.
+	Description string `json:"description"`
+	Nodes       JSONB  `json:"nodes" gorm:"type:jsonb;not null;default:'[]'"`
+	Edges       JSONB  `json:"edges" gorm:"type:jsonb;not null;default:'[]'"`
 }
 
 // ApiKey stores hashed API keys for programmatic workflow triggers.

@@ -113,7 +113,7 @@ var chatModels = []chatModelSpec{
 	},
 }
 
-const defaultChatModel = "claude-sonnet-4-6"
+const defaultChatModel = "gpt-5.5"
 
 func resolveChatModel(id string) chatModelSpec {
 	var fallback chatModelSpec
