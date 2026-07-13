@@ -231,19 +231,49 @@ func callOpenAI(ctx context.Context, model, system, user string, temp float64, m
 
 // ── Template substitution ─────────────────────────────────────
 
-var templateRe = regexp.MustCompile(`\{\{([\w-]+)\.output\}\}`)
+// templateRe matches {{nodeId.output}} and, optionally, a dotted field path into
+// that node's JSON output: {{nodeId.output.field}} or {{nodeId.output.a.b}}.
+var templateRe = regexp.MustCompile(`\{\{([\w-]+)\.output((?:\.[\w-]+)*)\}\}`)
 
 func substituteTemplates(text string, outputs map[string]string) string {
 	return templateRe.ReplaceAllStringFunc(text, func(m string) string {
 		parts := templateRe.FindStringSubmatch(m)
-		if len(parts) < 2 {
+		if len(parts) < 3 {
 			return m
 		}
-		if v, ok := outputs[parts[1]]; ok {
-			return v
+		base, ok := outputs[parts[1]]
+		if !ok {
+			return "[no output from " + parts[1] + "]"
 		}
-		return "[no output from " + parts[1] + "]"
+		if parts[2] == "" {
+			return base // whole output — the long-standing behaviour
+		}
+		return resolveJSONPath(base, parts[2])
 	})
+}
+
+// resolveJSONPath walks a leading-dot path (".a.b") into a JSON-encoded string,
+// returning the leaf as text. Non-JSON or a missing field yields a readable
+// placeholder rather than a hard failure.
+func resolveJSONPath(raw, path string) string {
+	var v any
+	if json.Unmarshal([]byte(raw), &v) != nil {
+		return "[" + strings.TrimPrefix(path, ".") + " unavailable — output is not JSON]"
+	}
+	for _, key := range strings.Split(strings.TrimPrefix(path, "."), ".") {
+		obj, ok := v.(map[string]any)
+		if !ok {
+			return "[no field " + key + "]"
+		}
+		if v, ok = obj[key]; !ok {
+			return "[no field " + key + "]"
+		}
+	}
+	if s, ok := v.(string); ok {
+		return s
+	}
+	b, _ := json.Marshal(v)
+	return string(b)
 }
 
 func isAnthropicModel(model string) bool { return strings.HasPrefix(model, "claude") }
@@ -526,7 +556,7 @@ func executeNode(ctx context.Context, node WorkflowASTNode, outputs map[string]s
 		req.Header.Set("Content-Type", "application/json")
 		if d.RequestHeaders != "" {
 			var headers map[string]string
-			if err := json.Unmarshal([]byte(d.RequestHeaders), &headers); err == nil {
+			if err := json.Unmarshal([]byte(substituteTemplates(d.RequestHeaders, outputs)), &headers); err == nil {
 				for k, v := range headers {
 					req.Header.Set(k, v)
 				}
@@ -567,7 +597,7 @@ func executeNode(ctx context.Context, node WorkflowASTNode, outputs map[string]s
 		return fmt.Sprintf(`{"status":"sent","to":"%s","subject":"%s","id":"%s"}`, to, subject, sent.Id), nil
 
 	case NodeTypeHumanApproval:
-		message := d.ApprovalMessage
+		message := substituteTemplates(d.ApprovalMessage, outputs)
 		if message == "" {
 			message = "Please review and approve or reject this step."
 		}
