@@ -139,7 +139,7 @@ var oauthProviders = map[string]oauthProvider{
 		secretEnv:    "MICROSOFT_CLIENT_SECRET",
 		// offline_access yields a refresh token; the rest cover mail + calendar.
 		extraAuthQ: url.Values{
-			"scope": {"offline_access Mail.ReadWrite Mail.Send Calendars.ReadWrite User.Read"},
+			"scope": {"offline_access Mail.ReadWrite Mail.Send Calendars.ReadWrite Contacts.ReadWrite User.Read"},
 		},
 	},
 	"slack": {
@@ -154,8 +154,8 @@ var oauthProviders = map[string]oauthProvider{
 		// the im/mpim user scopes let workflows list and read the connecting
 		// user's DMs and group chats (bots are never members of those).
 		extraAuthQ: url.Values{
-			"scope":      {"chat:write,chat:write.customize,channels:read,channels:history,groups:read,users:read"},
-			"user_scope": {"chat:write,im:write,im:read,im:history,mpim:read,mpim:history"},
+			"scope":      {"chat:write,chat:write.customize,chat:write.public,channels:read,channels:history,channels:manage,channels:join,groups:read,groups:write,users:read,users:read.email,reactions:write,pins:write,files:write"},
+			"user_scope": {"chat:write,im:write,im:read,im:history,mpim:read,mpim:history,search:read"},
 		},
 	},
 	// Shopify's authorize URL is per-shop, so ConnectIntegration/Callback

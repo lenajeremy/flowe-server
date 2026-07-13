@@ -155,6 +155,241 @@ func runOutlook(ctx context.Context, token string, d FlowNodeData, outputs map[s
 		b, _ := json.Marshal(map[string]any{"status": "created", "id": created.ID, "link": created.WebLink})
 		return string(b), nil
 
+	case "reply_to_message":
+		// createReply-and-send in one call; comment is prepended to the quoted
+		// original by Graph.
+		if _, err := graphCall(ctx, token, http.MethodPost,
+			"/me/messages/"+url.PathEscape(sub(d.OutlookMessageId))+"/reply",
+			map[string]any{"comment": sub(d.OutlookComment)}); err != nil {
+			return "", err
+		}
+		return `{"status":"replied"}`, nil
+
+	case "forward_message":
+		if _, err := graphCall(ctx, token, http.MethodPost,
+			"/me/messages/"+url.PathEscape(sub(d.OutlookMessageId))+"/forward",
+			map[string]any{
+				"comment":      sub(d.OutlookComment),
+				"toRecipients": graphRecipients(sub(d.OutlookTo)),
+			}); err != nil {
+			return "", err
+		}
+		b, _ := json.Marshal(map[string]any{"status": "forwarded", "to": sub(d.OutlookTo)})
+		return string(b), nil
+
+	case "create_draft":
+		msg := map[string]any{
+			"subject":      sub(d.OutlookSubject),
+			"body":         map[string]string{"contentType": "HTML", "content": sub(d.OutlookBody)},
+			"toRecipients": graphRecipients(sub(d.OutlookTo)),
+		}
+		if cc := sub(d.OutlookCc); cc != "" {
+			msg["ccRecipients"] = graphRecipients(cc)
+		}
+		raw, err := graphCall(ctx, token, http.MethodPost, "/me/messages", msg)
+		if err != nil {
+			return "", err
+		}
+		var created struct {
+			ID string `json:"id"`
+		}
+		_ = json.Unmarshal([]byte(raw), &created)
+		b, _ := json.Marshal(map[string]any{"status": "draft_created", "id": created.ID})
+		return string(b), nil
+
+	case "move_message":
+		raw, err := graphCall(ctx, token, http.MethodPost,
+			"/me/messages/"+url.PathEscape(sub(d.OutlookMessageId))+"/move",
+			map[string]any{"destinationId": sub(d.OutlookFolderId)})
+		if err != nil {
+			return "", err
+		}
+		var moved struct {
+			ID string `json:"id"`
+		}
+		_ = json.Unmarshal([]byte(raw), &moved)
+		b, _ := json.Marshal(map[string]any{"status": "moved", "id": moved.ID})
+		return string(b), nil
+
+	case "mark_read":
+		if _, err := graphCall(ctx, token, http.MethodPatch,
+			"/me/messages/"+url.PathEscape(sub(d.OutlookMessageId)),
+			map[string]any{"isRead": true}); err != nil {
+			return "", err
+		}
+		return `{"status":"marked_read"}`, nil
+
+	case "flag_message":
+		if _, err := graphCall(ctx, token, http.MethodPatch,
+			"/me/messages/"+url.PathEscape(sub(d.OutlookMessageId)),
+			map[string]any{"flag": map[string]string{"flagStatus": "flagged"}}); err != nil {
+			return "", err
+		}
+		return `{"status":"flagged"}`, nil
+
+	case "delete_message":
+		// Graph DELETE moves to Deleted Items (soft delete).
+		if _, err := graphCall(ctx, token, http.MethodDelete,
+			"/me/messages/"+url.PathEscape(sub(d.OutlookMessageId)), nil); err != nil {
+			return "", err
+		}
+		return `{"status":"deleted"}`, nil
+
+	case "list_folders":
+		raw, err := graphCall(ctx, token, http.MethodGet, "/me/mailFolders?$top=50&$select=id,displayName,totalItemCount", nil)
+		if err != nil {
+			return "", err
+		}
+		var res struct {
+			Value []struct {
+				ID    string `json:"id"`
+				Name  string `json:"displayName"`
+				Count int    `json:"totalItemCount"`
+			} `json:"value"`
+		}
+		_ = json.Unmarshal([]byte(raw), &res)
+		out := make([]map[string]any, 0, len(res.Value))
+		for _, f := range res.Value {
+			out = append(out, map[string]any{"id": f.ID, "name": f.Name, "messages": f.Count})
+		}
+		b, _ := json.Marshal(out)
+		return string(b), nil
+
+	case "list_events":
+		q := url.Values{}
+		q.Set("$top", fmt.Sprint(intOr(d.OutlookLimit, 10)))
+		q.Set("$select", "id,subject,start,end,organizer,webLink")
+		q.Set("$orderby", "start/dateTime")
+		path := "/me/events?" + q.Encode()
+		if start, end := sub(d.OutlookStart), sub(d.OutlookEnd); start != "" && end != "" {
+			// calendarView expands recurring events within the window
+			path = "/me/calendarView?startDateTime=" + url.QueryEscape(start) +
+				"&endDateTime=" + url.QueryEscape(end) + "&" + q.Encode()
+		}
+		raw, err := graphCall(ctx, token, http.MethodGet, path, nil)
+		if err != nil {
+			return "", err
+		}
+		var res struct {
+			Value []struct {
+				ID      string `json:"id"`
+				Subject string `json:"subject"`
+				WebLink string `json:"webLink"`
+				Start   struct {
+					DateTime string `json:"dateTime"`
+				} `json:"start"`
+				End struct {
+					DateTime string `json:"dateTime"`
+				} `json:"end"`
+			} `json:"value"`
+		}
+		_ = json.Unmarshal([]byte(raw), &res)
+		out := make([]map[string]any, 0, len(res.Value))
+		for _, e := range res.Value {
+			out = append(out, map[string]any{
+				"id": e.ID, "subject": e.Subject,
+				"start": e.Start.DateTime, "end": e.End.DateTime, "link": e.WebLink,
+			})
+		}
+		b, _ := json.Marshal(out)
+		return string(b), nil
+
+	case "update_event":
+		patch := map[string]any{}
+		if v := sub(d.OutlookSubject); v != "" {
+			patch["subject"] = v
+		}
+		if v := sub(d.OutlookBody); v != "" {
+			patch["body"] = map[string]string{"contentType": "HTML", "content": v}
+		}
+		if v := sub(d.OutlookStart); v != "" {
+			patch["start"] = map[string]string{"dateTime": v, "timeZone": "UTC"}
+		}
+		if v := sub(d.OutlookEnd); v != "" {
+			patch["end"] = map[string]string{"dateTime": v, "timeZone": "UTC"}
+		}
+		if len(patch) == 0 {
+			return "", fmt.Errorf("Outlook: nothing to update — set a subject, body, start, or end")
+		}
+		if _, err := graphCall(ctx, token, http.MethodPatch,
+			"/me/events/"+url.PathEscape(sub(d.OutlookEventId)), patch); err != nil {
+			return "", err
+		}
+		return `{"status":"updated"}`, nil
+
+	case "delete_event":
+		if _, err := graphCall(ctx, token, http.MethodDelete,
+			"/me/events/"+url.PathEscape(sub(d.OutlookEventId)), nil); err != nil {
+			return "", err
+		}
+		return `{"status":"deleted"}`, nil
+
+	case "respond_to_event":
+		resp := sub(d.OutlookResponse)
+		switch resp {
+		case "accept", "decline", "tentativelyAccept":
+		default:
+			return "", fmt.Errorf("Outlook: response must be accept, decline, or tentativelyAccept")
+		}
+		if _, err := graphCall(ctx, token, http.MethodPost,
+			"/me/events/"+url.PathEscape(sub(d.OutlookEventId))+"/"+resp,
+			map[string]any{"comment": sub(d.OutlookComment), "sendResponse": true}); err != nil {
+			return "", err
+		}
+		b, _ := json.Marshal(map[string]any{"status": resp})
+		return string(b), nil
+
+	case "list_contacts":
+		q := url.Values{}
+		q.Set("$top", fmt.Sprint(intOr(d.OutlookLimit, 25)))
+		q.Set("$select", "id,displayName,emailAddresses")
+		if query := sub(d.OutlookQuery); query != "" {
+			q.Set("$search", `"`+query+`"`)
+		}
+		raw, err := graphCall(ctx, token, http.MethodGet, "/me/contacts?"+q.Encode(), nil)
+		if err != nil {
+			return "", err
+		}
+		var res struct {
+			Value []struct {
+				ID     string `json:"id"`
+				Name   string `json:"displayName"`
+				Emails []struct {
+					Address string `json:"address"`
+				} `json:"emailAddresses"`
+			} `json:"value"`
+		}
+		_ = json.Unmarshal([]byte(raw), &res)
+		out := make([]map[string]any, 0, len(res.Value))
+		for _, c := range res.Value {
+			email := ""
+			if len(c.Emails) > 0 {
+				email = c.Emails[0].Address
+			}
+			out = append(out, map[string]any{"id": c.ID, "name": c.Name, "email": email})
+		}
+		b, _ := json.Marshal(out)
+		return string(b), nil
+
+	case "create_contact":
+		name := sub(d.OutlookContactName)
+		contact := map[string]any{
+			"displayName": name,
+			"emailAddresses": []map[string]any{
+				{"address": sub(d.OutlookContactEmail), "name": name},
+			},
+		}
+		raw, err := graphCall(ctx, token, http.MethodPost, "/me/contacts", contact)
+		if err != nil {
+			return "", err
+		}
+		var created struct {
+			ID string `json:"id"`
+		}
+		_ = json.Unmarshal([]byte(raw), &created)
+		b, _ := json.Marshal(map[string]any{"status": "created", "id": created.ID, "name": name})
+		return string(b), nil
+
 	default:
 		return "", fmt.Errorf("unknown Outlook operation: %s", d.IntegrationOp)
 	}

@@ -123,6 +123,10 @@ type FlowNodeData struct {
 	GmailQuery     string `json:"gmailQuery,omitempty"`
 	GmailMessageId string `json:"gmailMessageId,omitempty"`
 	GmailLimit     int    `json:"gmailLimit,omitempty"`
+	GmailThreadId  string `json:"gmailThreadId,omitempty"`
+	GmailLabelId   string `json:"gmailLabelId,omitempty"`
+	GmailLabelName string `json:"gmailLabelName,omitempty"`
+	GmailDraftId   string `json:"gmailDraftId,omitempty"`
 
 	// stripe
 	StripeLimit         int    `json:"stripeLimit,omitempty"`
@@ -149,23 +153,39 @@ type FlowNodeData struct {
 	GCalLimit       int    `json:"gcalLimit,omitempty"`
 
 	// outlook
-	OutlookTo        string `json:"outlookTo,omitempty"`
-	OutlookCc        string `json:"outlookCc,omitempty"`
-	OutlookSubject   string `json:"outlookSubject,omitempty"`
-	OutlookBody      string `json:"outlookBody,omitempty"`
-	OutlookQuery     string `json:"outlookQuery,omitempty"`
-	OutlookMessageId string `json:"outlookMessageId,omitempty"`
-	OutlookLimit     int    `json:"outlookLimit,omitempty"`
-	OutlookStart     string `json:"outlookStart,omitempty"`
-	OutlookEnd       string `json:"outlookEnd,omitempty"`
+	OutlookTo           string `json:"outlookTo,omitempty"`
+	OutlookCc           string `json:"outlookCc,omitempty"`
+	OutlookSubject      string `json:"outlookSubject,omitempty"`
+	OutlookBody         string `json:"outlookBody,omitempty"`
+	OutlookQuery        string `json:"outlookQuery,omitempty"`
+	OutlookMessageId    string `json:"outlookMessageId,omitempty"`
+	OutlookLimit        int    `json:"outlookLimit,omitempty"`
+	OutlookStart        string `json:"outlookStart,omitempty"`
+	OutlookEnd          string `json:"outlookEnd,omitempty"`
+	OutlookFolderId     string `json:"outlookFolderId,omitempty"` // move_message target
+	OutlookEventId      string `json:"outlookEventId,omitempty"`  // update/delete/respond_to_event
+	OutlookComment      string `json:"outlookComment,omitempty"`  // reply/forward/respond comment
+	OutlookResponse     string `json:"outlookResponse,omitempty"` // accept | decline | tentativelyAccept
+	OutlookContactName  string `json:"outlookContactName,omitempty"`
+	OutlookContactEmail string `json:"outlookContactEmail,omitempty"`
 
 	// slack
-	SlackChannel string `json:"slackChannel,omitempty"`
-	SlackText    string `json:"slackText,omitempty"`
-	SlackLimit   int    `json:"slackLimit,omitempty"`
-	SlackSendAs  string `json:"slackSendAs,omitempty"`  // "bot" (default) | "user"
-	SlackUserId  string `json:"slackUserId,omitempty"`  // DM recipient (send_dm)
-	SlackBotName string `json:"slackBotName,omitempty"` // display-name override for bot sends (chat:write.customize)
+	SlackChannel     string `json:"slackChannel,omitempty"`
+	SlackText        string `json:"slackText,omitempty"`
+	SlackLimit       int    `json:"slackLimit,omitempty"`
+	SlackSendAs      string `json:"slackSendAs,omitempty"`      // "bot" (default) | "user"
+	SlackUserId      string `json:"slackUserId,omitempty"`      // DM recipient / invite targets (comma-sep ok)
+	SlackBotName     string `json:"slackBotName,omitempty"`     // display-name override for bot sends (chat:write.customize)
+	SlackThreadTs    string `json:"slackThreadTs,omitempty"`    // parent message ts (reply_in_thread)
+	SlackMessageTs   string `json:"slackMessageTs,omitempty"`   // target message ts (update/delete/react/pin)
+	SlackEmoji       string `json:"slackEmoji,omitempty"`       // reaction name, no colons
+	SlackChannelName string `json:"slackChannelName,omitempty"` // create_channel
+	SlackPrivate     string `json:"slackPrivate,omitempty"`     // "true" | "false" (create_channel)
+	SlackTopic       string `json:"slackTopic,omitempty"`       // set_channel_topic
+	SlackFileName    string `json:"slackFileName,omitempty"`    // upload_file
+	SlackFileContent string `json:"slackFileContent,omitempty"` // upload_file (text)
+	SlackEmail       string `json:"slackEmail,omitempty"`       // get_user_by_email
+	SlackPostAt      string `json:"slackPostAt,omitempty"`      // schedule_message (RFC3339)
 
 	// googledrive
 	GDriveFileId   string `json:"gdriveFileId,omitempty"`
