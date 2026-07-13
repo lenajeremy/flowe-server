@@ -11,7 +11,6 @@ import (
 	"net/http"
 	"os"
 	"regexp"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -166,10 +165,12 @@ func callAnthropic(ctx context.Context, model, system, user string, temp float64
 // ── OpenAI ────────────────────────────────────────────────────
 
 type openAIRequest struct {
-	Model       string          `json:"model"`
-	Temperature float64         `json:"temperature"`
-	MaxTokens   int             `json:"max_tokens"`
-	Messages    []openAIMessage `json:"messages"`
+	Model string `json:"model"`
+	// omitempty: gpt-5.x models reject temperature 0 — only send a real value.
+	Temperature float64 `json:"temperature,omitempty"`
+	// max_completion_tokens replaced max_tokens; gpt-5.x rejects the old name.
+	MaxTokens int             `json:"max_completion_tokens"`
+	Messages  []openAIMessage `json:"messages"`
 }
 type openAIMessage struct {
 	Role    string      `json:"role"`
@@ -291,95 +292,6 @@ func derefStr(p *string, fallback string) string {
 	return *p
 }
 
-func boolStr(b bool) string {
-	if b {
-		return "true"
-	}
-	return "false"
-}
-
-// ── Branch condition evaluator ────────────────────────────────
-
-var (
-	reStrCmp     = regexp.MustCompile(`^output\s*(===?|!==?)\s*['"](.*)['"]$`)
-	reNumCmp     = regexp.MustCompile(`^output\s*(===?|!==?|>=?|<=?)\s*(-?\d+(?:\.\d+)?)$`)
-	reLenCmp     = regexp.MustCompile(`^output\.length\s*(===?|!==?|>=?|<=?)\s*(\d+)$`)
-	reIncludes   = regexp.MustCompile(`^output\.includes\(['"](.+)['"]\)$`)
-	reStartsWith = regexp.MustCompile(`^output\.startsWith\(['"](.+)['"]\)$`)
-	reEndsWith   = regexp.MustCompile(`^output\.endsWith\(['"](.+)['"]\)$`)
-)
-
-func cmpFloats(a float64, op string, b float64) bool {
-	switch op {
-	case "==", "===":
-		return a == b
-	case "!=", "!==":
-		return a != b
-	case ">":
-		return a > b
-	case "<":
-		return a < b
-	case ">=":
-		return a >= b
-	case "<=":
-		return a <= b
-	}
-	return false
-}
-
-func evaluateBranchCondition(condition, upstream string) string {
-	condition = strings.TrimSpace(condition)
-	if condition == "true" {
-		return "true"
-	}
-	if condition == "false" {
-		return "false"
-	}
-	truthy := upstream != "" && upstream != "false" && upstream != "0" && upstream != "null" && upstream != "undefined"
-	if condition == "output" {
-		return boolStr(truthy)
-	}
-	if condition == "!output" {
-		return boolStr(!truthy)
-	}
-	if m := reIncludes.FindStringSubmatch(condition); len(m) > 0 {
-		return boolStr(strings.Contains(upstream, m[1]))
-	}
-	if m := reStartsWith.FindStringSubmatch(condition); len(m) > 0 {
-		return boolStr(strings.HasPrefix(upstream, m[1]))
-	}
-	if m := reEndsWith.FindStringSubmatch(condition); len(m) > 0 {
-		return boolStr(strings.HasSuffix(upstream, m[1]))
-	}
-	if m := reLenCmp.FindStringSubmatch(condition); len(m) > 0 {
-		rhs, _ := strconv.ParseFloat(m[2], 64)
-		return boolStr(cmpFloats(float64(len(upstream)), m[1], rhs))
-	}
-	if m := reStrCmp.FindStringSubmatch(condition); len(m) > 0 {
-		switch m[1] {
-		case "==", "===":
-			return boolStr(upstream == m[2])
-		case "!=", "!==":
-			return boolStr(upstream != m[2])
-		}
-	}
-	if m := reNumCmp.FindStringSubmatch(condition); len(m) > 0 {
-		rhs, err := strconv.ParseFloat(m[2], 64)
-		if err == nil {
-			if lhs, err2 := strconv.ParseFloat(upstream, 64); err2 == nil {
-				return boolStr(cmpFloats(lhs, m[1], rhs))
-			}
-			switch m[1] {
-			case "==", "===":
-				return boolStr(upstream == m[2])
-			case "!=", "!==":
-				return boolStr(upstream != m[2])
-			}
-		}
-	}
-	return "false"
-}
-
 // ── Topo sort ─────────────────────────────────────────────────
 
 func topoSort(nodes []WorkflowASTNode, edges []WorkflowASTEdge) []string {
@@ -489,7 +401,10 @@ func executeNode(ctx context.Context, node WorkflowASTNode, outputs map[string]s
 		}
 		return callOpenAI(ctx, model, sys, usr, temp, maxTok, keys.OpenAI, imgs)
 	case NodeTypeBranch:
-		cond := derefStr(d.Condition, "false")
+		cond := derefStr(d.Condition, "")
+		if cond == "" {
+			return "", fmt.Errorf("branch %q has no condition set", node.Data.Label)
+		}
 		var up string
 		for _, e := range edges {
 			if e.Target == node.ID {
@@ -499,27 +414,43 @@ func executeNode(ctx context.Context, node WorkflowASTNode, outputs map[string]s
 				break
 			}
 		}
-		// Use LLM to evaluate the condition when an API key is available.
-		// This lets users write plain-language conditions like "Does the text mention an error?"
-		if keys.Anthropic != "" || keys.OpenAI != "" {
-			system := `You are a boolean condition evaluator. The user will give you a condition and some text. Reply with exactly one word: true or false. No punctuation, no explanation.`
-			prompt := fmt.Sprintf("Condition: %s\n\nText to evaluate:\n%s", cond, up)
-			var result string
-			var err error
-			if keys.Anthropic != "" {
-				result, err = callAnthropic(ctx, "claude-haiku-4-5-20251001", system, prompt, 0, 5, keys.Anthropic, nil)
-			} else {
-				result, err = callOpenAI(ctx, "gpt-4o-mini", system, prompt, 0, 5, keys.OpenAI, nil)
-			}
-			if err == nil {
-				result = strings.TrimSpace(strings.ToLower(result))
-				if result == "true" || result == "false" {
-					return result, nil
-				}
-			}
+		// Conditions are evaluated by an LLM (plain-language or code-style both
+		// work). No silent fallback: if every available provider fails, the node
+		// errors with the real reason instead of quietly picking a path.
+		system := `You are a boolean condition evaluator. The user will give you a condition and some text. Reply with exactly one word: true or false. No punctuation, no explanation.`
+		prompt := fmt.Sprintf("Condition: %s\n\nText to evaluate:\n%s", cond, up)
+		type attempt struct {
+			name string
+			call func() (string, error)
 		}
-		// Fallback: regex-based evaluation (no API key, or LLM returned unexpected output)
-		return evaluateBranchCondition(cond, up), nil
+		var attempts []attempt
+		if keys.Anthropic != "" {
+			attempts = append(attempts, attempt{"anthropic", func() (string, error) {
+				return callAnthropic(ctx, "claude-haiku-4-5-20251001", system, prompt, 0, 8, keys.Anthropic, nil)
+			}})
+		}
+		if keys.OpenAI != "" {
+			attempts = append(attempts, attempt{"openai", func() (string, error) {
+				return callOpenAI(ctx, "gpt-5.4-mini", system, prompt, 0, 8, keys.OpenAI, nil)
+			}})
+		}
+		if len(attempts) == 0 {
+			return "", fmt.Errorf("branch conditions need an LLM — set ANTHROPIC_API_KEY or OPENAI_API_KEY on the server")
+		}
+		var failures []string
+		for _, a := range attempts {
+			result, err := a.call()
+			if err != nil {
+				failures = append(failures, fmt.Sprintf("%s: %v", a.name, err))
+				continue
+			}
+			verdict := strings.Trim(strings.TrimSpace(strings.ToLower(result)), `.!"' `+"`")
+			if verdict == "true" || verdict == "false" {
+				return verdict, nil
+			}
+			failures = append(failures, fmt.Sprintf("%s: expected true/false, got %q", a.name, result))
+		}
+		return "", fmt.Errorf("branch condition evaluation failed — %s", strings.Join(failures, "; "))
 	case NodeTypeLoop:
 		// Collect upstream output and return it — RunWorkflow handles actual iteration
 		for _, e := range edges {
