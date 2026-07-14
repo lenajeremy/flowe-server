@@ -149,18 +149,41 @@ type FlowNodeData struct {
 	GmailDraftId   string `json:"gmailDraftId,omitempty"`
 
 	// stripe
-	StripeLimit         int    `json:"stripeLimit,omitempty"`
-	StripeCustomerEmail string `json:"stripeCustomerEmail,omitempty"`
-	StripePriceId       string `json:"stripePriceId,omitempty"`
-	StripeQuantity      int    `json:"stripeQuantity,omitempty"`
+	StripeLimit           int    `json:"stripeLimit,omitempty"`
+	StripeCustomerEmail   string `json:"stripeCustomerEmail,omitempty"`
+	StripePriceId         string `json:"stripePriceId,omitempty"`
+	StripeQuantity        int    `json:"stripeQuantity,omitempty"`
+	StripeCustomerId      string `json:"stripeCustomerId,omitempty"`
+	StripeCustomerName    string `json:"stripeCustomerName,omitempty"`
+	StripeSubscriptionId  string `json:"stripeSubscriptionId,omitempty"`
+	StripeProductId       string `json:"stripeProductId,omitempty"`
+	StripeProductName     string `json:"stripeProductName,omitempty"`
+	StripeAmount          int    `json:"stripeAmount,omitempty"`   // cents
+	StripeCurrency        string `json:"stripeCurrency,omitempty"` // usd, eur, …
+	StripeInterval        string `json:"stripeInterval,omitempty"` // one-time | month | year
+	StripeInvoiceId       string `json:"stripeInvoiceId,omitempty"`
+	StripePaymentIntentId string `json:"stripePaymentIntentId,omitempty"`
+	StripeRefundReason    string `json:"stripeRefundReason,omitempty"` // duplicate | fraudulent | requested_by_customer
 
 	// shopify
-	ShopifyOrderId     string `json:"shopifyOrderId,omitempty"`
-	ShopifyLimit       int    `json:"shopifyLimit,omitempty"`
-	ShopifyStatus      string `json:"shopifyStatus,omitempty"`
-	ShopifyTitle       string `json:"shopifyTitle,omitempty"`
-	ShopifyDescription string `json:"shopifyDescription,omitempty"`
-	ShopifyPrice       string `json:"shopifyPrice,omitempty"`
+	ShopifyOrderId         string `json:"shopifyOrderId,omitempty"`
+	ShopifyLimit           int    `json:"shopifyLimit,omitempty"`
+	ShopifyStatus          string `json:"shopifyStatus,omitempty"`
+	ShopifyTitle           string `json:"shopifyTitle,omitempty"`
+	ShopifyDescription     string `json:"shopifyDescription,omitempty"`
+	ShopifyPrice           string `json:"shopifyPrice,omitempty"`
+	ShopifyProductId       string `json:"shopifyProductId,omitempty"`
+	ShopifyCustomerId      string `json:"shopifyCustomerId,omitempty"`
+	ShopifyCustomerEmail   string `json:"shopifyCustomerEmail,omitempty"`
+	ShopifyCustomerName    string `json:"shopifyCustomerName,omitempty"`
+	ShopifyQuery           string `json:"shopifyQuery,omitempty"`
+	ShopifyQuantity        int    `json:"shopifyQuantity,omitempty"`
+	ShopifyInventoryItemId string `json:"shopifyInventoryItemId,omitempty"`
+	ShopifyLocationId      string `json:"shopifyLocationId,omitempty"`
+	ShopifyDelta           int    `json:"shopifyDelta,omitempty"` // inventory adjustment ±
+	ShopifyDiscountCode    string `json:"shopifyDiscountCode,omitempty"`
+	ShopifyDiscountType    string `json:"shopifyDiscountType,omitempty"`  // percentage | fixed_amount
+	ShopifyDiscountValue   string `json:"shopifyDiscountValue,omitempty"` // "10" (% or amount)
 
 	// googlecalendar
 	GCalCalendarId  string `json:"gcalCalendarId,omitempty"`

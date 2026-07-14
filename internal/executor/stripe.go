@@ -89,6 +89,125 @@ func runStripe(ctx context.Context, token string, d FlowNodeData, outputs map[st
 		}
 		return raw, nil
 
+	case "create_customer":
+		form := url.Values{}
+		if email := sub(d.StripeCustomerEmail); email != "" {
+			form.Set("email", email)
+		}
+		if name := sub(d.StripeCustomerName); name != "" {
+			form.Set("name", name)
+		}
+		raw, err := stripeCall(ctx, token, http.MethodPost, "/v1/customers", form)
+		if err != nil {
+			return "", err
+		}
+		var c struct {
+			ID    string `json:"id"`
+			Email string `json:"email"`
+		}
+		_ = json.Unmarshal([]byte(raw), &c)
+		b, _ := json.Marshal(map[string]any{"status": "created", "id": c.ID, "email": c.Email})
+		return string(b), nil
+
+	case "get_customer":
+		return stripeList(ctx, token, "/v1/customers/"+url.PathEscape(sub(d.StripeCustomerId)))
+
+	case "list_subscriptions":
+		q := url.Values{"limit": {limit}}
+		if cust := sub(d.StripeCustomerId); cust != "" {
+			q.Set("customer", cust)
+		}
+		return stripeList(ctx, token, "/v1/subscriptions?"+q.Encode())
+
+	case "get_subscription":
+		return stripeList(ctx, token, "/v1/subscriptions/"+url.PathEscape(sub(d.StripeSubscriptionId)))
+
+	case "cancel_subscription":
+		raw, err := stripeCall(ctx, token, http.MethodDelete,
+			"/v1/subscriptions/"+url.PathEscape(sub(d.StripeSubscriptionId)), nil)
+		if err != nil {
+			return "", err
+		}
+		var sc struct {
+			ID     string `json:"id"`
+			Status string `json:"status"`
+		}
+		_ = json.Unmarshal([]byte(raw), &sc)
+		b, _ := json.Marshal(map[string]any{"status": sc.Status, "id": sc.ID})
+		return string(b), nil
+
+	case "list_products":
+		return stripeList(ctx, token, "/v1/products?limit="+limit)
+
+	case "create_product":
+		form := url.Values{"name": {sub(d.StripeProductName)}}
+		raw, err := stripeCall(ctx, token, http.MethodPost, "/v1/products", form)
+		if err != nil {
+			return "", err
+		}
+		var pr struct {
+			ID   string `json:"id"`
+			Name string `json:"name"`
+		}
+		_ = json.Unmarshal([]byte(raw), &pr)
+		b, _ := json.Marshal(map[string]any{"status": "created", "id": pr.ID, "name": pr.Name})
+		return string(b), nil
+
+	case "create_price":
+		if d.StripeAmount <= 0 {
+			return "", fmt.Errorf("Stripe: stripeAmount (cents) must be > 0")
+		}
+		form := url.Values{}
+		form.Set("product", sub(d.StripeProductId))
+		form.Set("unit_amount", fmt.Sprint(d.StripeAmount))
+		form.Set("currency", firstNonEmpty(sub(d.StripeCurrency), "usd"))
+		if iv := d.StripeInterval; iv == "month" || iv == "year" {
+			form.Set("recurring[interval]", iv)
+		}
+		raw, err := stripeCall(ctx, token, http.MethodPost, "/v1/prices", form)
+		if err != nil {
+			return "", err
+		}
+		var pc struct {
+			ID string `json:"id"`
+		}
+		_ = json.Unmarshal([]byte(raw), &pc)
+		b, _ := json.Marshal(map[string]any{"status": "created", "id": pc.ID})
+		return string(b), nil
+
+	case "get_invoice":
+		return stripeList(ctx, token, "/v1/invoices/"+url.PathEscape(sub(d.StripeInvoiceId)))
+
+	case "get_payment_intent":
+		return stripeList(ctx, token, "/v1/payment_intents/"+url.PathEscape(sub(d.StripePaymentIntentId)))
+
+	case "create_refund":
+		form := url.Values{"payment_intent": {sub(d.StripePaymentIntentId)}}
+		if d.StripeAmount > 0 {
+			form.Set("amount", fmt.Sprint(d.StripeAmount)) // partial refund, cents
+		}
+		if r := d.StripeRefundReason; r == "duplicate" || r == "fraudulent" || r == "requested_by_customer" {
+			form.Set("reason", r)
+		}
+		raw, err := stripeCall(ctx, token, http.MethodPost, "/v1/refunds", form)
+		if err != nil {
+			return "", err
+		}
+		var rf struct {
+			ID     string `json:"id"`
+			Status string `json:"status"`
+			Amount int    `json:"amount"`
+		}
+		_ = json.Unmarshal([]byte(raw), &rf)
+		b, _ := json.Marshal(map[string]any{"status": rf.Status, "id": rf.ID, "amount": rf.Amount})
+		return string(b), nil
+
+	case "list_refunds":
+		return stripeList(ctx, token, "/v1/refunds?limit="+limit)
+
+	case "list_events":
+		return stripeList(ctx, token, "/v1/events?limit="+limit)
+
 	default:
 		return "", fmt.Errorf("unknown Stripe operation: %s", d.IntegrationOp)
 	}

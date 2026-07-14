@@ -301,7 +301,7 @@ func (h *WorkflowHandler) ConnectIntegration(c *gin.Context) {
 		q := url.Values{}
 		q.Set("client_id", clientID)
 		q.Set("redirect_uri", oauthRedirectURI(provider))
-		q.Set("scope", "read_orders,read_products,write_products,read_customers")
+		q.Set("scope", "read_orders,write_orders,read_products,write_products,read_customers,write_customers,read_draft_orders,write_draft_orders,read_inventory,write_inventory,read_locations,read_price_rules,write_price_rules")
 		q.Set("state", newOAuthStateShop(currentUserID(c), openerOrigin(c), shop))
 		c.JSON(http.StatusOK, gin.H{"url": "https://" + shop + "/admin/oauth/authorize?" + q.Encode()})
 		return
