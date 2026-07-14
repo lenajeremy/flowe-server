@@ -513,7 +513,9 @@ func executeNode(ctx context.Context, node WorkflowASTNode, outputs map[string]s
 		return string(respBytes), nil
 
 	case NodeTypeEmailSend:
-		// Multiple recipients supported: comma-separated addresses
+		// Multiple recipients supported: comma-separated. Delivery is a
+		// broadcast — each recipient gets their OWN copy (batch send), so
+		// addresses are never exposed to the other recipients.
 		var recipients []string
 		for _, r := range strings.Split(substituteTemplates(d.EmailTo, outputs), ",") {
 			if r = strings.TrimSpace(r); r != "" {
@@ -528,20 +530,37 @@ func executeNode(ctx context.Context, node WorkflowASTNode, outputs map[string]s
 		body := substituteTemplates(d.EmailBody, outputs)
 		resendKey := os.Getenv("RESEND_API_KEY")
 		if resendKey == "" {
-			return fmt.Sprintf(`{"status":"sent","to":"%s","subject":"%s","note":"dev_mode_no_key"}`, to, subject), nil
+			return fmt.Sprintf(`{"status":"sent","to":"%s","recipients":%d,"subject":"%s","note":"dev_mode_no_key"}`, to, len(recipients), subject), nil
 		}
 		client := resend.NewClient(resendKey)
-		params := &resend.SendEmailRequest{
-			From:    "workflow-ai <noreply@usecelery.io>",
-			To:      recipients,
-			Subject: subject,
-			Text:    body,
+		from := "workflow-ai <noreply@usecelery.io>"
+		if len(recipients) == 1 {
+			sent, err := client.Emails.Send(&resend.SendEmailRequest{
+				From: from, To: recipients, Subject: subject, Text: body,
+			})
+			if err != nil {
+				return "", fmt.Errorf("resend error: %w", err)
+			}
+			return fmt.Sprintf(`{"status":"sent","to":"%s","subject":"%s","id":"%s"}`, to, subject, sent.Id), nil
 		}
-		sent, err := client.Emails.Send(params)
-		if err != nil {
-			return "", fmt.Errorf("resend error: %w", err)
+		reqs := make([]*resend.SendEmailRequest, 0, len(recipients))
+		for _, r := range recipients {
+			reqs = append(reqs, &resend.SendEmailRequest{
+				From: from, To: []string{r}, Subject: subject, Text: body,
+			})
 		}
-		return fmt.Sprintf(`{"status":"sent","to":"%s","subject":"%s","id":"%s"}`, to, subject, sent.Id), nil
+		var ids []string
+		for start := 0; start < len(reqs); start += 100 { // Resend batch cap
+			sent, err := client.Batch.Send(reqs[start:min(start+100, len(reqs))])
+			if err != nil {
+				return "", fmt.Errorf("resend batch error: %w", err)
+			}
+			for _, e := range sent.Data {
+				ids = append(ids, e.Id)
+			}
+		}
+		idsJSON, _ := json.Marshal(ids)
+		return fmt.Sprintf(`{"status":"sent","recipients":%d,"subject":"%s","ids":%s}`, len(recipients), subject, idsJSON), nil
 
 	case NodeTypeHumanApproval:
 		message := substituteTemplates(d.ApprovalMessage, outputs)

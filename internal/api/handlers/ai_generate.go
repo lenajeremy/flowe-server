@@ -329,7 +329,7 @@ func nodeCatalog() []map[string]any {
 		{
 			"type": "emailSend", "label": "Send Email", "category": "Actions",
 			"description": "Sends an email via Resend. All fields support {{nodeId.output}} templates.",
-			"dataFields":  map[string]any{"emailTo": "string – recipient(s), comma-separated for multiple", "emailSubject": "string – subject", "emailBody": "string – body text"},
+			"dataFields":  map[string]any{"emailTo": "string – recipient(s), comma-separated; multiple recipients each get a private copy (broadcast)", "emailSubject": "string – subject", "emailBody": "string – body text"},
 			"handles":     map[string]any{"inputs": []string{"target (left)"}, "outputs": []string{"source (right)"}},
 		},
 		{
