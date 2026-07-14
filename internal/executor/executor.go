@@ -533,7 +533,7 @@ func executeNode(ctx context.Context, node WorkflowASTNode, outputs map[string]s
 			return fmt.Sprintf(`{"status":"sent","to":"%s","recipients":%d,"subject":"%s","note":"dev_mode_no_key"}`, to, len(recipients), subject), nil
 		}
 		client := resend.NewClient(resendKey)
-		from := "workflow-ai <noreply@usecelery.io>"
+		from := "Flowe <noreply@usecelery.io>"
 		if len(recipients) == 1 {
 			sent, err := client.Emails.Send(&resend.SendEmailRequest{
 				From: from, To: recipients, Subject: subject, Text: body,
@@ -600,7 +600,7 @@ func executeNode(ctx context.Context, node WorkflowASTNode, outputs map[string]s
 				emailBody := fmt.Sprintf("%s\n\n---\n\nContent to review:\n\n%s\n\n---\n\nApprove or reject here:\n%s", message, upstreamOutput, runURL)
 				client := resend.NewClient(resendKey)
 				_, _ = client.Emails.Send(&resend.SendEmailRequest{
-					From:    "workflow-ai <noreply@usecelery.io>",
+					From:    "Flowe <noreply@usecelery.io>",
 					To:      []string{d.ApprovalEmail},
 					Subject: "Action Required: " + node.Data.Label,
 					Text:    emailBody,
