@@ -117,6 +117,8 @@ type FlowNodeData struct {
 	GithubTag         string `json:"githubTag,omitempty"`        // create_release tag
 	GithubWorkflowId  string `json:"githubWorkflowId,omitempty"` // workflow file name or id
 	GithubQuery       string `json:"githubQuery,omitempty"`      // search_issues
+	GithubSince       string `json:"githubSince,omitempty"`      // ISO 8601 time filter: commits since / issues updated after / runs created from
+	GithubUntil       string `json:"githubUntil,omitempty"`      // ISO 8601 time filter: commits until / runs created to
 
 	// gitlab
 	GitlabProjectId    string `json:"gitlabProjectId,omitempty"`
@@ -134,6 +136,8 @@ type FlowNodeData struct {
 	GitlabContent      string `json:"gitlabContent,omitempty"`      // file content
 	GitlabCommitMsg    string `json:"gitlabCommitMessage,omitempty"`
 	GitlabStateEvent   string `json:"gitlabStateEvent,omitempty"` // close | reopen (update_issue)
+	GitlabSince        string `json:"gitlabSince,omitempty"`      // ISO 8601: commits since / issues+MRs created after / pipelines updated after
+	GitlabUntil        string `json:"gitlabUntil,omitempty"`      // ISO 8601: commits until / issues+MRs created before / pipelines updated before
 
 	// gmail
 	GmailTo        string `json:"gmailTo,omitempty"`

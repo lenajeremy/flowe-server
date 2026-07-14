@@ -71,6 +71,9 @@ func runGithub(ctx context.Context, token string, d FlowNodeData, outputs map[st
 	case "list_issues":
 		state := firstNonEmpty(d.GithubState, "open")
 		q := url.Values{"state": {state}, "per_page": {fmt.Sprint(intOr(d.GithubLimit, 10))}}
+		if s := sub(d.GithubSince); s != "" {
+			q.Set("since", s) // GitHub issues API: updated at or after
+		}
 		raw, err := githubCall(ctx, token, http.MethodGet, "/repos/"+repo+"/issues?"+q.Encode(), nil)
 		if err != nil {
 			return "", err
@@ -180,6 +183,12 @@ func runGithub(ctx context.Context, token string, d FlowNodeData, outputs map[st
 		q := url.Values{"per_page": {fmt.Sprint(intOr(d.GithubLimit, 10))}}
 		if ref := sub(d.GithubRef); ref != "" {
 			q.Set("sha", ref)
+		}
+		if s := sub(d.GithubSince); s != "" {
+			q.Set("since", s)
+		}
+		if u := sub(d.GithubUntil); u != "" {
+			q.Set("until", u)
 		}
 		raw, err := githubCall(ctx, token, http.MethodGet, "/repos/"+repo+"/commits?"+q.Encode(), nil)
 		if err != nil {
@@ -340,8 +349,18 @@ func runGithub(ctx context.Context, token string, d FlowNodeData, outputs map[st
 		return string(b), nil
 
 	case "list_workflow_runs":
+		q := url.Values{"per_page": {fmt.Sprint(intOr(d.GithubLimit, 10))}}
+		// Actions API takes a date range: "from..to", ">=from", or "<=to"
+		switch s, u := sub(d.GithubSince), sub(d.GithubUntil); {
+		case s != "" && u != "":
+			q.Set("created", s+".."+u)
+		case s != "":
+			q.Set("created", ">="+s)
+		case u != "":
+			q.Set("created", "<="+u)
+		}
 		raw, err := githubCall(ctx, token, http.MethodGet,
-			fmt.Sprintf("/repos/%s/actions/runs?per_page=%d", repo, intOr(d.GithubLimit, 10)), nil)
+			"/repos/"+repo+"/actions/runs?"+q.Encode(), nil)
 		if err != nil {
 			return "", err
 		}

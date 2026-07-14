@@ -75,6 +75,12 @@ func runGitlab(ctx context.Context, token string, d FlowNodeData, outputs map[st
 		if st := d.GitlabState; st != "" && st != "all" {
 			q.Set("state", st)
 		}
+		if s := sub(d.GitlabSince); s != "" {
+			q.Set("created_after", s)
+		}
+		if u := sub(d.GitlabUntil); u != "" {
+			q.Set("created_before", u)
+		}
 		raw, err := gitlabCall(ctx, token, http.MethodGet, base+"/issues?"+q.Encode(), nil)
 		if err != nil {
 			return "", err
@@ -93,6 +99,12 @@ func runGitlab(ctx context.Context, token string, d FlowNodeData, outputs map[st
 		q := url.Values{"per_page": {fmt.Sprint(intOr(d.GitlabLimit, 10))}}
 		if st := d.GitlabState; st != "" && st != "all" {
 			q.Set("state", st)
+		}
+		if s := sub(d.GitlabSince); s != "" {
+			q.Set("created_after", s)
+		}
+		if u := sub(d.GitlabUntil); u != "" {
+			q.Set("created_before", u)
 		}
 		raw, err := gitlabCall(ctx, token, http.MethodGet, base+"/merge_requests?"+q.Encode(), nil)
 		if err != nil {
@@ -182,6 +194,12 @@ func runGitlab(ctx context.Context, token string, d FlowNodeData, outputs map[st
 		if ref := sub(d.GitlabRef); ref != "" {
 			q.Set("ref_name", ref)
 		}
+		if s := sub(d.GitlabSince); s != "" {
+			q.Set("since", s)
+		}
+		if u := sub(d.GitlabUntil); u != "" {
+			q.Set("until", u)
+		}
 		raw, err := gitlabCall(ctx, token, http.MethodGet, base+"/repository/commits?"+q.Encode(), nil)
 		if err != nil {
 			return "", err
@@ -203,8 +221,14 @@ func runGitlab(ctx context.Context, token string, d FlowNodeData, outputs map[st
 		return string(b), nil
 
 	case "list_pipelines":
-		raw, err := gitlabCall(ctx, token, http.MethodGet,
-			fmt.Sprintf("%s/pipelines?per_page=%d", base, intOr(d.GitlabLimit, 10)), nil)
+		q := url.Values{"per_page": {fmt.Sprint(intOr(d.GitlabLimit, 10))}}
+		if s := sub(d.GitlabSince); s != "" {
+			q.Set("updated_after", s)
+		}
+		if u := sub(d.GitlabUntil); u != "" {
+			q.Set("updated_before", u)
+		}
+		raw, err := gitlabCall(ctx, token, http.MethodGet, base+"/pipelines?"+q.Encode(), nil)
 		if err != nil {
 			return "", err
 		}
