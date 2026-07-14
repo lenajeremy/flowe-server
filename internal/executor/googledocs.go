@@ -60,6 +60,97 @@ func runGoogleDocs(ctx context.Context, token string, d FlowNodeData, outputs ma
 		}
 		return `{"status":"appended"}`, nil
 
+	case "replace_text":
+		body := map[string]any{
+			"requests": []map[string]any{
+				{"replaceAllText": map[string]any{
+					"containsText": map[string]any{"text": sub(d.GDocsFindText), "matchCase": true},
+					"replaceText":  sub(d.GDocsReplaceText),
+				}},
+			},
+		}
+		raw, err := googleCall(ctx, token, http.MethodPost,
+			gdocsBase+"/"+url.PathEscape(sub(d.GDocsDocumentId))+":batchUpdate", body)
+		if err != nil {
+			return "", err
+		}
+		var res struct {
+			Replies []struct {
+				ReplaceAllText struct {
+					OccurrencesChanged int `json:"occurrencesChanged"`
+				} `json:"replaceAllText"`
+			} `json:"replies"`
+		}
+		_ = json.Unmarshal([]byte(raw), &res)
+		changed := 0
+		if len(res.Replies) > 0 {
+			changed = res.Replies[0].ReplaceAllText.OccurrencesChanged
+		}
+		b, _ := json.Marshal(map[string]any{"status": "replaced", "occurrences": changed})
+		return string(b), nil
+
+	case "insert_text_at_start":
+		body := map[string]any{
+			"requests": []map[string]any{
+				{"insertText": map[string]any{
+					"text":     sub(d.GDocsText),
+					"location": map[string]any{"index": 1},
+				}},
+			},
+		}
+		if _, err := googleCall(ctx, token, http.MethodPost,
+			gdocsBase+"/"+url.PathEscape(sub(d.GDocsDocumentId))+":batchUpdate", body); err != nil {
+			return "", err
+		}
+		return `{"status":"inserted"}`, nil
+
+	case "create_from_template":
+		// 1. Drive-copy the template, 2. replaceAllText for each mapping pair.
+		copyBody := map[string]any{}
+		if title := sub(d.GDocsTitle); title != "" {
+			copyBody["name"] = title
+		}
+		copyRaw, err := googleCall(ctx, token, http.MethodPost,
+			"https://www.googleapis.com/drive/v3/files/"+url.PathEscape(sub(d.GDocsTemplateId))+"/copy?fields=id,name", copyBody)
+		if err != nil {
+			return "", err
+		}
+		var copied struct {
+			ID   string `json:"id"`
+			Name string `json:"name"`
+		}
+		_ = json.Unmarshal([]byte(copyRaw), &copied)
+		if copied.ID == "" {
+			return "", fmt.Errorf("Google Docs: template copy failed")
+		}
+
+		if repl := sub(d.GDocsReplacements); repl != "" {
+			var pairs map[string]string
+			if err := json.Unmarshal([]byte(repl), &pairs); err != nil {
+				return "", fmt.Errorf("Google Docs: replacements must be a JSON object of find→replace pairs: %w", err)
+			}
+			reqs := make([]map[string]any, 0, len(pairs))
+			for find, replace := range pairs {
+				reqs = append(reqs, map[string]any{
+					"replaceAllText": map[string]any{
+						"containsText": map[string]any{"text": find, "matchCase": true},
+						"replaceText":  replace,
+					},
+				})
+			}
+			if len(reqs) > 0 {
+				if _, err := googleCall(ctx, token, http.MethodPost,
+					gdocsBase+"/"+copied.ID+":batchUpdate", map[string]any{"requests": reqs}); err != nil {
+					return "", err
+				}
+			}
+		}
+		b, _ := json.Marshal(map[string]any{
+			"status": "created", "documentId": copied.ID, "title": copied.Name,
+			"link": "https://docs.google.com/document/d/" + copied.ID + "/edit",
+		})
+		return string(b), nil
+
 	default:
 		return "", fmt.Errorf("unknown Google Docs operation: %s", d.IntegrationOp)
 	}

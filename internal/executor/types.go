@@ -151,6 +151,8 @@ type FlowNodeData struct {
 	GCalEnd         string `json:"gcalEnd,omitempty"`
 	GCalAttendees   string `json:"gcalAttendees,omitempty"` // comma-separated emails
 	GCalLimit       int    `json:"gcalLimit,omitempty"`
+	GCalText        string `json:"gcalText,omitempty"`     // quick_add natural language
+	GCalResponse    string `json:"gcalResponse,omitempty"` // accepted | declined | tentative
 
 	// outlook
 	OutlookTo           string `json:"outlookTo,omitempty"`
@@ -193,17 +195,31 @@ type FlowNodeData struct {
 	GDriveQuery    string `json:"gdriveQuery,omitempty"`
 	GDriveParentId string `json:"gdriveParentId,omitempty"`
 	GDriveLimit    int    `json:"gdriveLimit,omitempty"`
+	GDriveContent  string `json:"gdriveContent,omitempty"`  // upload_file text body
+	GDriveMimeType string `json:"gdriveMimeType,omitempty"` // upload_file
+	GDriveEmail    string `json:"gdriveEmail,omitempty"`    // share_file (empty → anyone-with-link)
+	GDriveRole     string `json:"gdriveRole,omitempty"`     // reader | commenter | writer
 
 	// googledocs
-	GDocsDocumentId string `json:"gdocsDocumentId,omitempty"`
-	GDocsTitle      string `json:"gdocsTitle,omitempty"`
-	GDocsText       string `json:"gdocsText,omitempty"`
+	GDocsDocumentId   string `json:"gdocsDocumentId,omitempty"`
+	GDocsTitle        string `json:"gdocsTitle,omitempty"`
+	GDocsText         string `json:"gdocsText,omitempty"`
+	GDocsFindText     string `json:"gdocsFindText,omitempty"`     // replace_text
+	GDocsReplaceText  string `json:"gdocsReplaceText,omitempty"`  // replace_text
+	GDocsTemplateId   string `json:"gdocsTemplateId,omitempty"`   // create_from_template source doc
+	GDocsReplacements string `json:"gdocsReplacements,omitempty"` // JSON map {"{{name}}":"Jane"}
 
 	// googlesheets
 	GSheetsSpreadsheetId string `json:"gsheetsSpreadsheetId,omitempty"`
 	GSheetsRange         string `json:"gsheetsRange,omitempty"`  // A1 notation, e.g. Sheet1!A1:C10
 	GSheetsValues        string `json:"gsheetsValues,omitempty"` // comma-separated cells for one row
 	GSheetsTitle         string `json:"gsheetsTitle,omitempty"`
+	GSheetsSheetTitle    string `json:"gsheetsSheetTitle,omitempty"` // tab name (add/delete/delete_rows)
+	GSheetsFind          string `json:"gsheetsFind,omitempty"`       // find_replace
+	GSheetsReplace       string `json:"gsheetsReplace,omitempty"`    // find_replace
+	GSheetsRows          string `json:"gsheetsRows,omitempty"`       // JSON array-of-arrays (append_rows)
+	GSheetsStartRow      int    `json:"gsheetsStartRow,omitempty"`   // delete_rows (1-based, inclusive)
+	GSheetsEndRow        int    `json:"gsheetsEndRow,omitempty"`     // delete_rows (inclusive)
 }
 
 type Position struct {
