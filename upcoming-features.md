@@ -59,11 +59,12 @@ Architecture notes:
   places (executor, catalog, tool schemas) and they will drift.
 
 Build order:
-1. Schema (`chat_sessions`) + per-workflow chat settings
-2. Single-node executor entry (with override merge) + orchestrator tool loop
-   + SSE endpoint
-3. In-app chat mode (editor "Chat with workflow" button → chat UI: streaming
-   markdown, tool activity chips, session resume)
+1. ✅ Schema (`chat_sessions`) — shipped 2026-07-14
+2. ✅ Single-node executor entry (with override merge) + orchestrator tool
+   loop + SSE endpoint — shipped 2026-07-14
+3. ✅ In-app chat mode (editor "Chat" button → `/workflow/:id/chat`: streaming
+   markdown, tool activity chips, lazy session creation, resume via
+   `?session=`) — shipped 2026-07-14
 4. Opt-in public share (`/c/:token` page + rate limiting + destructive-op
    gating) — only after the in-app mode is solid
 
