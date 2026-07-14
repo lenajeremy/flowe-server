@@ -97,6 +97,13 @@ func InitServer(port int, db *database.DBClient, rdb *redis.Client) {
 		api.GET("/workflows/:id/chat", wh.GetWorkflowChat)
 		api.PUT("/workflows/:id/chat", wh.SaveWorkflowChat)
 
+		// Chat-with-workflow (agent mode)
+		api.POST("/workflows/:id/chat-sessions", wh.CreateChatSession)
+		api.GET("/workflows/:id/chat-sessions", wh.ListChatSessions)
+		api.GET("/chat-sessions/:id", wh.GetChatSession)
+		api.DELETE("/chat-sessions/:id", wh.DeleteChatSession)
+		api.POST("/chat-sessions/:id/message", wh.AgentChatTurn)
+
 		// Workflow versions
 		api.GET("/workflows/:id/versions", wh.ListVersions)
 		api.POST("/workflows/:id/versions", wh.SaveVersion)

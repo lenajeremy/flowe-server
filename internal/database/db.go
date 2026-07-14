@@ -55,6 +55,7 @@ func (c *DBClient) Setup() error {
 		&models.WebhookTrigger{},
 		&models.ScheduledTrigger{},
 		&models.WorkflowChat{},
+		&models.ChatSession{},
 		&models.IntegrationConnection{},
 	)
 }

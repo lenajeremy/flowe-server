@@ -55,6 +55,19 @@ type WorkflowChat struct {
 	Messages   JSONB  `json:"messages"    gorm:"type:jsonb;not null;default:'[]'"`
 }
 
+// ChatSession is one chat-with-workflow conversation (agent mode). Messages
+// holds the transcript; State is the executor outputs map (nodeId → output)
+// accumulated across tool calls, so {{node.output}} templates resolve in
+// later turns. The BaseModel UUID doubles as the capability key.
+type ChatSession struct {
+	BaseModel
+	UserID     string `json:"user_id"     gorm:"type:uuid;not null;index"`
+	WorkflowID string `json:"workflow_id" gorm:"not null;index"`
+	Title      string `json:"title"`
+	Messages   JSONB  `json:"messages"    gorm:"type:jsonb;not null;default:'[]'"`
+	State      JSONB  `json:"state"       gorm:"type:jsonb;not null;default:'{}'"`
+}
+
 // WorkflowVersion stores snapshots of workflow node/edge definitions.
 type WorkflowVersion struct {
 	BaseModel

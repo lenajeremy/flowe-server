@@ -271,8 +271,10 @@ var toolCreateWorkflow = map[string]any{
 	},
 }
 
-func getAvailableNodesResult() string {
-	nodes := []map[string]any{
+// nodeCatalog documents every node type (fields, semantics) — shared by the
+// builder's get_available_nodes tool and agent-chat tool-schema generation.
+func nodeCatalog() []map[string]any {
+	return []map[string]any{
 		{
 			"type": "textInput", "label": "Text Input", "category": "Inputs",
 			"description": "Provides static text as input to downstream nodes. Useful for fixed prompts, API endpoints, or template text.",
@@ -440,9 +442,11 @@ func getAvailableNodesResult() string {
 			"handles":     map[string]any{"inputs": []string{"target (left)"}, "outputs": []string{}},
 		},
 	}
+}
 
+func getAvailableNodesResult() string {
 	result := map[string]any{
-		"nodes": nodes,
+		"nodes": nodeCatalog(),
 		"connectionRules": map[string]any{
 			"general":   "Nodes connect left-to-right via edges: { source, target }.",
 			"templates": "LLM, HTTP, email, integrations support {{nodeId.output}} in text fields.",
@@ -461,6 +465,16 @@ func getAvailableNodesResult() string {
 
 	b, _ := json.Marshal(result)
 	return string(b)
+}
+
+// catalogEntry returns the catalog doc for one node type (nil if unknown).
+func catalogEntry(nodeType string) map[string]any {
+	for _, n := range nodeCatalog() {
+		if n["type"] == nodeType {
+			return n
+		}
+	}
+	return nil
 }
 
 // ── System prompt ───────────────────────────────────────────────
