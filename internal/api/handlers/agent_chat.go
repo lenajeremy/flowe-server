@@ -251,7 +251,26 @@ type agentStoredMessage struct {
 type agentToolCallRecord struct {
 	Node   string `json:"node"`
 	NodeID string `json:"nodeId"`
+	// Op is what the call actually did — the per-call integrationOp override
+	// when the orchestrator supplied one, else the node's saved op. A node
+	// labeled "Create Linear Ticket" that gets called to list issues must
+	// surface "List issues", not its label.
+	Op     string `json:"op,omitempty"`
 	Status string `json:"status"` // ok | error
+}
+
+// agentEffectiveOp humanizes the operation a tool call ran ("list_issues" →
+// "List issues"), preferring a per-call override. Empty for nodes without ops.
+func agentEffectiveOp(data executor.FlowNodeData, overrides map[string]any) string {
+	op := data.IntegrationOp
+	if v, ok := overrides["integrationOp"].(string); ok && v != "" {
+		op = v
+	}
+	if op == "" {
+		return ""
+	}
+	words := strings.ReplaceAll(op, "_", " ")
+	return strings.ToUpper(words[:1]) + words[1:]
 }
 
 // AgentChatTurn — POST /api/chat-sessions/:id/message (SSE)
@@ -332,21 +351,22 @@ func (h *WorkflowHandler) AgentChatTurn(c *gin.Context) {
 			return fmt.Sprintf(`{"error":"unknown tool %s"}`, name)
 		}
 		overrides, _ := input.(map[string]any)
-		chip, _ := json.Marshal(map[string]string{"node": tool.Node.Data.Label, "nodeId": tool.Node.ID})
+		op := agentEffectiveOp(tool.Node.Data, overrides)
+		chip, _ := json.Marshal(map[string]string{"node": tool.Node.Data.Label, "nodeId": tool.Node.ID, "op": op})
 		sendSSE(c.Writer, flusher, "tool_start", string(chip))
 
 		out, err := executor.ExecuteSingleNode(c.Request.Context(), tool.Node, overrides, state, ast.Edges, keys, runID, uid, nil)
-		rec := agentToolCallRecord{Node: tool.Node.Data.Label, NodeID: tool.Node.ID, Status: "ok"}
+		rec := agentToolCallRecord{Node: tool.Node.Data.Label, NodeID: tool.Node.ID, Op: op, Status: "ok"}
 		if err != nil {
 			rec.Status = "error"
 			callRecords = append(callRecords, rec)
-			result, _ := json.Marshal(map[string]string{"node": tool.Node.Data.Label, "nodeId": tool.Node.ID, "status": "error", "error": err.Error()})
+			result, _ := json.Marshal(map[string]string{"node": tool.Node.Data.Label, "nodeId": tool.Node.ID, "op": op, "status": "error", "error": err.Error()})
 			sendSSE(c.Writer, flusher, "tool_result", string(result))
 			return fmt.Sprintf(`{"error":%q}`, err.Error())
 		}
 		callRecords = append(callRecords, rec)
 		state[tool.Node.ID] = truncate(out, agentStateCap)
-		result, _ := json.Marshal(map[string]string{"node": tool.Node.Data.Label, "nodeId": tool.Node.ID, "status": "ok"})
+		result, _ := json.Marshal(map[string]string{"node": tool.Node.Data.Label, "nodeId": tool.Node.ID, "op": op, "status": "ok"})
 		sendSSE(c.Writer, flusher, "tool_result", string(result))
 		return truncate(out, agentResultCap)
 	}
