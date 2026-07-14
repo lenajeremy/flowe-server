@@ -513,7 +513,17 @@ func executeNode(ctx context.Context, node WorkflowASTNode, outputs map[string]s
 		return string(respBytes), nil
 
 	case NodeTypeEmailSend:
-		to := substituteTemplates(d.EmailTo, outputs)
+		// Multiple recipients supported: comma-separated addresses
+		var recipients []string
+		for _, r := range strings.Split(substituteTemplates(d.EmailTo, outputs), ",") {
+			if r = strings.TrimSpace(r); r != "" {
+				recipients = append(recipients, r)
+			}
+		}
+		if len(recipients) == 0 {
+			return "", fmt.Errorf("email node %q has no recipient", d.Label)
+		}
+		to := strings.Join(recipients, ", ")
 		subject := substituteTemplates(d.EmailSubject, outputs)
 		body := substituteTemplates(d.EmailBody, outputs)
 		resendKey := os.Getenv("RESEND_API_KEY")
@@ -523,7 +533,7 @@ func executeNode(ctx context.Context, node WorkflowASTNode, outputs map[string]s
 		client := resend.NewClient(resendKey)
 		params := &resend.SendEmailRequest{
 			From:    "workflow-ai <noreply@usecelery.io>",
-			To:      []string{to},
+			To:      recipients,
 			Subject: subject,
 			Text:    body,
 		}

@@ -39,6 +39,27 @@ func TestMergeNodeDataRejectsUnknownAndProtected(t *testing.T) {
 	}
 }
 
+func TestEmailSendMultipleRecipients(t *testing.T) {
+	t.Setenv("RESEND_API_KEY", "")
+	node := WorkflowASTNode{
+		ID:   "n1",
+		Data: FlowNodeData{NodeType: NodeTypeEmailSend, Label: "mail", EmailTo: " a@x.com ,b@y.com,, c@z.com "},
+	}
+	out, err := ExecuteSingleNode(context.Background(), node, nil, nil, nil, APIKeys{}, "run", "owner", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Dev-mode stub echoes the normalized recipient list
+	if !strings.Contains(out, "a@x.com, b@y.com, c@z.com") {
+		t.Fatalf("recipients not split/normalized: %q", out)
+	}
+
+	empty := WorkflowASTNode{ID: "n2", Data: FlowNodeData{NodeType: NodeTypeEmailSend, Label: "mail", EmailTo: " , "}}
+	if _, err := ExecuteSingleNode(context.Background(), empty, nil, nil, nil, APIKeys{}, "run", "owner", nil); err == nil {
+		t.Fatal("expected error for no recipients")
+	}
+}
+
 func TestExecuteSingleNodeTemplatesFromState(t *testing.T) {
 	// emailSend substitutes templates in its fields and, with no RESEND key in
 	// the test env, returns a dev-mode stub embedding the resolved recipient —
