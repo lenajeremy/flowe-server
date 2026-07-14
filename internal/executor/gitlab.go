@@ -3,6 +3,7 @@ package executor
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -102,6 +103,177 @@ func runGitlab(ctx context.Context, token string, d FlowNodeData, outputs map[st
 	case "get_merge_request":
 		return gitlabCall(ctx, token, http.MethodGet,
 			fmt.Sprintf("%s/merge_requests/%s", base, sub(d.GitlabMrIid)), nil)
+
+	case "get_issue":
+		return gitlabCall(ctx, token, http.MethodGet,
+			fmt.Sprintf("%s/issues/%s", base, sub(d.GitlabIssueIid)), nil)
+
+	case "update_issue":
+		payload := map[string]any{}
+		if v := sub(d.GitlabTitle); v != "" {
+			payload["title"] = v
+		}
+		if v := sub(d.GitlabDescription); v != "" {
+			payload["description"] = v
+		}
+		if v := d.GitlabStateEvent; v == "close" || v == "reopen" {
+			payload["state_event"] = v
+		}
+		if labels := sub(d.GitlabLabels); labels != "" {
+			payload["labels"] = labels
+		}
+		if len(payload) == 0 {
+			return "", fmt.Errorf("GitLab: nothing to update — set a title, description, state, or labels")
+		}
+		raw, err := gitlabCall(ctx, token, http.MethodPut,
+			fmt.Sprintf("%s/issues/%s", base, sub(d.GitlabIssueIid)), payload)
+		if err != nil {
+			return "", err
+		}
+		return gitlabIssueResult(raw), nil
+
+	case "create_merge_request":
+		raw, err := gitlabCall(ctx, token, http.MethodPost, base+"/merge_requests", map[string]any{
+			"title":         sub(d.GitlabTitle),
+			"description":   sub(d.GitlabDescription),
+			"source_branch": sub(d.GitlabSourceBranch),
+			"target_branch": firstNonEmpty(sub(d.GitlabTargetBranch), "main"),
+		})
+		if err != nil {
+			return "", err
+		}
+		return gitlabIssueResult(raw), nil
+
+	case "merge_mr":
+		raw, err := gitlabCall(ctx, token, http.MethodPut,
+			fmt.Sprintf("%s/merge_requests/%s/merge", base, sub(d.GitlabMrIid)), map[string]any{})
+		if err != nil {
+			return "", err
+		}
+		var res struct {
+			State string `json:"state"`
+			SHA   string `json:"merge_commit_sha"`
+		}
+		_ = json.Unmarshal([]byte(raw), &res)
+		b, _ := json.Marshal(map[string]any{"status": res.State, "sha": res.SHA})
+		return string(b), nil
+
+	case "list_branches":
+		raw, err := gitlabCall(ctx, token, http.MethodGet,
+			fmt.Sprintf("%s/repository/branches?per_page=%d", base, intOr(d.GitlabLimit, 30)), nil)
+		if err != nil {
+			return "", err
+		}
+		var branches []struct {
+			Name string `json:"name"`
+		}
+		if json.Unmarshal([]byte(raw), &branches) != nil {
+			return truncateStr(raw, 8000), nil
+		}
+		names := make([]string, 0, len(branches))
+		for _, br := range branches {
+			names = append(names, br.Name)
+		}
+		b, _ := json.Marshal(names)
+		return string(b), nil
+
+	case "list_commits":
+		q := url.Values{"per_page": {fmt.Sprint(intOr(d.GitlabLimit, 10))}}
+		if ref := sub(d.GitlabRef); ref != "" {
+			q.Set("ref_name", ref)
+		}
+		raw, err := gitlabCall(ctx, token, http.MethodGet, base+"/repository/commits?"+q.Encode(), nil)
+		if err != nil {
+			return "", err
+		}
+		var commits []struct {
+			ShortID    string `json:"short_id"`
+			Title      string `json:"title"`
+			AuthorName string `json:"author_name"`
+			CreatedAt  string `json:"created_at"`
+		}
+		if json.Unmarshal([]byte(raw), &commits) != nil {
+			return truncateStr(raw, 8000), nil
+		}
+		out := make([]map[string]any, 0, len(commits))
+		for _, c := range commits {
+			out = append(out, map[string]any{"sha": c.ShortID, "message": c.Title, "author": c.AuthorName, "date": c.CreatedAt})
+		}
+		b, _ := json.Marshal(out)
+		return string(b), nil
+
+	case "list_pipelines":
+		raw, err := gitlabCall(ctx, token, http.MethodGet,
+			fmt.Sprintf("%s/pipelines?per_page=%d", base, intOr(d.GitlabLimit, 10)), nil)
+		if err != nil {
+			return "", err
+		}
+		var pipes []struct {
+			ID     int    `json:"id"`
+			Status string `json:"status"`
+			Ref    string `json:"ref"`
+			URL    string `json:"web_url"`
+		}
+		if json.Unmarshal([]byte(raw), &pipes) != nil {
+			return truncateStr(raw, 8000), nil
+		}
+		out := make([]map[string]any, 0, len(pipes))
+		for _, pl := range pipes {
+			out = append(out, map[string]any{"id": pl.ID, "status": pl.Status, "ref": pl.Ref, "url": pl.URL})
+		}
+		b, _ := json.Marshal(out)
+		return string(b), nil
+
+	case "trigger_pipeline":
+		raw, err := gitlabCall(ctx, token, http.MethodPost,
+			base+"/pipeline", map[string]any{"ref": firstNonEmpty(sub(d.GitlabRef), "main")})
+		if err != nil {
+			return "", err
+		}
+		var pl struct {
+			ID     int    `json:"id"`
+			Status string `json:"status"`
+			URL    string `json:"web_url"`
+		}
+		_ = json.Unmarshal([]byte(raw), &pl)
+		b, _ := json.Marshal(map[string]any{"status": "triggered", "id": pl.ID, "state": pl.Status, "url": pl.URL})
+		return string(b), nil
+
+	case "get_file":
+		ref := firstNonEmpty(sub(d.GitlabRef), "main")
+		raw, err := gitlabCall(ctx, token, http.MethodGet,
+			base+"/repository/files/"+url.PathEscape(sub(d.GitlabPath))+"?ref="+url.QueryEscape(ref), nil)
+		if err != nil {
+			return "", err
+		}
+		var f struct {
+			FileName string `json:"file_name"`
+			Content  string `json:"content"`
+		}
+		_ = json.Unmarshal([]byte(raw), &f)
+		dec, err := base64.StdEncoding.DecodeString(f.Content)
+		if err != nil {
+			return "", fmt.Errorf("GitLab: could not decode file content: %w", err)
+		}
+		b, _ := json.Marshal(map[string]any{"name": f.FileName, "ref": ref, "content": truncateStr(string(dec), 1<<20)})
+		return string(b), nil
+
+	case "commit_file":
+		path := url.PathEscape(sub(d.GitlabPath))
+		ref := firstNonEmpty(sub(d.GitlabRef), "main")
+		payload := map[string]any{
+			"branch":         ref,
+			"content":        sub(d.GitlabContent),
+			"commit_message": firstNonEmpty(sub(d.GitlabCommitMsg), "Update "+sub(d.GitlabPath)),
+		}
+		// Try create; if the file exists GitLab answers 400 — fall back to update.
+		if _, err := gitlabCall(ctx, token, http.MethodPost, base+"/repository/files/"+path, payload); err != nil {
+			if _, err2 := gitlabCall(ctx, token, http.MethodPut, base+"/repository/files/"+path, payload); err2 != nil {
+				return "", err2
+			}
+		}
+		b, _ := json.Marshal(map[string]any{"status": "committed", "path": sub(d.GitlabPath), "branch": ref})
+		return string(b), nil
 
 	default:
 		return "", fmt.Errorf("unknown GitLab operation: %s", d.IntegrationOp)

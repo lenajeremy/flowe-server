@@ -337,6 +337,175 @@ func linearGetIssue(ctx context.Context, token, issueID string) (string, error) 
 	return linearCall(ctx, token, q, map[string]any{"id": issueID})
 }
 
+// ── Notion expansion ─────────────────────────────────────────
+
+func notionCreateDatabase(ctx context.Context, token, parentPageID, title, schemaJSON string) (string, error) {
+	props := map[string]any{
+		// Every Notion database needs exactly one title property.
+		"Name": map[string]any{"title": map[string]any{}},
+	}
+	if schemaJSON != "" {
+		var custom map[string]any
+		if err := json.Unmarshal([]byte(schemaJSON), &custom); err != nil {
+			return "", fmt.Errorf("Notion: schema must be a JSON object of property definitions: %w", err)
+		}
+		for k, v := range custom {
+			props[k] = v
+		}
+	}
+	return notionCall(ctx, token, http.MethodPost, "/databases", map[string]any{
+		"parent":     map[string]any{"page_id": parentPageID},
+		"title":      []any{map[string]any{"text": map[string]any{"content": title}}},
+		"properties": props,
+	})
+}
+
+func notionGetDatabase(ctx context.Context, token, databaseID string) (string, error) {
+	return notionCall(ctx, token, http.MethodGet, "/databases/"+databaseID, nil)
+}
+
+func notionCreateSubpage(ctx context.Context, token, parentPageID, title, content string) (string, error) {
+	children := []any{}
+	if content != "" {
+		children = append(children, paragraphBlock(content))
+	}
+	return notionCall(ctx, token, http.MethodPost, "/pages", map[string]any{
+		"parent": map[string]any{"page_id": parentPageID},
+		"properties": map[string]any{
+			"title": map[string]any{
+				"title": []any{map[string]any{"text": map[string]any{"content": title}}},
+			},
+		},
+		"children": children,
+	})
+}
+
+func notionArchivePage(ctx context.Context, token, pageID string) (string, error) {
+	if _, err := notionCall(ctx, token, http.MethodPatch, "/pages/"+pageID,
+		map[string]any{"archived": true}); err != nil {
+		return "", err
+	}
+	return `{"status":"archived"}`, nil
+}
+
+func notionListUsers(ctx context.Context, token string) (string, error) {
+	raw, err := notionCall(ctx, token, http.MethodGet, "/users?page_size=100", nil)
+	if err != nil {
+		return "", err
+	}
+	var res struct {
+		Results []struct {
+			ID     string `json:"id"`
+			Name   string `json:"name"`
+			Type   string `json:"type"`
+			Person struct {
+				Email string `json:"email"`
+			} `json:"person"`
+		} `json:"results"`
+	}
+	_ = json.Unmarshal([]byte(raw), &res)
+	out := make([]map[string]any, 0, len(res.Results))
+	for _, u := range res.Results {
+		if u.Type != "person" {
+			continue
+		}
+		out = append(out, map[string]any{"id": u.ID, "name": u.Name, "email": u.Person.Email})
+	}
+	b, _ := json.Marshal(out)
+	return string(b), nil
+}
+
+func notionListComments(ctx context.Context, token, pageID string) (string, error) {
+	raw, err := notionCall(ctx, token, http.MethodGet, "/comments?block_id="+pageID, nil)
+	if err != nil {
+		return "", err
+	}
+	var res struct {
+		Results []struct {
+			RichText []struct {
+				PlainText string `json:"plain_text"`
+			} `json:"rich_text"`
+			CreatedTime string `json:"created_time"`
+		} `json:"results"`
+	}
+	_ = json.Unmarshal([]byte(raw), &res)
+	out := make([]map[string]any, 0, len(res.Results))
+	for _, c := range res.Results {
+		text := ""
+		for _, rt := range c.RichText {
+			text += rt.PlainText
+		}
+		out = append(out, map[string]any{"text": text, "created": c.CreatedTime})
+	}
+	b, _ := json.Marshal(out)
+	return string(b), nil
+}
+
+// ── Linear expansion (GraphQL) ───────────────────────────────
+
+func linearListTeams(ctx context.Context, token string) (string, error) {
+	const q = `query Teams { teams(first: 50) { nodes { id key name } } }`
+	return linearCall(ctx, token, q, map[string]any{})
+}
+
+func linearListUsers(ctx context.Context, token string) (string, error) {
+	const q = `query Users { users(first: 100) { nodes { id name email active } } }`
+	return linearCall(ctx, token, q, map[string]any{})
+}
+
+func linearListStates(ctx context.Context, token, teamID string) (string, error) {
+	const q = `query States($teamId: String!) {
+		team(id: $teamId) { states { nodes { id name type position } } }
+	}`
+	return linearCall(ctx, token, q, map[string]any{"teamId": teamID})
+}
+
+func linearListLabels(ctx context.Context, token, teamID string) (string, error) {
+	const q = `query Labels($teamId: String!) {
+		team(id: $teamId) { labels { nodes { id name color } } }
+	}`
+	return linearCall(ctx, token, q, map[string]any{"teamId": teamID})
+}
+
+func linearAddLabel(ctx context.Context, token, issueID, labelID string) (string, error) {
+	const q = `mutation AddLabel($issueId: String!, $labelId: String!) {
+		issueAddLabel(id: $issueId, labelId: $labelId) { success }
+	}`
+	return linearCall(ctx, token, q, map[string]any{"issueId": issueID, "labelId": labelID})
+}
+
+func linearArchiveIssue(ctx context.Context, token, issueID string) (string, error) {
+	const q = `mutation Archive($issueId: String!) {
+		issueArchive(id: $issueId) { success }
+	}`
+	return linearCall(ctx, token, q, map[string]any{"issueId": issueID})
+}
+
+func linearCreateProject(ctx context.Context, token, teamID, name, description string) (string, error) {
+	const q = `mutation CreateProject($input: ProjectCreateInput!) {
+		projectCreate(input: $input) { success project { id name url } }
+	}`
+	return linearCall(ctx, token, q, map[string]any{"input": map[string]any{
+		"teamIds":     []string{teamID},
+		"name":        name,
+		"description": description,
+	}})
+}
+
+func linearListCycles(ctx context.Context, token, teamID string) (string, error) {
+	const q = `query Cycles($teamId: String!) {
+		team(id: $teamId) { cycles(first: 20) { nodes { id number name startsAt endsAt progress } } }
+	}`
+	return linearCall(ctx, token, q, map[string]any{"teamId": teamID})
+}
+
+func linearListComments(ctx context.Context, token, issueID string) (string, error) {
+	const q = `query Comments($issueId: String!) {
+		issue(id: $issueId) { comments(first: 50) { nodes { body createdAt user { name } } } }
+	}`
+	return linearCall(ctx, token, q, map[string]any{"issueId": issueID})
+}
+
 func toInt(v any, fallback int) int {
 	switch n := v.(type) {
 	case int:

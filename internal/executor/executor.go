@@ -646,6 +646,27 @@ func executeNode(ctx context.Context, node WorkflowASTNode, outputs map[string]s
 			return notionAddComment(ctx, token,
 				substituteTemplates(d.NotionPageId, outputs),
 				substituteTemplates(d.NotionContent, outputs))
+		case "create_database":
+			return notionCreateDatabase(ctx, token,
+				substituteTemplates(d.NotionParentPageId, outputs),
+				substituteTemplates(d.NotionTitle, outputs),
+				substituteTemplates(d.NotionSchema, outputs))
+		case "get_database":
+			return notionGetDatabase(ctx, token,
+				substituteTemplates(d.NotionDatabaseId, outputs))
+		case "create_subpage":
+			return notionCreateSubpage(ctx, token,
+				substituteTemplates(d.NotionParentPageId, outputs),
+				substituteTemplates(d.NotionTitle, outputs),
+				substituteTemplates(d.NotionContent, outputs))
+		case "archive_page":
+			return notionArchivePage(ctx, token,
+				substituteTemplates(d.NotionPageId, outputs))
+		case "list_users":
+			return notionListUsers(ctx, token)
+		case "list_comments":
+			return notionListComments(ctx, token,
+				substituteTemplates(d.NotionPageId, outputs))
 		default:
 			return "", fmt.Errorf("unknown Notion operation: %s", d.IntegrationOp)
 		}
@@ -690,6 +711,34 @@ func executeNode(ctx context.Context, node WorkflowASTNode, outputs map[string]s
 			return linearListProjects(ctx, token)
 		case "get_issue":
 			return linearGetIssue(ctx, token,
+				substituteTemplates(d.LinearIssueId, outputs))
+		case "list_teams":
+			return linearListTeams(ctx, token)
+		case "list_users":
+			return linearListUsers(ctx, token)
+		case "list_states":
+			return linearListStates(ctx, token,
+				substituteTemplates(d.LinearTeamId, outputs))
+		case "list_labels":
+			return linearListLabels(ctx, token,
+				substituteTemplates(d.LinearTeamId, outputs))
+		case "add_label":
+			return linearAddLabel(ctx, token,
+				substituteTemplates(d.LinearIssueId, outputs),
+				substituteTemplates(d.LinearLabelId, outputs))
+		case "archive_issue":
+			return linearArchiveIssue(ctx, token,
+				substituteTemplates(d.LinearIssueId, outputs))
+		case "create_project":
+			return linearCreateProject(ctx, token,
+				substituteTemplates(d.LinearTeamId, outputs),
+				substituteTemplates(d.LinearTitle, outputs),
+				substituteTemplates(d.LinearDescription, outputs))
+		case "list_cycles":
+			return linearListCycles(ctx, token,
+				substituteTemplates(d.LinearTeamId, outputs))
+		case "list_comments":
+			return linearListComments(ctx, token,
 				substituteTemplates(d.LinearIssueId, outputs))
 		default:
 			return "", fmt.Errorf("unknown Linear operation: %s", d.IntegrationOp)

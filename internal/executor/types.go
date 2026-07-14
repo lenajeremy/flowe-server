@@ -74,13 +74,15 @@ type FlowNodeData struct {
 	IntegrationOp    string `json:"integrationOp,omitempty"`
 
 	// notion
-	NotionDatabaseId string `json:"notionDatabaseId,omitempty"`
-	NotionPageId     string `json:"notionPageId,omitempty"`
-	NotionTitle      string `json:"notionTitle,omitempty"`
-	NotionContent    string `json:"notionContent,omitempty"`
-	NotionFilter     string `json:"notionFilter,omitempty"`
-	NotionQuery      string `json:"notionQuery,omitempty"`
-	NotionProperties string `json:"notionProperties,omitempty"`
+	NotionDatabaseId   string `json:"notionDatabaseId,omitempty"`
+	NotionPageId       string `json:"notionPageId,omitempty"`
+	NotionTitle        string `json:"notionTitle,omitempty"`
+	NotionContent      string `json:"notionContent,omitempty"`
+	NotionFilter       string `json:"notionFilter,omitempty"`
+	NotionQuery        string `json:"notionQuery,omitempty"`
+	NotionProperties   string `json:"notionProperties,omitempty"`
+	NotionParentPageId string `json:"notionParentPageId,omitempty"` // create_database / create_subpage parent
+	NotionSchema       string `json:"notionSchema,omitempty"`       // create_database properties JSON
 
 	// linear
 	LinearTeamId      string `json:"linearTeamId,omitempty"`
@@ -94,6 +96,7 @@ type FlowNodeData struct {
 	LinearAssigneeId  string `json:"linearAssigneeId,omitempty"`
 	LinearQuery       string `json:"linearQuery,omitempty"`
 	LinearProjectId   string `json:"linearProjectId,omitempty"`
+	LinearLabelId     string `json:"linearLabelId,omitempty"` // add_label
 
 	// github
 	GithubRepo        string `json:"githubRepo,omitempty"`
@@ -104,16 +107,33 @@ type FlowNodeData struct {
 	GithubState       string `json:"githubState,omitempty"`
 	GithubLimit       int    `json:"githubLimit,omitempty"`
 	GithubPrNumber    string `json:"githubPrNumber,omitempty"`
+	GithubBranch      string `json:"githubBranch,omitempty"`      // PR head / file commit branch / workflow ref
+	GithubBase        string `json:"githubBase,omitempty"`        // PR base branch
+	GithubMergeMethod string `json:"githubMergeMethod,omitempty"` // merge | squash | rebase
+	GithubPath        string `json:"githubPath,omitempty"`        // file path (get_file / create_or_update_file)
+	GithubContent     string `json:"githubContent,omitempty"`     // file content
+	GithubCommitMsg   string `json:"githubCommitMessage,omitempty"`
+	GithubRef         string `json:"githubRef,omitempty"`        // branch/tag/sha for reads
+	GithubTag         string `json:"githubTag,omitempty"`        // create_release tag
+	GithubWorkflowId  string `json:"githubWorkflowId,omitempty"` // workflow file name or id
+	GithubQuery       string `json:"githubQuery,omitempty"`      // search_issues
 
 	// gitlab
-	GitlabProjectId   string `json:"gitlabProjectId,omitempty"`
-	GitlabTitle       string `json:"gitlabTitle,omitempty"`
-	GitlabDescription string `json:"gitlabDescription,omitempty"`
-	GitlabIssueIid    string `json:"gitlabIssueIid,omitempty"`
-	GitlabLabels      string `json:"gitlabLabels,omitempty"`
-	GitlabState       string `json:"gitlabState,omitempty"`
-	GitlabLimit       int    `json:"gitlabLimit,omitempty"`
-	GitlabMrIid       string `json:"gitlabMrIid,omitempty"`
+	GitlabProjectId    string `json:"gitlabProjectId,omitempty"`
+	GitlabTitle        string `json:"gitlabTitle,omitempty"`
+	GitlabDescription  string `json:"gitlabDescription,omitempty"`
+	GitlabIssueIid     string `json:"gitlabIssueIid,omitempty"`
+	GitlabLabels       string `json:"gitlabLabels,omitempty"`
+	GitlabState        string `json:"gitlabState,omitempty"`
+	GitlabLimit        int    `json:"gitlabLimit,omitempty"`
+	GitlabMrIid        string `json:"gitlabMrIid,omitempty"`
+	GitlabSourceBranch string `json:"gitlabSourceBranch,omitempty"` // MR source
+	GitlabTargetBranch string `json:"gitlabTargetBranch,omitempty"` // MR target
+	GitlabRef          string `json:"gitlabRef,omitempty"`          // branch/tag for commits/pipeline/file ops
+	GitlabPath         string `json:"gitlabPath,omitempty"`         // file path
+	GitlabContent      string `json:"gitlabContent,omitempty"`      // file content
+	GitlabCommitMsg    string `json:"gitlabCommitMessage,omitempty"`
+	GitlabStateEvent   string `json:"gitlabStateEvent,omitempty"` // close | reopen (update_issue)
 
 	// gmail
 	GmailTo        string `json:"gmailTo,omitempty"`
