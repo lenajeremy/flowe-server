@@ -8,6 +8,7 @@ require (
 	github.com/joho/godotenv v1.5.1
 	github.com/redis/go-redis/v9 v9.19.0
 	github.com/resend/resend-go/v2 v2.28.0
+	github.com/yuin/goldmark v1.8.4
 	gorm.io/driver/postgres v1.6.0
 	gorm.io/gorm v1.31.1
 )

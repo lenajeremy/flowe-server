@@ -20,6 +20,7 @@ import (
 
 	"workflow-ai/server/internal/auth"
 	"workflow-ai/server/internal/database/models"
+	mail "workflow-ai/server/internal/email"
 
 	"github.com/gin-gonic/gin"
 	"github.com/resend/resend-go/v2"
@@ -159,14 +160,13 @@ Or click this link to sign in instantly:
 
 If you didn't request this, you can safely ignore this email.`, code, magicLink)
 
-	html := fmt.Sprintf(`<!doctype html><html><body style="margin:0;padding:32px;background:#0D0D11;font-family:system-ui,-apple-system,sans-serif">
-<div style="max-width:420px;margin:0 auto;background:#16161C;border:1px solid #26262E;border-radius:16px;padding:32px;text-align:center">
-<p style="color:#fff;font-size:16px;font-weight:600;margin:0 0 8px">Sign in to Flowe</p>
-<p style="color:#667179;font-size:13px;margin:0 0 24px">Enter this code — it expires in 10 minutes.</p>
-<p style="color:#fff;font-size:32px;font-family:ui-monospace,monospace;letter-spacing:8px;margin:0 0 24px">%s</p>
-<a href="%s" style="display:inline-block;background:#fff;color:#000;font-size:13px;font-weight:600;text-decoration:none;padding:10px 24px;border-radius:999px">Sign in instantly</a>
-<p style="color:#667179;font-size:11px;margin:24px 0 0">If you didn't request this, you can safely ignore this email.</p>
-</div></body></html>`, code, magicLink)
+	inner := fmt.Sprintf(`<h2 style="margin-top:0;text-align:center">Sign in to Flowe</h2>
+<p style="text-align:center;color:#667179;font-size:13px;margin:0 0 24px">Enter this code — it expires in 10 minutes.</p>
+<p style="text-align:center;color:#ffffff;font-size:32px;font-family:ui-monospace,monospace;letter-spacing:8px;margin:0 0 8px">%s</p>
+%s
+<p style="text-align:center;color:#667179;font-size:11px;margin:24px 0 0">If you didn't request this, you can safely ignore this email.</p>`,
+		code, mail.Button(magicLink, "Sign in instantly"))
+	html := mail.WrapBranded(inner, "Your Flowe sign-in code")
 
 	client := resend.NewClient(apiKey)
 	_, err := client.Emails.Send(&resend.SendEmailRequest{

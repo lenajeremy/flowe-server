@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/resend/resend-go/v2"
+	"workflow-ai/server/internal/email"
 )
 
 // IntegrationCredsLookup resolves the workflow owner's stored OAuth
@@ -532,11 +533,15 @@ func executeNode(ctx context.Context, node WorkflowASTNode, outputs map[string]s
 		if resendKey == "" {
 			return fmt.Sprintf(`{"status":"sent","to":"%s","recipients":%d,"subject":"%s","note":"dev_mode_no_key"}`, to, len(recipients), subject), nil
 		}
+		// The body is authored as Markdown → HTML, wrapped in a styled but
+		// unbranded shell (this mail is from the user's workflow, not Flowe).
+		// Text keeps the raw Markdown as a readable plain-text fallback.
+		htmlBody := email.WrapBrandless(email.RenderMarkdown(body), subject)
 		client := resend.NewClient(resendKey)
 		from := "Flowe <noreply@usecelery.io>"
 		if len(recipients) == 1 {
 			sent, err := client.Emails.Send(&resend.SendEmailRequest{
-				From: from, To: recipients, Subject: subject, Text: body,
+				From: from, To: recipients, Subject: subject, Text: body, Html: htmlBody,
 			})
 			if err != nil {
 				return "", fmt.Errorf("resend error: %w", err)
@@ -546,7 +551,7 @@ func executeNode(ctx context.Context, node WorkflowASTNode, outputs map[string]s
 		reqs := make([]*resend.SendEmailRequest, 0, len(recipients))
 		for _, r := range recipients {
 			reqs = append(reqs, &resend.SendEmailRequest{
-				From: from, To: []string{r}, Subject: subject, Text: body,
+				From: from, To: []string{r}, Subject: subject, Text: body, Html: htmlBody,
 			})
 		}
 		var ids []string
@@ -597,13 +602,16 @@ func executeNode(ctx context.Context, node WorkflowASTNode, outputs map[string]s
 
 			resendKey := os.Getenv("RESEND_API_KEY")
 			if resendKey != "" {
-				emailBody := fmt.Sprintf("%s\n\n---\n\nContent to review:\n\n%s\n\n---\n\nApprove or reject here:\n%s", message, upstreamOutput, runURL)
+				emailText := fmt.Sprintf("%s\n\n---\n\nContent to review:\n\n%s\n\n---\n\nApprove or reject here:\n%s", message, upstreamOutput, runURL)
+				// A platform notification → Flowe-branded shell + CTA button.
+				htmlBody := email.Action("Action required", message, upstreamOutput, runURL, "Review & respond", node.Data.Label)
 				client := resend.NewClient(resendKey)
 				_, _ = client.Emails.Send(&resend.SendEmailRequest{
 					From:    "Flowe <noreply@usecelery.io>",
 					To:      []string{d.ApprovalEmail},
 					Subject: "Action Required: " + node.Data.Label,
-					Text:    emailBody,
+					Text:    emailText,
+					Html:    htmlBody,
 				})
 			}
 		}
