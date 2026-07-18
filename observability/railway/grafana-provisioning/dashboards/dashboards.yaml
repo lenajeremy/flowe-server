@@ -1,0 +1,14 @@
+apiVersion: 1
+
+providers:
+  - name: flowe
+    folder: Flowe
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    allowUiUpdates: true
+    options:
+      # /etc, not /var/lib/grafana: the Railway volume mounts over
+      # /var/lib/grafana and would shadow anything baked there.
+      path: /etc/grafana/dashboards
+      foldersFromFilesStructure: false
