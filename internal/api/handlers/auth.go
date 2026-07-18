@@ -21,6 +21,7 @@ import (
 	"workflow-ai/server/internal/auth"
 	"workflow-ai/server/internal/database/models"
 	mail "workflow-ai/server/internal/email"
+	"workflow-ai/server/internal/telemetry"
 
 	"github.com/gin-gonic/gin"
 	"github.com/resend/resend-go/v2"
@@ -87,11 +88,13 @@ func (h *WorkflowHandler) AuthEmailStart(c *gin.Context) {
 		Email string `json:"email"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil {
+		telemetry.AuthEvent(c.Request.Context(), "login_start", "error")
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
 		return
 	}
 	email := normalizeEmail(body.Email)
 	if email == "" || !strings.Contains(email, "@") || len(email) > 254 {
+		telemetry.AuthEvent(c.Request.Context(), "login_start", "error")
 		c.JSON(http.StatusBadRequest, gin.H{"error": "enter a valid email address"})
 		return
 	}
@@ -99,6 +102,8 @@ func (h *WorkflowHandler) AuthEmailStart(c *gin.Context) {
 	ctx := c.Request.Context()
 	if !auth.Allow(ctx, h.redis, "rl:otp:email:"+email, 3, 10*time.Minute) ||
 		!auth.Allow(ctx, h.redis, "rl:otp:ip:"+c.ClientIP(), 10, time.Hour) {
+		slog.WarnContext(ctx, "login start rate limited", "email", email)
+		telemetry.AuthEvent(ctx, "login_start", "error")
 		c.JSON(http.StatusTooManyRequests, gin.H{"error": "too many requests — try again in a few minutes"})
 		return
 	}
@@ -118,7 +123,8 @@ func (h *WorkflowHandler) AuthEmailStart(c *gin.Context) {
 		ExpiresAt: now.Add(loginCodeTTL),
 	}
 	if err := h.db.DB.Create(&lc).Error; err != nil {
-		slog.Error("auth: failed to store login code", "error", err)
+		slog.ErrorContext(ctx, "auth: failed to store login code", "error", err)
+		telemetry.AuthEvent(ctx, "login_start", "error")
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not start sign-in"})
 		return
 	}
@@ -130,11 +136,17 @@ func (h *WorkflowHandler) AuthEmailStart(c *gin.Context) {
 		linkBase = o
 	}
 
-	if err := sendLoginEmail(email, code, token, linkBase); err != nil {
-		slog.Error("auth: failed to send login email", "error", err, "email", email)
+	sendErr := sendLoginEmail(email, code, token, linkBase)
+	telemetry.EmailSent(ctx, "login_code", sendErr)
+	if sendErr != nil {
+		slog.WarnContext(ctx, "auth: failed to send login email", "error", sendErr, "email", email)
+		telemetry.AuthEvent(ctx, "login_start", "error")
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not send the sign-in email"})
 		return
 	}
+
+	slog.InfoContext(ctx, "login code requested", "email", email)
+	telemetry.AuthEvent(ctx, "login_start", "ok")
 
 	// Identical response whether or not an account exists — no enumeration.
 	c.JSON(http.StatusOK, gin.H{"ok": true})
@@ -193,6 +205,7 @@ func (h *WorkflowHandler) AuthEmailVerify(c *gin.Context) {
 		return
 	}
 
+	ctx := c.Request.Context()
 	var lc models.LoginCode
 	now := time.Now()
 
@@ -200,6 +213,8 @@ func (h *WorkflowHandler) AuthEmailVerify(c *gin.Context) {
 	case body.Token != "":
 		if err := h.db.DB.Where("token_hash = ? AND consumed_at IS NULL AND expires_at > ?",
 			sha256hex(body.Token), now).First(&lc).Error; err != nil {
+			slog.WarnContext(ctx, "login failed", "reason", "invalid_or_expired_link")
+			telemetry.AuthEvent(ctx, "login_verify", "bad_code")
 			c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid or expired sign-in link"})
 			return
 		}
@@ -208,15 +223,21 @@ func (h *WorkflowHandler) AuthEmailVerify(c *gin.Context) {
 		email := normalizeEmail(body.Email)
 		if err := h.db.DB.Where("email = ? AND consumed_at IS NULL AND expires_at > ?", email, now).
 			Order("created_at desc").First(&lc).Error; err != nil {
+			slog.WarnContext(ctx, "login failed", "email", email, "reason", "invalid_or_expired_code")
+			telemetry.AuthEvent(ctx, "login_verify", "bad_code")
 			c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid or expired code"})
 			return
 		}
 		if lc.Attempts >= 5 {
+			slog.WarnContext(ctx, "login failed", "email", email, "reason", "too_many_attempts")
+			telemetry.AuthEvent(ctx, "login_verify", "bad_code")
 			c.JSON(http.StatusGone, gin.H{"error": "too many attempts — request a new code"})
 			return
 		}
 		h.db.DB.Model(&lc).Update("attempts", lc.Attempts+1)
 		if subtle.ConstantTimeCompare([]byte(sha256hex(body.Code)), []byte(lc.CodeHash)) != 1 {
+			slog.WarnContext(ctx, "login failed", "email", email, "reason", "wrong_code")
+			telemetry.AuthEvent(ctx, "login_verify", "bad_code")
 			c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid or expired code"})
 			return
 		}
@@ -230,16 +251,20 @@ func (h *WorkflowHandler) AuthEmailVerify(c *gin.Context) {
 
 	user, err := h.findOrCreateUserByEmail(lc.Email)
 	if err != nil {
-		slog.Error("auth: find/create user failed", "error", err)
+		slog.ErrorContext(ctx, "auth: find/create user failed", "error", err)
+		telemetry.AuthEvent(ctx, "login_verify", "error")
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not sign you in"})
 		return
 	}
 
 	token, err := h.startSession(c, user)
 	if err != nil {
+		telemetry.AuthEvent(ctx, "login_verify", "error")
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not sign you in"})
 		return
 	}
+	slog.InfoContext(ctx, "login verified", "email", user.Email, "user_id", user.ID.String())
+	telemetry.AuthEvent(ctx, "login_verify", "ok")
 	c.JSON(http.StatusOK, gin.H{"user": publicUser(user), "token": token})
 }
 
@@ -261,9 +286,10 @@ func (h *WorkflowHandler) findOrCreateUserByEmail(email string) (*models.User, e
 func (h *WorkflowHandler) startSession(c *gin.Context, user *models.User) (string, error) {
 	token, err := auth.CreateSession(c.Request.Context(), h.redis, user.ID.String())
 	if err != nil {
-		slog.Error("auth: create session failed", "error", err)
+		slog.ErrorContext(c.Request.Context(), "auth: create session failed", "error", err)
 		return "", err
 	}
+	slog.InfoContext(c.Request.Context(), "session created", "user_id", user.ID.String())
 	return token, nil
 }
 
@@ -283,6 +309,7 @@ func (h *WorkflowHandler) AuthGoogleConnect(c *gin.Context) {
 	q.Set("scope", "openid email profile")
 	q.Set("prompt", "select_account")
 	q.Set("state", newOAuthState("", openerOrigin(c))) // login flow: no user yet
+	telemetry.AuthEvent(c.Request.Context(), "oauth_google", "started")
 	c.Redirect(http.StatusFound, "https://accounts.google.com/o/oauth2/v2/auth?"+q.Encode())
 }
 
@@ -296,40 +323,52 @@ func oauthRedirectBase() string {
 
 // GET /api/auth/google/callback
 func (h *WorkflowHandler) AuthGoogleCallback(c *gin.Context) {
+	ctx := c.Request.Context()
 	_, openerOrig, _, stateOK := consumeOAuthState(c.Query("state"))
 	if !stateOK {
+		slog.WarnContext(ctx, "auth: google callback failed", "reason", "invalid_or_expired_state")
+		telemetry.AuthEvent(ctx, "oauth_google", "error")
 		authResultPage(c, openerOrig, "", false, "Sign-in session expired — please try again.")
 		return
 	}
 	if errParam := c.Query("error"); errParam != "" {
+		slog.WarnContext(ctx, "auth: google callback failed", "reason", "cancelled")
+		telemetry.AuthEvent(ctx, "oauth_google", "error")
 		authResultPage(c, openerOrig, "", false, "Google sign-in was cancelled.")
 		return
 	}
 	code := c.Query("code")
 	if code == "" {
+		slog.WarnContext(ctx, "auth: google callback failed", "reason", "no_code")
+		telemetry.AuthEvent(ctx, "oauth_google", "error")
 		authResultPage(c, openerOrig, "", false, "Google did not return an authorization code.")
 		return
 	}
 
 	claims, err := exchangeGoogleCode(code)
 	if err != nil {
-		slog.Error("auth: google exchange failed", "error", err)
+		slog.WarnContext(ctx, "auth: google exchange failed", "error", err)
+		telemetry.AuthEvent(ctx, "oauth_google", "error")
 		authResultPage(c, openerOrig, "", false, "Could not verify your Google account.")
 		return
 	}
 
 	user, err := h.upsertGoogleUser(claims)
 	if err != nil {
-		slog.Error("auth: google upsert failed", "error", err)
+		slog.WarnContext(ctx, "auth: google upsert failed", "error", err)
+		telemetry.AuthEvent(ctx, "oauth_google", "error")
 		authResultPage(c, openerOrig, "", false, "Could not sign you in.")
 		return
 	}
 
 	token, err := h.startSession(c, user)
 	if err != nil {
+		telemetry.AuthEvent(ctx, "oauth_google", "error")
 		authResultPage(c, openerOrig, "", false, "Could not sign you in.")
 		return
 	}
+	slog.InfoContext(ctx, "login verified", "email", user.Email, "user_id", user.ID.String(), "method", "google")
+	telemetry.AuthEvent(ctx, "oauth_google", "ok")
 	authResultPage(c, openerOrig, token, true, "")
 }
 
@@ -498,5 +537,7 @@ func (h *WorkflowHandler) AuthLogout(c *gin.Context) {
 	if token := auth.BearerToken(c); token != "" {
 		auth.DestroySession(c.Request.Context(), h.redis, token)
 	}
+	slog.InfoContext(c.Request.Context(), "logged out")
+	telemetry.AuthEvent(c.Request.Context(), "logout", "ok")
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }

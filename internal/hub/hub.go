@@ -4,6 +4,7 @@ import (
 	"sync"
 
 	"workflow-ai/server/internal/executor"
+	"workflow-ai/server/internal/telemetry"
 )
 
 // RunHub is a simple in-memory pub/sub for workflow run events.
@@ -34,6 +35,7 @@ func (h *WorkflowHub) Subscribe(workflowID string) chan string {
 	h.mu.Lock()
 	h.subs[workflowID] = append(h.subs[workflowID], ch)
 	h.mu.Unlock()
+	telemetry.AddHubSubscriber("workflow", 1)
 	return ch
 }
 
@@ -45,6 +47,7 @@ func (h *WorkflowHub) Unsubscribe(workflowID string, ch chan string) {
 		if s == ch {
 			h.subs[workflowID] = append(list[:i], list[i+1:]...)
 			close(ch)
+			telemetry.AddHubSubscriber("workflow", -1)
 			break
 		}
 	}
@@ -60,6 +63,7 @@ func (h *WorkflowHub) Publish(workflowID string, runID string) {
 		select {
 		case ch <- runID:
 		default:
+			telemetry.HubDropped("workflow")
 		}
 	}
 }
@@ -76,6 +80,7 @@ func (h *RunHub) Subscribe(runID string) chan executor.ExecutionEvent {
 	}
 	h.subs[runID] = append(h.subs[runID], ch)
 	h.mu.Unlock()
+	telemetry.AddHubSubscriber("run", 1)
 	return ch
 }
 
@@ -88,6 +93,7 @@ func (h *RunHub) Unsubscribe(runID string, ch chan executor.ExecutionEvent) {
 		if s == ch {
 			h.subs[runID] = append(list[:i], list[i+1:]...)
 			close(ch)
+			telemetry.AddHubSubscriber("run", -1)
 			break
 		}
 	}
@@ -106,6 +112,7 @@ func (h *RunHub) Publish(runID string, event executor.ExecutionEvent) {
 		select {
 		case ch <- event:
 		default:
+			telemetry.HubDropped("run")
 		}
 	}
 }

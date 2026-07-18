@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"workflow-ai/server/internal/telemetry"
 )
 
 // ── Tool definitions ──────────────────────────────────────────
@@ -233,7 +235,10 @@ type anthropicToolResp struct {
 	StopReason string `json:"stop_reason"`
 }
 
-func callAnthropicWithTools(ctx context.Context, model, system, user string, maxTok int, key string, imgs []imageRef, keys APIKeys) (string, error) {
+func callAnthropicWithTools(ctx context.Context, model, system, user string, maxTok int, key string, imgs []imageRef, keys APIKeys) (out string, err error) {
+	ctx, llmDone := telemetry.StartLLM(ctx, "anthropic", model)
+	defer func() { llmDone(len(out), err) }()
+
 	tools := anthropicWebTools(keys.Brave != "")
 
 	// Build initial user message
@@ -355,7 +360,10 @@ type openAIToolResp struct {
 	} `json:"choices"`
 }
 
-func callOpenAIWithTools(ctx context.Context, model, system, user string, maxTok int, key string, imgs []imageRef, keys APIKeys) (string, error) {
+func callOpenAIWithTools(ctx context.Context, model, system, user string, maxTok int, key string, imgs []imageRef, keys APIKeys) (out string, err error) {
+	ctx, llmDone := telemetry.StartLLM(ctx, "openai", model)
+	defer func() { llmDone(len(out), err) }()
+
 	tools := openAIWebTools(keys.Brave != "")
 
 	// Build initial user message content

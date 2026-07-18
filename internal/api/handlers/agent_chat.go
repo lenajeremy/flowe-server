@@ -3,6 +3,7 @@ package handlers
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"reflect"
@@ -14,6 +15,7 @@ import (
 	"workflow-ai/server/internal/auth"
 	"workflow-ai/server/internal/database/models"
 	"workflow-ai/server/internal/executor"
+	"workflow-ai/server/internal/telemetry"
 
 	"github.com/gin-gonic/gin"
 )
@@ -290,6 +292,10 @@ func (h *WorkflowHandler) AgentChatTurn(c *gin.Context) {
 		return
 	}
 
+	turnStart := time.Now()
+	slog.InfoContext(c.Request.Context(), "agent chat turn",
+		"session_id", sess.ID.String(), "message_chars", len(req.Message))
+
 	wf, ok := h.loadOwnedWorkflow(c, sess.WorkflowID)
 	if !ok {
 		return
@@ -328,6 +334,8 @@ func (h *WorkflowHandler) AgentChatTurn(c *gin.Context) {
 		fmt.Fprintf(c.Writer, "event: error\ndata: streaming not supported\n\n")
 		return
 	}
+	telemetry.AddSSEStream(c.Request.Context(), "agent_chat", 1)
+	defer telemetry.AddSSEStream(c.Request.Context(), "agent_chat", -1)
 
 	runID := "chat-" + sess.ID.String()
 	keys := executor.APIKeys{
@@ -380,6 +388,11 @@ func (h *WorkflowHandler) AgentChatTurn(c *gin.Context) {
 		finalText = h.agentOpenAILoop(c, flusher, model, apiKey, prov.URL, system, history, req.Message, tools, execTool)
 	}
 	sendSSE(c.Writer, flusher, "done", "")
+
+	slog.InfoContext(c.Request.Context(), "agent chat turn finished",
+		"session_id", sess.ID.String(),
+		"duration_ms", time.Since(turnStart).Milliseconds(),
+		"tool_calls", len(callRecords))
 
 	// Persist transcript + state. Title from the first user message.
 	history = append(history,

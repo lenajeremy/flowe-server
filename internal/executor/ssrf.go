@@ -7,6 +7,8 @@ import (
 	"os"
 	"syscall"
 	"time"
+
+	"workflow-ai/server/internal/telemetry"
 )
 
 // SSRF protection for the httpRequest node (and any node fetching a user-
@@ -71,14 +73,16 @@ func ssrfSafeClient(timeout time.Duration) *http.Client {
 	dialer := &net.Dialer{Timeout: 10 * time.Second, Control: ssrfSafeControl}
 	return &http.Client{
 		Timeout: timeout,
-		Transport: &http.Transport{
+		// Custom transport, so the global http.DefaultTransport otel wrap
+		// doesn't apply — wrap here to keep user-URL fetches traced too.
+		Transport: telemetry.WrapTransport(&http.Transport{
 			DialContext:           dialer.DialContext,
 			ForceAttemptHTTP2:     true,
 			MaxIdleConns:          100,
 			IdleConnTimeout:       90 * time.Second,
 			TLSHandshakeTimeout:   10 * time.Second,
 			ExpectContinueTimeout: time.Second,
-		},
+		}),
 		CheckRedirect: func(_ *http.Request, via []*http.Request) error {
 			if len(via) >= 5 {
 				return fmt.Errorf("stopped after 5 redirects")

@@ -13,6 +13,7 @@ import (
 	"workflow-ai/server/internal/database/models"
 	"workflow-ai/server/internal/executor"
 	"workflow-ai/server/internal/hub"
+	"workflow-ai/server/internal/telemetry"
 
 	"github.com/gin-gonic/gin"
 )
@@ -83,8 +84,10 @@ func (h *WorkflowHandler) runDueSchedules() {
 	for _, sched := range schedules {
 		slog.Info("scheduler: firing workflow", "workflow_id", sched.WorkflowID, "frequency", sched.Frequency)
 
+		var nextRunPtr *time.Time
 		if sched.Repeat {
 			nextRun := calcNextRunAt(sched, now)
+			nextRunPtr = &nextRun
 			h.db.DB.Model(&sched).Updates(map[string]interface{}{
 				"last_run_at": now,
 				"next_run_at": nextRun,
@@ -96,13 +99,18 @@ func (h *WorkflowHandler) runDueSchedules() {
 			})
 		}
 
-		go h.runWorkflowByID(sched.WorkflowID)
+		go h.runWorkflowByID(sched.WorkflowID, nextRunPtr)
 	}
 }
 
-func (h *WorkflowHandler) runWorkflowByID(workflowID string) {
+func (h *WorkflowHandler) runWorkflowByID(workflowID string, nextRun *time.Time) {
+	// The schedule fires with no request context; telemetry and logs use the
+	// background context (a fresh trace is started inside RunWorkflow).
+	ctx := context.Background()
 	var workflow models.Workflow
 	if err := h.db.DB.First(&workflow, "id = ?", workflowID).Error; err != nil {
+		slog.WarnContext(ctx, "scheduler: failed to load workflow", "workflow_id", workflowID, "error", err)
+		telemetry.ScheduleFire(ctx, "error")
 		return
 	}
 	var nodes []executor.WorkflowASTNode
@@ -120,7 +128,8 @@ func (h *WorkflowHandler) runWorkflowByID(workflowID string) {
 		}
 	}
 	if !hasScheduledNode {
-		slog.Warn("scheduler: workflow has no scheduledTrigger node, disabling schedule", "workflow_id", workflowID)
+		slog.WarnContext(ctx, "scheduler: workflow has no scheduledTrigger node, disabling schedule", "workflow_id", workflowID)
+		telemetry.ScheduleFire(ctx, "error")
 		h.db.DB.Model(&models.ScheduledTrigger{}).Where("workflow_id = ?", workflowID).Update("enabled", false)
 		return
 	}
@@ -132,6 +141,13 @@ func (h *WorkflowHandler) runWorkflowByID(workflowID string) {
 	h.db.DB.Create(&run)
 	runID := run.ID.String()
 
+	fireAttrs := []any{"workflow_id", workflowID, "workflow_name", workflow.Name, "run_id", runID}
+	if nextRun != nil {
+		fireAttrs = append(fireAttrs, "next_run", *nextRun)
+	}
+	slog.InfoContext(ctx, "schedule fired", fireAttrs...)
+	telemetry.ScheduleFire(ctx, "ok")
+
 	// Notify any open canvas pages for this workflow so they can attach immediately.
 	hub.Workflow.Publish(workflowID, runID)
 
@@ -140,7 +156,7 @@ func (h *WorkflowHandler) runWorkflowByID(workflowID string) {
 	finalStatus := models.RunStatusCompleted
 	// The schedule fires with no request context — the loaded workflow's
 	// owner is what routes integration tokens to the right user.
-	executor.RunWorkflow(context.Background(), ast, keys, runID, workflow.UserID, func(ev executor.ExecutionEvent) {
+	executor.RunWorkflow(executor.WithTrigger(ctx, "schedule"), ast, keys, runID, workflow.UserID, func(ev executor.ExecutionEvent) {
 		ev.Timestamp = time.Since(startTime).Milliseconds()
 		events = append(events, ev)
 		hub.Global.Publish(runID, ev)

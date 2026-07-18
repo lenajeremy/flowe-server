@@ -29,8 +29,8 @@ func (h *PrettyJSONHandler) Enabled(_ context.Context, level slog.Level) bool {
 	return level >= h.opts.Level.Level()
 }
 
-func (h *PrettyJSONHandler) WithAttrs(attrs []slog.Attr) slog.Handler  { return h }
-func (h *PrettyJSONHandler) WithGroup(name string) slog.Handler         { return h }
+func (h *PrettyJSONHandler) WithAttrs(attrs []slog.Attr) slog.Handler { return h }
+func (h *PrettyJSONHandler) WithGroup(name string) slog.Handler       { return h }
 
 func (h *PrettyJSONHandler) Handle(_ context.Context, r slog.Record) error {
 	level := r.Level.String()
@@ -94,24 +94,38 @@ func (m *multiHandler) Handle(ctx context.Context, r slog.Record) error {
 }
 func (m *multiHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
 	hs := make([]slog.Handler, len(m.handlers))
-	for i, h := range m.handlers { hs[i] = h.WithAttrs(attrs) }
+	for i, h := range m.handlers {
+		hs[i] = h.WithAttrs(attrs)
+	}
 	return &multiHandler{hs}
 }
 func (m *multiHandler) WithGroup(name string) slog.Handler {
 	hs := make([]slog.Handler, len(m.handlers))
-	for i, h := range m.handlers { hs[i] = h.WithGroup(name) }
+	for i, h := range m.handlers {
+		hs[i] = h.WithGroup(name)
+	}
 	return &multiHandler{hs}
 }
 
-func SetupLogger() {
+// SetupLogger installs the stdout/file logger. Extra handlers (the OTLP
+// bridge when telemetry is enabled) are fanned in alongside; nil entries are
+// skipped so callers can pass the result of a disabled telemetry setup.
+func SetupLogger(extra ...slog.Handler) {
 	opts := &slog.HandlerOptions{AddSource: true, Level: slog.LevelDebug}
 
-	prettyHandler := NewPrettyJSONHandler(os.Stdout, opts)
-
-	var handler slog.Handler = prettyHandler
+	handlers := []slog.Handler{NewPrettyJSONHandler(os.Stdout, opts)}
 	if logFile, err := os.OpenFile("server.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644); err == nil {
-		fileHandler := slog.NewJSONHandler(logFile, opts)
-		handler = &multiHandler{handlers: []slog.Handler{prettyHandler, fileHandler}}
+		handlers = append(handlers, slog.NewJSONHandler(logFile, opts))
+	}
+	for _, h := range extra {
+		if h != nil {
+			handlers = append(handlers, h)
+		}
+	}
+
+	var handler slog.Handler = handlers[0]
+	if len(handlers) > 1 {
+		handler = &multiHandler{handlers: handlers}
 	}
 
 	slog.SetDefault(slog.New(handler))

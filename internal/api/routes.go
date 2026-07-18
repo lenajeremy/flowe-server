@@ -6,17 +6,28 @@ import (
 	"workflow-ai/server/internal/api/handlers"
 	"workflow-ai/server/internal/auth"
 	"workflow-ai/server/internal/database"
+	"workflow-ai/server/internal/telemetry"
 
 	"github.com/gin-gonic/gin"
 	"github.com/redis/go-redis/v9"
+	"go.opentelemetry.io/contrib/instrumentation/github.com/gin-gonic/gin/otelgin"
 )
 
 func InitServer(port int, db *database.DBClient, rdb *redis.Client) {
 	s := NewServer(port, db, rdb)
 	r := s.routerEngine
 
-	r.Use(gin.Logger())
-	r.Use(gin.Recovery())
+	// otelgin emits the server span + http.server.request.duration metric per
+	// request; /health is filtered so uptime probes don't drown the data.
+	// AccessLog and Recovery run inside the span so their log lines carry
+	// trace ids (they replace gin.Logger/gin.Recovery, which only ever wrote
+	// to stdout and were invisible to Loki).
+	r.Use(otelgin.Middleware("flowe-server", otelgin.WithGinFilter(func(c *gin.Context) bool {
+		return c.FullPath() != "/health"
+	})))
+	r.Use(telemetry.AccessLog())
+	r.Use(telemetry.Recovery())
+	r.Use(telemetry.GinActiveRequests())
 	r.Use(BodyLimit(10 << 20)) // 10 MiB request-body cap
 	r.Use(CorsMiddleware())
 

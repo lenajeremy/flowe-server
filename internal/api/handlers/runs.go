@@ -11,6 +11,7 @@ import (
 	"workflow-ai/server/internal/database/models"
 	"workflow-ai/server/internal/executor"
 	"workflow-ai/server/internal/hub"
+	"workflow-ai/server/internal/telemetry"
 
 	"github.com/gin-gonic/gin"
 )
@@ -60,6 +61,10 @@ func (h *WorkflowHandler) WorkflowEvents(c *gin.Context) {
 	defer hub.Workflow.Unsubscribe(workflowID, ch)
 
 	ctx := c.Request.Context()
+	slog.InfoContext(ctx, "workflow events stream attached", "workflow_id", workflowID)
+	telemetry.AddSSEStream(ctx, "workflow_events", 1)
+	defer telemetry.AddSSEStream(ctx, "workflow_events", -1)
+	defer slog.DebugContext(ctx, "workflow events stream detached", "workflow_id", workflowID)
 	for {
 		select {
 		case <-ctx.Done():
@@ -179,7 +184,13 @@ func (h *WorkflowHandler) StreamRun(c *gin.Context) {
 	}
 
 	// Run is still in progress — subscribe to live events (buffer replays past events).
-	slog.Info("stream: subscribing to live run", "run_id", runID)
+	slog.InfoContext(c.Request.Context(), "run stream attached", "run_id", runID)
+	telemetry.AddSSEStream(c.Request.Context(), "run_stream", 1)
+	defer telemetry.AddSSEStream(c.Request.Context(), "run_stream", -1)
+	eventsSent := 0
+	defer func() {
+		slog.DebugContext(c.Request.Context(), "run stream detached", "run_id", runID, "events_sent", eventsSent)
+	}()
 	ch := hub.Global.Subscribe(runID)
 	defer hub.Global.Unsubscribe(runID, ch)
 
@@ -218,6 +229,7 @@ func (h *WorkflowHandler) StreamRun(c *gin.Context) {
 			data, _ := json.Marshal(event)
 			fmt.Fprintf(c.Writer, "data: %s\n\n", data)
 			flusher.Flush()
+			eventsSent++
 			if event.Type == executor.EventWorkflowCompleted || event.Type == executor.EventWorkflowError {
 				slog.Info("stream: run finished", "run_id", runID, "type", event.Type)
 				return
@@ -236,6 +248,7 @@ func (h *WorkflowHandler) StreamRun(c *gin.Context) {
 					for _, ev := range events {
 						data, _ := json.Marshal(ev)
 						fmt.Fprintf(c.Writer, "data: %s\n\n", data)
+						eventsSent++
 					}
 				}
 				flusher.Flush()
@@ -254,6 +267,7 @@ func (h *WorkflowHandler) ApproveRun(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "no pending approval for this run/node"})
 		return
 	}
+	slog.InfoContext(c.Request.Context(), "approval decision received", "run_id", runID, "node_id", nodeID, "decision", "approved")
 	c.JSON(http.StatusOK, gin.H{"status": "approved"})
 }
 
@@ -266,5 +280,6 @@ func (h *WorkflowHandler) RejectRun(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "no pending approval for this run/node"})
 		return
 	}
+	slog.InfoContext(c.Request.Context(), "approval decision received", "run_id", runID, "node_id", nodeID, "decision", "rejected")
 	c.JSON(http.StatusOK, gin.H{"status": "rejected"})
 }

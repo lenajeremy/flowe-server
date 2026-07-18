@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"log"
 	"log/slog"
 
@@ -11,21 +12,39 @@ import (
 	"workflow-ai/server/internal/database/models"
 	rdb "workflow-ai/server/internal/database/redis"
 	"workflow-ai/server/internal/executor"
+	"workflow-ai/server/internal/telemetry"
+
+	"github.com/redis/go-redis/extra/redisotel/v9"
+	gormtracing "gorm.io/plugin/opentelemetry/tracing"
 )
 
 func main() {
-	config.SetupLogger()
+	otelShutdown, otelLogHandler := telemetry.Setup(context.Background())
+	defer func() { _ = otelShutdown(context.Background()) }()
+
+	config.SetupLogger(otelLogHandler)
 	slog.Info("starting workflow-ai server")
 
 	dbClient, err := database.NewDBClient()
 	if err != nil {
 		log.Fatal("failed to connect to database: ", err)
 	}
+	// WithoutQueryVariables: statements land in spans, bound values (tokens,
+	// emails, encrypted secrets) never do.
+	if err := dbClient.DB.Use(gormtracing.NewPlugin(
+		gormtracing.WithoutMetrics(),
+		gormtracing.WithoutQueryVariables(),
+	)); err != nil {
+		slog.Warn("failed to enable gorm tracing", "error", err)
+	}
+
+	database.InstrumentQueries(dbClient.DB)
 
 	conn, err := dbClient.DB.DB()
 	if err != nil {
 		log.Fatal("failed to get db connection: ", err)
 	}
+	telemetry.ObserveDBPool(conn)
 	defer func() {
 		slog.Info("closing database connection")
 		_ = conn.Close()
@@ -50,6 +69,12 @@ func main() {
 	}
 
 	redisClient := rdb.New()
+	if err := redisotel.InstrumentTracing(redisClient); err != nil {
+		slog.Warn("failed to enable redis tracing", "error", err)
+	}
+	if err := redisotel.InstrumentMetrics(redisClient); err != nil {
+		slog.Warn("failed to enable redis metrics", "error", err)
+	}
 
 	// Integration nodes fall back to the workflow owner's stored OAuth
 	// connection when the node config carries no manual token. FreshAccessToken

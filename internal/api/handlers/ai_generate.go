@@ -14,8 +14,10 @@ import (
 	"time"
 
 	"workflow-ai/server/internal/auth"
+	"workflow-ai/server/internal/telemetry"
 
 	"github.com/gin-gonic/gin"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 // ── Request type ────────────────────────────────────────────────
@@ -147,14 +149,16 @@ func (h *WorkflowHandler) AIModels(c *gin.Context) {
 
 var anthropicClient = &http.Client{
 	Timeout: 180 * time.Second,
-	Transport: &http.Transport{
+	// Custom transport bypasses the globally-instrumented default one, so it
+	// gets wrapped explicitly for otel client spans + outbound request logs.
+	Transport: telemetry.WrapTransport(&http.Transport{
 		TLSClientConfig:       &tls.Config{MinVersion: tls.VersionTLS12},
 		MaxIdleConns:          10,
 		IdleConnTimeout:       90 * time.Second,
 		TLSHandshakeTimeout:   10 * time.Second,
 		ResponseHeaderTimeout: 60 * time.Second,
 		DisableCompression:    true,
-	},
+	}),
 }
 
 // ── Tool definitions ────────────────────────────────────────────
@@ -537,7 +541,10 @@ func (h *WorkflowHandler) AIGenerate(c *gin.Context) {
 		return
 	}
 
-	slog.Info("ai generate", "requested", req.Model, "model", model.ID, "provider", model.Provider)
+	start := time.Now()
+	slog.InfoContext(c.Request.Context(), "ai generate requested",
+		"model", model.ID, "provider", model.Provider, "prompt_chars", len(req.Prompt))
+	telemetry.SpanAttrs(c.Request.Context(), attribute.String("flowe.ai.model", model.ID))
 
 	// Set up SSE
 	c.Header("Content-Type", "text/event-stream")
@@ -551,13 +558,16 @@ func (h *WorkflowHandler) AIGenerate(c *gin.Context) {
 		return
 	}
 
+	var chatOK bool
 	if model.Provider == "anthropic" {
-		h.runAnthropicChat(c, flusher, &req, model, apiKey)
+		chatOK = h.runAnthropicChat(c, flusher, &req, model, apiKey)
 	} else {
-		h.runOpenAIChat(c, flusher, &req, model, apiKey, prov.URL)
+		chatOK = h.runOpenAIChat(c, flusher, &req, model, apiKey, prov.URL)
 	}
 
 	sendSSE(c.Writer, flusher, "done", "")
+	slog.InfoContext(c.Request.Context(), "ai generate finished",
+		"model", model.ID, "duration_ms", time.Since(start).Milliseconds(), "ok", chatOK)
 }
 
 // execChatTool runs one builder tool call and returns its result JSON.
@@ -596,7 +606,9 @@ func (h *WorkflowHandler) execChatTool(c *gin.Context, flusher http.Flusher, req
 }
 
 // runAnthropicChat drives the tool loop against the Anthropic Messages API.
-func (h *WorkflowHandler) runAnthropicChat(c *gin.Context, flusher http.Flusher, req *aiGenerateRequest, model chatModelSpec, apiKey string) {
+// The returned bool is false when the loop ended on a request/stream error
+// (instrumentation only — the client already got the SSE error event).
+func (h *WorkflowHandler) runAnthropicChat(c *gin.Context, flusher http.Flusher, req *aiGenerateRequest, model chatModelSpec, apiKey string) bool {
 	allTools := []map[string]any{toolGetNodes, toolGetCurrentWorkflow, toolCreateWorkflow, toolUpdateWorkflow, toolListIntegrationResources}
 
 	// Build message history — prior turns as plain text role/content pairs
@@ -627,14 +639,14 @@ func (h *WorkflowHandler) runAnthropicChat(c *gin.Context, flusher http.Flusher,
 		resp, err := doAnthropicRequest(c, apiKey, body)
 		if err != nil {
 			sendSSE(c.Writer, flusher, "error", fmt.Sprintf("Request failed: %v", err))
-			break
+			return false
 		}
 
 		stopReason, assistantContent, err := consumeStream(c, resp, flusher)
 		resp.Body.Close()
 		if err != nil {
 			sendSSE(c.Writer, flusher, "error", fmt.Sprintf("Stream error: %v", err))
-			break
+			return false
 		}
 
 		// Append assistant message with thinking blocks intact — the API requires
@@ -665,11 +677,13 @@ func (h *WorkflowHandler) runAnthropicChat(c *gin.Context, flusher http.Flusher,
 
 		messages = append(messages, map[string]any{"role": "user", "content": toolResults})
 	}
+	return true
 }
 
 // runOpenAIChat drives the same tool loop against an OpenAI-compatible
-// chat-completions endpoint (OpenAI, Gemini, xAI).
-func (h *WorkflowHandler) runOpenAIChat(c *gin.Context, flusher http.Flusher, req *aiGenerateRequest, model chatModelSpec, apiKey, url string) {
+// chat-completions endpoint (OpenAI, Gemini, xAI). The returned bool is false
+// when the loop ended on a request/stream error (instrumentation only).
+func (h *WorkflowHandler) runOpenAIChat(c *gin.Context, flusher http.Flusher, req *aiGenerateRequest, model chatModelSpec, apiKey, url string) bool {
 	messages := []map[string]any{{"role": "system", "content": workflowSystemPrompt}}
 	for _, h := range req.History {
 		role, _ := h["role"].(string)
@@ -693,14 +707,14 @@ func (h *WorkflowHandler) runOpenAIChat(c *gin.Context, flusher http.Flusher, re
 		resp, err := doOpenAIRequest(c, url, apiKey, body)
 		if err != nil {
 			sendSSE(c.Writer, flusher, "error", fmt.Sprintf("Request failed: %v", err))
-			break
+			return false
 		}
 
 		content, toolCalls, err := consumeOpenAIStream(c, resp, flusher)
 		resp.Body.Close()
 		if err != nil {
 			sendSSE(c.Writer, flusher, "error", fmt.Sprintf("Stream error: %v", err))
-			break
+			return false
 		}
 
 		assistantMsg := map[string]any{"role": "assistant", "content": content}
@@ -731,6 +745,7 @@ func (h *WorkflowHandler) runOpenAIChat(c *gin.Context, flusher http.Flusher, re
 			})
 		}
 	}
+	return true
 }
 
 // openAIToolDefs converts the Anthropic-format tool definitions to the

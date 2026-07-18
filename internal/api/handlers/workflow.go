@@ -13,6 +13,7 @@ import (
 	"workflow-ai/server/internal/database/models"
 	"workflow-ai/server/internal/executor"
 	"workflow-ai/server/internal/hub"
+	"workflow-ai/server/internal/telemetry"
 
 	"github.com/gin-gonic/gin"
 	"github.com/redis/go-redis/v9"
@@ -77,6 +78,8 @@ func (h *WorkflowHandler) Run(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "streaming not supported"})
 		return
 	}
+	telemetry.AddSSEStream(c.Request.Context(), "run", 1)
+	defer telemetry.AddSSEStream(c.Request.Context(), "run", -1)
 
 	finalStatus := models.RunStatusCompleted
 	var errMsg string
@@ -107,7 +110,7 @@ func (h *WorkflowHandler) Run(c *gin.Context) {
 		Jina:      config.GetEnv("JINA_API_KEY"),
 	}
 
-	executor.RunWorkflow(c.Request.Context(), req.Workflow, keys, runID, uid, emit)
+	executor.RunWorkflow(executor.WithTrigger(c.Request.Context(), "manual"), req.Workflow, keys, runID, uid, emit)
 
 	// Serialize buffered events and update run record
 	eventsJSON, _ := json.Marshal(bufferedEvents)

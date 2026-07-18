@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"log/slog"
 	"net/http"
 
 	"workflow-ai/server/internal/auth"
@@ -43,6 +44,9 @@ func (h *WorkflowHandler) CreateApiKey(c *gin.Context) {
 	}
 	h.db.DB.Create(&key)
 
+	slog.InfoContext(c.Request.Context(), "api key created",
+		"user_id", key.UserID, "key_id", key.ID.String(), "name", key.Name)
+
 	// Return the raw key ONCE (never stored again)
 	c.JSON(http.StatusCreated, gin.H{
 		"id":     key.ID,
@@ -55,5 +59,7 @@ func (h *WorkflowHandler) CreateApiKey(c *gin.Context) {
 // DELETE /api/apikeys/:id
 func (h *WorkflowHandler) DeleteApiKey(c *gin.Context) {
 	h.db.DB.Where("user_id = ?", auth.UserID(c)).Delete(&models.ApiKey{}, "id = ?", c.Param("id"))
+	slog.InfoContext(c.Request.Context(), "api key deleted",
+		"user_id", auth.UserID(c), "key_id", c.Param("id"))
 	c.JSON(http.StatusOK, gin.H{"deleted": true})
 }

@@ -3,6 +3,7 @@ package handlers
 import (
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 
 	"workflow-ai/server/internal/database/models"
@@ -31,6 +32,8 @@ func (h *WorkflowHandler) GetWorkflowChat(c *gin.Context) {
 
 	var msgs []interface{}
 	_ = json.Unmarshal(chat.Messages, &msgs)
+	slog.DebugContext(c.Request.Context(), "workflow chat loaded",
+		"workflow_id", workflowID, "message_count", len(msgs))
 	c.JSON(http.StatusOK, gin.H{"messages": msgs})
 }
 
@@ -68,5 +71,7 @@ func (h *WorkflowHandler) SaveWorkflowChat(c *gin.Context) {
 		return
 	}
 
+	slog.DebugContext(c.Request.Context(), "workflow chat saved",
+		"workflow_id", workflowID, "message_count", len(body.Messages))
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }

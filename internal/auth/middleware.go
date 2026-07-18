@@ -1,8 +1,11 @@
 package auth
 
 import (
+	"log/slog"
 	"net/http"
 	"strings"
+
+	"workflow-ai/server/internal/telemetry"
 
 	"github.com/gin-gonic/gin"
 	"github.com/redis/go-redis/v9"
@@ -26,11 +29,14 @@ func RequireAuth(rdb *redis.Client) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		token := BearerToken(c)
 		if token == "" {
+			telemetry.AuthEvent(c.Request.Context(), "unauthorized", "no_token")
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "authentication required"})
 			return
 		}
 		userID, ok := GetSession(c.Request.Context(), rdb, token)
 		if !ok {
+			telemetry.AuthEvent(c.Request.Context(), "unauthorized", "bad_session")
+			slog.DebugContext(c.Request.Context(), "rejected expired or unknown session", "route", c.FullPath())
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "session expired"})
 			return
 		}

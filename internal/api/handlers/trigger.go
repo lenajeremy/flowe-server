@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"strings"
@@ -15,6 +16,7 @@ import (
 	"workflow-ai/server/internal/hub"
 
 	"github.com/gin-gonic/gin"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // POST /api/trigger/:workflowId
@@ -85,7 +87,11 @@ func (h *WorkflowHandler) TriggerWorkflow(c *gin.Context) {
 	}
 
 	runID := run.ID.String()
+	slog.InfoContext(c.Request.Context(), "api trigger accepted",
+		"run_id", runID, "workflow_id", workflowID, "workflow_name", workflow.Name)
 
+	// Link the detached background run to the API request's trace.
+	bgCtx := trace.ContextWithSpanContext(context.Background(), trace.SpanContextFromContext(c.Request.Context()))
 	go func() {
 		var events []executor.ExecutionEvent
 		startTime := time.Now()
@@ -95,7 +101,7 @@ func (h *WorkflowHandler) TriggerWorkflow(c *gin.Context) {
 
 		go func() {
 			defer close(doneCh)
-			executor.RunWorkflow(context.Background(), ast, keys, runID, workflow.UserID, func(event executor.ExecutionEvent) {
+			executor.RunWorkflow(executor.WithTrigger(bgCtx, "api"), ast, keys, runID, workflow.UserID, func(event executor.ExecutionEvent) {
 				event.Timestamp = time.Since(startTime).Milliseconds()
 				events = append(events, event)
 				hub.Global.Publish(runID, event)

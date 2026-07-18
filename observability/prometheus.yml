@@ -1,0 +1,15 @@
+global:
+  scrape_interval: 5s
+
+scrape_configs:
+  # Metrics exported by the app arrive via the OTel Collector's prometheus
+  # exporter on :8889. honor_labels keeps the job="flowe-server" label the
+  # exporter derives from service.name instead of overwriting it.
+  - job_name: otel-collector
+    honor_labels: true
+    static_configs:
+      - targets: ["otel-collector:8889"]
+
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]

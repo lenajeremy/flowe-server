@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"regexp"
@@ -16,8 +17,30 @@ import (
 	"time"
 
 	"github.com/resend/resend-go/v2"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 	"workflow-ai/server/internal/email"
+	"workflow-ai/server/internal/telemetry"
 )
+
+// ── Trigger source ────────────────────────────────────────────
+//
+// Handlers tag the run context with how the run was started so traces and
+// metrics can split manual editor runs from webhook/schedule/API traffic.
+
+type triggerCtxKey struct{}
+
+func WithTrigger(ctx context.Context, source string) context.Context {
+	return context.WithValue(ctx, triggerCtxKey{}, source)
+}
+
+func triggerFromContext(ctx context.Context) string {
+	if s, ok := ctx.Value(triggerCtxKey{}).(string); ok && s != "" {
+		return s
+	}
+	return "manual"
+}
 
 // IntegrationCredsLookup resolves the workflow owner's stored OAuth
 // credentials for a provider. workspace is the tenant identifier where the
@@ -114,7 +137,10 @@ type anthropicResponse struct {
 	} `json:"content"`
 }
 
-func callAnthropic(ctx context.Context, model, system, user string, temp float64, maxTok int, key string, imgs []imageRef) (string, error) {
+func callAnthropic(ctx context.Context, model, system, user string, temp float64, maxTok int, key string, imgs []imageRef) (out string, err error) {
+	ctx, llmDone := telemetry.StartLLM(ctx, "anthropic", model)
+	defer func() { llmDone(len(out), err) }()
+
 	var msgContent interface{}
 	if len(imgs) > 0 {
 		blocks := make([]anthropicBlock, 0, len(imgs)+1)
@@ -193,7 +219,10 @@ type openAIResponse struct {
 	} `json:"choices"`
 }
 
-func callOpenAI(ctx context.Context, model, system, user string, temp float64, maxTok int, key string, imgs []imageRef) (string, error) {
+func callOpenAI(ctx context.Context, model, system, user string, temp float64, maxTok int, key string, imgs []imageRef) (out string, err error) {
+	ctx, llmDone := telemetry.StartLLM(ctx, "openai", model)
+	defer func() { llmDone(len(out), err) }()
+
 	var userContent interface{}
 	if len(imgs) > 0 {
 		blocks := make([]openAIBlock, 0, len(imgs)+1)
@@ -251,6 +280,7 @@ func substituteTemplates(text string, outputs map[string]string) string {
 		}
 		base, ok := outputs[parts[1]]
 		if !ok {
+			telemetry.TemplateMiss(parts[1])
 			return "[no output from " + parts[1] + "]"
 		}
 		if parts[2] == "" {
@@ -335,7 +365,50 @@ func topoSort(nodes []WorkflowASTNode, edges []WorkflowASTEdge) []string {
 
 // ── Execute single node ────────────────────────────────────────
 
+// executeNode wraps the real node dispatch in a span plus execution metrics.
+// Every path that runs a node — main graph, loop bodies, agent-chat single
+// nodes — funnels through here.
 func executeNode(ctx context.Context, node WorkflowASTNode, outputs map[string]string, edges []WorkflowASTEdge, keys APIKeys, runID, ownerID string, emit func(ExecutionEvent)) (string, error) {
+	ctx, span := telemetry.Tracer.Start(ctx, "node "+string(node.Data.NodeType),
+		trace.WithAttributes(
+			attribute.String("flowe.node.id", node.ID),
+			attribute.String("flowe.node.type", string(node.Data.NodeType)),
+			attribute.String("flowe.node.label", node.Data.Label),
+			attribute.String("flowe.run.id", runID),
+		))
+	start := time.Now()
+	slog.DebugContext(ctx, "node started",
+		"run_id", runID, "node_id", node.ID, "node_type", node.Data.NodeType, "label", node.Data.Label)
+	out, err := runNodeInner(ctx, node, outputs, edges, keys, runID, ownerID, emit)
+
+	// Integration nodes share one op field; provider identity is the node
+	// type. Centralising here covers all 13 providers plus future ones.
+	if op := node.Data.IntegrationOp; op != "" {
+		telemetry.SpanAttrs(ctx,
+			attribute.String("flowe.integration.provider", string(node.Data.NodeType)),
+			attribute.String("flowe.integration.op", op))
+		telemetry.RecordIntegrationCall(ctx, string(node.Data.NodeType), op, err, time.Since(start))
+	}
+
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		slog.ErrorContext(ctx, "node execution failed",
+			"run_id", runID, "node_id", node.ID, "node_type", node.Data.NodeType,
+			"label", node.Data.Label, "duration_ms", time.Since(start).Milliseconds(),
+			"error", err.Error())
+	} else {
+		slog.InfoContext(ctx, "node completed",
+			"run_id", runID, "node_id", node.ID, "node_type", node.Data.NodeType,
+			"label", node.Data.Label, "duration_ms", time.Since(start).Milliseconds(),
+			"output_chars", len(out))
+	}
+	telemetry.RecordNodeExecution(ctx, string(node.Data.NodeType), err, time.Since(start))
+	span.End()
+	return out, err
+}
+
+func runNodeInner(ctx context.Context, node WorkflowASTNode, outputs map[string]string, edges []WorkflowASTEdge, keys APIKeys, runID, ownerID string, emit func(ExecutionEvent)) (string, error) {
 	d := node.Data
 	switch d.NodeType {
 	case NodeTypeTextInput:
@@ -543,6 +616,7 @@ func executeNode(ctx context.Context, node WorkflowASTNode, outputs map[string]s
 			sent, err := client.Emails.Send(&resend.SendEmailRequest{
 				From: from, To: recipients, Subject: subject, Text: body, Html: htmlBody,
 			})
+			telemetry.EmailSent(ctx, "workflow_node", err)
 			if err != nil {
 				return "", fmt.Errorf("resend error: %w", err)
 			}
@@ -557,6 +631,7 @@ func executeNode(ctx context.Context, node WorkflowASTNode, outputs map[string]s
 		var ids []string
 		for start := 0; start < len(reqs); start += 100 { // Resend batch cap
 			sent, err := client.Batch.Send(reqs[start:min(start+100, len(reqs))])
+			telemetry.EmailSent(ctx, "workflow_node", err)
 			if err != nil {
 				return "", fmt.Errorf("resend batch error: %w", err)
 			}
@@ -606,26 +681,40 @@ func executeNode(ctx context.Context, node WorkflowASTNode, outputs map[string]s
 				// A platform notification → Flowe-branded shell + CTA button.
 				htmlBody := email.Action("Action required", message, upstreamOutput, runURL, "Review & respond", node.Data.Label)
 				client := resend.NewClient(resendKey)
-				_, _ = client.Emails.Send(&resend.SendEmailRequest{
+				_, mailErr := client.Emails.Send(&resend.SendEmailRequest{
 					From:    "Flowe <noreply@usecelery.io>",
 					To:      []string{d.ApprovalEmail},
 					Subject: "Action Required: " + node.Data.Label,
 					Text:    emailText,
 					Html:    htmlBody,
 				})
+				telemetry.EmailSent(ctx, "approval", mailErr)
 			}
 		}
 		timeout := d.ApprovalTimeout
 		if timeout <= 0 {
 			timeout = 86400 * 7 // 7-day default for "no timeout"
 		}
+		waitStart := time.Now()
+		result := "cancelled"
+		telemetry.ApprovalPending(ctx, 1)
+		defer func() {
+			telemetry.ApprovalPending(ctx, -1)
+			telemetry.ApprovalResolved(ctx, result, time.Since(waitStart))
+			slog.InfoContext(ctx, "approval resolved",
+				"run_id", runID, "node_id", node.ID, "result", result,
+				"waited_ms", time.Since(waitStart).Milliseconds())
+		}()
 		select {
 		case approved := <-ch:
 			if approved {
+				result = "approved"
 				return "approved", nil
 			}
+			result = "rejected"
 			return "rejected", nil
 		case <-time.After(time.Duration(timeout) * time.Second):
+			result = "timeout"
 			approvalChannelsMu.Lock()
 			delete(approvalChannels, runID+":"+node.ID)
 			approvalChannelsMu.Unlock()
@@ -996,6 +1085,59 @@ func extractLoopItems(input, field string) []string {
 // ID, used to resolve their integration connections (OAuth tokens).
 func RunWorkflow(ctx context.Context, workflow WorkflowAST, keys APIKeys, runID, ownerID string, emit EmitFn) {
 	start := time.Now()
+
+	trigger := triggerFromContext(ctx)
+	ctx, span := telemetry.Tracer.Start(ctx, "workflow.run",
+		trace.WithAttributes(
+			attribute.String("flowe.run.id", runID),
+			attribute.String("flowe.workflow.name", workflow.Name),
+			attribute.String("flowe.trigger", trigger),
+			attribute.Int("flowe.workflow.nodes", len(workflow.Nodes)),
+		))
+	defer span.End()
+
+	slog.InfoContext(ctx, "workflow run started",
+		"run_id", runID, "workflow", workflow.Name, "trigger", trigger,
+		"nodes", len(workflow.Nodes), "edges", len(workflow.Edges))
+
+	telemetry.AddActiveRuns(ctx, 1)
+	runStatus := "completed"
+	defer func() {
+		telemetry.AddActiveRuns(ctx, -1)
+		telemetry.RecordWorkflowRun(ctx, runStatus, trigger, time.Since(start))
+		slog.InfoContext(ctx, "workflow run finished",
+			"run_id", runID, "workflow", workflow.Name, "status", runStatus,
+			"duration_ms", time.Since(start).Milliseconds())
+	}()
+	// Watch the event stream for the terminal error — RunWorkflow reports
+	// failure through events, not a return value. The ctx-aware slog carries
+	// the trace id into Loki, so error logs link back to their trace. Every
+	// event also lands on the run span as a span event: the trace alone
+	// replays the run's timeline.
+	userEmit := emit
+	emit = func(ev ExecutionEvent) {
+		telemetry.RecordRunEvent(ctx, string(ev.Type))
+		evAttrs := []attribute.KeyValue{}
+		if ev.NodeLabel != nil {
+			evAttrs = append(evAttrs, attribute.String("node.label", *ev.NodeLabel))
+		}
+		if ev.Message != "" {
+			evAttrs = append(evAttrs, attribute.String("message", truncateStr(ev.Message, 200)))
+		}
+		span.AddEvent(string(ev.Type), trace.WithAttributes(evAttrs...))
+
+		switch ev.Type {
+		case EventWorkflowError:
+			runStatus = "error"
+			span.SetStatus(codes.Error, ev.Message)
+			slog.ErrorContext(ctx, "workflow run failed",
+				"run_id", runID, "workflow", workflow.Name, "trigger", trigger, "reason", ev.Message)
+		case EventNodeWaiting:
+			slog.InfoContext(ctx, "node waiting for approval",
+				"run_id", runID, "message", truncateStr(ev.Message, 200))
+		}
+		userEmit(ev)
+	}
 
 	mk := func(t ExecutionEventType, node *WorkflowASTNode, output *string, msg string) ExecutionEvent {
 		ev := ExecutionEvent{ID: newUUID(), Type: t, Timestamp: time.Since(start).Milliseconds(), Message: msg, Output: output}

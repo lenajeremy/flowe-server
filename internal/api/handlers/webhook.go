@@ -13,8 +13,10 @@ import (
 	"workflow-ai/server/internal/database/models"
 	"workflow-ai/server/internal/executor"
 	"workflow-ai/server/internal/hub"
+	"workflow-ai/server/internal/telemetry"
 
 	"github.com/gin-gonic/gin"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // GET /api/workflows/:id/webhook  — get (or create) webhook for this workflow
@@ -71,22 +73,31 @@ func (h *WorkflowHandler) DeleteWebhook(c *gin.Context) {
 
 // POST /api/webhooks/:token  — receive external webhook, trigger workflow
 func (h *WorkflowHandler) ReceiveWebhook(c *gin.Context) {
+	ctx := c.Request.Context()
 	token := c.Param("token")
 	var wh models.WebhookTrigger
 	if err := h.db.DB.Where("token = ?", token).First(&wh).Error; err != nil {
+		slog.WarnContext(ctx, "webhook rejected", "reason", "unknown_token")
+		telemetry.WebhookReceived(ctx, "unknown_token")
 		c.JSON(http.StatusNotFound, gin.H{"error": "webhook not found"})
 		return
 	}
 
 	var workflow models.Workflow
 	if err := h.db.DB.First(&workflow, "id = ?", wh.WorkflowID).Error; err != nil {
+		slog.WarnContext(ctx, "webhook rejected", "reason", "workflow_not_found", "workflow_id", wh.WorkflowID)
+		telemetry.WebhookReceived(ctx, "unknown_token")
 		c.JSON(http.StatusNotFound, gin.H{"error": "workflow not found"})
 		return
 	}
 
 	// Read incoming body as payload
 	var payload map[string]interface{}
-	c.ShouldBindJSON(&payload)
+	payloadStatus := "accepted"
+	if err := c.ShouldBindJSON(&payload); err != nil && c.Request.ContentLength > 0 {
+		payloadStatus = "invalid"
+		slog.WarnContext(ctx, "webhook payload invalid", "workflow_id", wh.WorkflowID, "workflow_name", workflow.Name)
+	}
 
 	run := models.WorkflowRun{
 		UserID:       workflow.UserID,
@@ -114,7 +125,10 @@ func (h *WorkflowHandler) ReceiveWebhook(c *gin.Context) {
 		Jina:      os.Getenv("JINA_API_KEY"),
 	}
 	runID := run.ID.String()
-	slog.Info("webhook triggered", "run_id", runID, "workflow_id", wh.WorkflowID, "workflow_name", workflow.Name)
+	slog.InfoContext(ctx, "webhook received",
+		"run_id", runID, "workflow_id", wh.WorkflowID, "workflow_name", workflow.Name,
+		"payload_bytes", c.Request.ContentLength)
+	telemetry.WebhookReceived(ctx, payloadStatus)
 	hub.Workflow.Publish(wh.WorkflowID, runID)
 
 	// Inject webhook payload into webhookTrigger nodes via DefaultValue
@@ -126,20 +140,22 @@ func (h *WorkflowHandler) ReceiveWebhook(c *gin.Context) {
 		}
 	}
 
+	// Link the detached background run to the webhook request's trace.
+	bgCtx := trace.ContextWithSpanContext(context.Background(), trace.SpanContextFromContext(c.Request.Context()))
 	go func() {
 		var events []executor.ExecutionEvent
 		startTime := time.Now()
 		finalStatus := models.RunStatusCompleted
-		executor.RunWorkflow(context.Background(), ast, keys, runID, workflow.UserID, func(event executor.ExecutionEvent) {
+		executor.RunWorkflow(executor.WithTrigger(bgCtx, "webhook"), ast, keys, runID, workflow.UserID, func(event executor.ExecutionEvent) {
 			event.Timestamp = time.Since(startTime).Milliseconds()
 			events = append(events, event)
 			hub.Global.Publish(runID, event)
-			slog.Debug("webhook run event", "run_id", runID, "type", event.Type, "node_id", event.NodeID)
+			slog.DebugContext(bgCtx, "webhook run event", "run_id", runID, "type", event.Type, "node_id", event.NodeID)
 			if event.Type == executor.EventWorkflowError {
 				finalStatus = models.RunStatusError
 			}
 		})
-		slog.Info("webhook run finished", "run_id", runID, "status", finalStatus, "event_count", len(events))
+		slog.InfoContext(bgCtx, "webhook run finished", "run_id", runID, "status", finalStatus, "event_count", len(events))
 		eventsJSON, _ := json.Marshal(events)
 		h.db.DB.Model(&run).Updates(map[string]interface{}{
 			"status": finalStatus,

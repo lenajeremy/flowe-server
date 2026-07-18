@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"html"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
@@ -18,6 +19,7 @@ import (
 	"workflow-ai/server/internal/auth"
 	"workflow-ai/server/internal/cryptobox"
 	"workflow-ai/server/internal/database/models"
+	"workflow-ai/server/internal/telemetry"
 
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
@@ -288,6 +290,7 @@ func (h *WorkflowHandler) ConnectIntegration(c *gin.Context) {
 		})
 		return
 	}
+	slog.InfoContext(c.Request.Context(), "integration connect started", "provider", prov.name)
 
 	// Shopify authorizes against the shop's own domain, which the frontend
 	// supplies as ?shop=. The domain is validated and carried in the state so
@@ -330,17 +333,24 @@ func (h *WorkflowHandler) CallbackIntegration(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "unknown provider"})
 		return
 	}
+	ctx := c.Request.Context()
 	userID, openerOrig, shop, stateOK := consumeOAuthState(c.Query("state"))
 	if errParam := c.Query("error"); errParam != "" {
+		slog.WarnContext(ctx, "integration connect failed", "provider", provider, "reason", truncate(errParam, 200))
+		telemetry.AuthEvent(ctx, "integration_oauth", "error")
 		oauthResultPage(c, provider, openerOrig, false, errParam)
 		return
 	}
 	if !stateOK {
+		slog.WarnContext(ctx, "integration connect failed", "provider", provider, "reason", "invalid_or_expired_state")
+		telemetry.AuthEvent(ctx, "integration_oauth", "error")
 		oauthResultPage(c, provider, openerOrig, false, "invalid or expired state — try connecting again")
 		return
 	}
 	code := c.Query("code")
 	if code == "" {
+		slog.WarnContext(ctx, "integration connect failed", "provider", provider, "reason", "no_code")
+		telemetry.AuthEvent(ctx, "integration_oauth", "error")
 		oauthResultPage(c, provider, openerOrig, false, "provider returned no code")
 		return
 	}
@@ -372,6 +382,8 @@ func (h *WorkflowHandler) CallbackIntegration(c *gin.Context) {
 		conn, err = exchangeSlackCode(code)
 	}
 	if err != nil {
+		slog.WarnContext(ctx, "integration connect failed", "provider", provider, "reason", truncate(err.Error(), 200))
+		telemetry.AuthEvent(ctx, "integration_oauth", "error")
 		oauthResultPage(c, provider, openerOrig, false, err.Error())
 		return
 	}
@@ -382,9 +394,13 @@ func (h *WorkflowHandler) CallbackIntegration(c *gin.Context) {
 	// insert, and dead tokens shouldn't linger in the table anyway.
 	h.db.DB.Unscoped().Where("user_id = ? AND provider = ?", userID, provider).Delete(&models.IntegrationConnection{})
 	if err := h.db.DB.Create(conn).Error; err != nil {
+		slog.WarnContext(ctx, "integration connect failed", "provider", provider, "reason", "store_failed")
+		telemetry.AuthEvent(ctx, "integration_oauth", "error")
 		oauthResultPage(c, provider, openerOrig, false, "failed to store connection")
 		return
 	}
+	slog.InfoContext(ctx, "integration connected", "provider", provider, "user_id", userID)
+	telemetry.AuthEvent(ctx, "integration_oauth", "ok")
 	oauthResultPage(c, provider, openerOrig, true, "")
 }
 
@@ -396,6 +412,7 @@ func (h *WorkflowHandler) DisconnectIntegration(c *gin.Context) {
 		return
 	}
 	h.db.DB.Unscoped().Where("user_id = ? AND provider = ?", currentUserID(c), provider).Delete(&models.IntegrationConnection{})
+	slog.InfoContext(c.Request.Context(), "integration disconnected", "provider", provider, "user_id", currentUserID(c))
 	c.JSON(http.StatusOK, gin.H{"disconnected": provider})
 }
 
@@ -438,8 +455,8 @@ func (h *WorkflowHandler) listProviderResources(userID, provider string) ([]inte
 		return outlookResources(token)
 	case "slack":
 		return slackResources(token, UserGrantToken(h.db.DB, userID, "slack"))
-	// googledocs / googlesheets expose no pickable resource list (drive.file
-	// scope only sees app-created files) — they fall through to empty.
+		// googledocs / googlesheets expose no pickable resource list (drive.file
+		// scope only sees app-created files) — they fall through to empty.
 	}
 	return []integrationResource{}, nil
 }
@@ -457,6 +474,16 @@ func (h *WorkflowHandler) IntegrationResources(c *gin.Context) {
 		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
 		return
 	}
+	kinds := map[string]bool{}
+	for _, r := range resources {
+		kinds[r.Type] = true
+	}
+	kindList := make([]string, 0, len(kinds))
+	for k := range kinds {
+		kindList = append(kindList, k)
+	}
+	slog.DebugContext(c.Request.Context(), "integration resources listed",
+		"provider", provider, "resource_kinds", strings.Join(kindList, ","), "resource_count", len(resources))
 	c.JSON(http.StatusOK, resources)
 }
 

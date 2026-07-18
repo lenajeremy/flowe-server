@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -70,6 +71,8 @@ func (h *WorkflowHandler) SaveVersion(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
+	slog.InfoContext(c.Request.Context(), "workflow version saved",
+		"workflow_id", workflowID, "version_id", version.ID.String())
 	c.JSON(http.StatusCreated, version)
 }
 
@@ -94,6 +97,9 @@ func (h *WorkflowHandler) RestoreVersion(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
+
+	slog.InfoContext(c.Request.Context(), "workflow version restored",
+		"workflow_id", workflowID, "version_id", versionID)
 
 	// Return the updated workflow
 	var workflow models.Workflow
