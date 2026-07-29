@@ -27,6 +27,9 @@ type aiGenerateRequest struct {
 	Model        string `json:"model,omitempty"`
 	CurrentNodes []any  `json:"currentNodes,omitempty"`
 	CurrentEdges []any  `json:"currentEdges,omitempty"`
+	// WorkflowID is the canvas workflow's db id — scopes list_data_stores to
+	// stores this workflow can actually use. Empty for unsaved workflows.
+	WorkflowID string `json:"workflowId,omitempty"`
 	// History is the prior conversation as [{role, content}] pairs (user/assistant text only).
 	History []map[string]any `json:"history,omitempty"`
 }
@@ -275,6 +278,54 @@ var toolCreateWorkflow = map[string]any{
 	},
 }
 
+var toolListDataStores = map[string]any{
+	"name":        "list_data_stores",
+	"description": "Lists the user's persistent Data stores — id, name, kind (kv | collection | text), scope (run | workflow | account), and schema. Data nodes reference a store via dataStoreId, so ALWAYS call this before configuring a data node and use a REAL id from the response. If no suitable store exists, call create_data_store to propose one.",
+	"input_schema": map[string]any{
+		"type":       "object",
+		"properties": map[string]any{},
+	},
+}
+
+var toolCreateDataStore = map[string]any{
+	"name":        "create_data_store",
+	"description": "PROPOSES a new persistent Data store to the user. This does NOT create anything: the user sees an approval card in chat and the store only exists after they approve it (a later message will tell you the store's real id). After calling this, finish the workflow with the data node's dataStoreId left empty and tell the user you'll wire it up once they approve. Never call this twice for the same store in one turn.",
+	"input_schema": map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"name": map[string]any{"type": "string", "description": "Short human name, e.g. 'email counter' or 'orders seen'"},
+			"kind": map[string]any{
+				"type": "string", "enum": []string{"kv", "collection", "text"},
+				"description": "kv: keyed values/counters · collection: a table of records · text: one running text blob",
+			},
+			"scope": map[string]any{
+				"type": "string", "enum": []string{"run", "workflow", "account"},
+				"description": "run: scratch within one run · workflow: persists across this workflow's runs (default choice) · account: shared across all the user's workflows",
+			},
+			"schema": map[string]any{
+				"type":        "array",
+				"description": "Optional typed columns for a collection: [{name, type}] with type one of text|number|boolean|datetime|json. Omit for schemaless.",
+				"items": map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"name": map[string]any{"type": "string"},
+						"type": map[string]any{"type": "string", "enum": []string{"text", "number", "boolean", "datetime", "json"}},
+					},
+					"required": []string{"name", "type"},
+				},
+			},
+			"reason": map[string]any{"type": "string", "description": "One sentence shown on the approval card: what the workflow uses this store for"},
+		},
+		"required": []string{"name", "kind", "scope", "reason"},
+	},
+}
+
+// builderTools is the single source of truth for the AI builder's tool set
+// (Anthropic uses it directly; openAIToolDefs converts it).
+func builderTools() []map[string]any {
+	return []map[string]any{toolGetNodes, toolGetCurrentWorkflow, toolCreateWorkflow, toolUpdateWorkflow, toolListIntegrationResources, toolListDataStores, toolCreateDataStore}
+}
+
 // nodeCatalog documents every node type (fields, semantics) — shared by the
 // builder's get_available_nodes tool and agent-chat tool-schema generation.
 func nodeCatalog() []map[string]any {
@@ -347,6 +398,22 @@ func nodeCatalog() []map[string]any {
 			"description": "Starts workflow on a recurring schedule (fixed interval, or daily/weekly/monthly). The user sets the cadence in the node sidebar after generation — do NOT emit schedule data fields.",
 			"dataFields":  map[string]any{"label": "string – display name"},
 			"handles":     map[string]any{"inputs": []string{}, "outputs": []string{"source (right)"}},
+		},
+		{
+			"type": "data", "label": "Data Store", "category": "Data",
+			"description": "Reads/writes persistent memory (a Data store). This is how workflows remember things across runs: counters ('email #N'), dedup lists ('orders already handled'), cursors, accumulating digests. Ops by store kind — kv: get/set/increment/delete · collection: append/query/update/delete/count/clear · text: get/set/append. Output is the op result as JSON (increment returns the new number).",
+			"dataFields": map[string]any{
+				"dataStoreId":  "string – REAL store id from list_data_stores (leave empty only when a create_data_store proposal is pending approval)",
+				"dataOp":       "kv: 'get'|'set'|'increment'|'delete' · collection: 'append'|'query'|'update'|'delete'|'count'|'clear' · text: 'get'|'set'|'append'",
+				"dataKey":      "string – kv key (templates ok)",
+				"dataValue":    "string – kv value / text content (templates ok; JSON kept as JSON, other text stored as a string)",
+				"dataAmount":   "string – increment amount (default 1)",
+				"dataRecord":   "string – JSON object record for append/update (templates ok)",
+				"dataFilter":   "string – JSON equality filter for query, e.g. {\"status\":\"open\"}",
+				"dataRecordId": "string – record id for update/delete (records carry _id in query results)",
+				"dataLimit":    "string – query row limit (default 100)",
+			},
+			"handles": map[string]any{"inputs": []string{"target (left)"}, "outputs": []string{"source (right)"}},
 		},
 		{
 			"type": "notion", "label": "Notion", "category": "Integrations",
@@ -516,7 +583,12 @@ Integrations (notion, linear, github, gitlab, gmail, stripe, shopify):
 - Auth is handled by OAuth connections — NEVER set integrationToken and never ask the user for API keys.
 - Before placing or editing an integration node, call list_integration_resources and use the REAL resource IDs (notionDatabaseId, notionPageId, linearTeamId, linearProjectId, githubRepo, gitlabProjectId, stripePriceId) from the response. Mention the resource by name when you explain the workflow.
 - If the provider is not connected, still build the node but leave the resource ID empty and tell the user to click Connect in the node's settings panel, then ask you to fill in the target resource.
-- Prefer the gmail node over emailSend when the user wants mail sent from their own address or wants to read/search their inbox.`
+- Prefer the gmail node over emailSend when the user wants mail sent from their own address or wants to read/search their inbox.
+
+Persistence (Data stores):
+- Trigger outputs carry NO memory — a scheduled run knows nothing about previous runs. For anything that must survive across runs (counters like "email #3 of 10", dedup like "skip orders already handled", cursors, accumulating digests), use a data node backed by a Data store. Do not fake state with LLM prompts.
+- Call list_data_stores first and set a REAL dataStoreId. If no suitable store exists, call create_data_store — that only PROPOSES it: the user must approve a card in chat, and the store exists only after approval. Build the rest of the workflow with dataStoreId left empty, and when a later message gives you the approved store's id, fill it in with update_workflow.
+- Scope guide: workflow (default — persists across this workflow's runs), account (shared across the user's workflows), run (scratch state inside a single run).`
 
 // ── Handler ─────────────────────────────────────────────────────
 
@@ -600,6 +672,17 @@ func (h *WorkflowHandler) execChatTool(c *gin.Context, flusher http.Flusher, req
 		provider, _ := m["provider"].(string)
 		return h.integrationResourcesForAI(currentUserID(c), provider)
 
+	case "list_data_stores":
+		return h.dataStoresForAI(currentUserID(c), req.WorkflowID)
+
+	case "create_data_store":
+		// Never creates — streams a proposal card to the chat UI. The user's
+		// Accept click creates the store through the normal authed REST path,
+		// and a follow-up chat message tells the model the real id.
+		inputJSON, _ := json.Marshal(input)
+		sendSSE(c.Writer, flusher, "data_store_proposal", string(inputJSON))
+		return `{"status":"proposed","message":"NOT created yet — the user now sees an approval card in chat. Finish your reply: explain what the store is for, leave dataStoreId empty in any data node, and say you'll wire it up once they approve. If they approve, a later message will give you the store's real id — use update_workflow to fill it in then."}`
+
 	default:
 		return fmt.Sprintf(`{"error": "unknown tool: %s"}`, name)
 	}
@@ -609,7 +692,7 @@ func (h *WorkflowHandler) execChatTool(c *gin.Context, flusher http.Flusher, req
 // The returned bool is false when the loop ended on a request/stream error
 // (instrumentation only — the client already got the SSE error event).
 func (h *WorkflowHandler) runAnthropicChat(c *gin.Context, flusher http.Flusher, req *aiGenerateRequest, model chatModelSpec, apiKey string) bool {
-	allTools := []map[string]any{toolGetNodes, toolGetCurrentWorkflow, toolCreateWorkflow, toolUpdateWorkflow, toolListIntegrationResources}
+	allTools := builderTools()
 
 	// Build message history — prior turns as plain text role/content pairs
 	var messages []map[string]any
@@ -751,7 +834,7 @@ func (h *WorkflowHandler) runOpenAIChat(c *gin.Context, flusher http.Flusher, re
 // openAIToolDefs converts the Anthropic-format tool definitions to the
 // OpenAI function-calling format.
 func openAIToolDefs() []map[string]any {
-	anthropicTools := []map[string]any{toolGetNodes, toolGetCurrentWorkflow, toolCreateWorkflow, toolUpdateWorkflow, toolListIntegrationResources}
+	anthropicTools := builderTools()
 	out := make([]map[string]any, 0, len(anthropicTools))
 	for _, t := range anthropicTools {
 		out = append(out, map[string]any{

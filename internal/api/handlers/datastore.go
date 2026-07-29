@@ -106,6 +106,36 @@ func (h *WorkflowHandler) CreateDataStore(c *gin.Context) {
 	c.JSON(http.StatusCreated, store)
 }
 
+// dataStoresForAI returns the stores a workflow's data nodes can target
+// (that workflow's own + all account-scoped), as JSON for the AI builder.
+func (h *WorkflowHandler) dataStoresForAI(userID, workflowID string) string {
+	q := h.db.DB.Where("user_id = ?", userID)
+	if workflowID != "" {
+		q = q.Where(h.db.DB.Where("workflow_id = ?", workflowID).Or("scope = ?", "account"))
+	} else {
+		q = q.Where("scope = ?", "account")
+	}
+	var stores []models.DataStore
+	q.Order("created_at desc").Find(&stores)
+
+	type aiStore struct {
+		ID     string          `json:"id"`
+		Name   string          `json:"name"`
+		Kind   string          `json:"kind"`
+		Scope  string          `json:"scope"`
+		Schema json.RawMessage `json:"schema,omitempty"`
+	}
+	out := make([]aiStore, 0, len(stores))
+	for _, s := range stores {
+		out = append(out, aiStore{ID: s.ID.String(), Name: s.Name, Kind: s.Kind, Scope: s.Scope, Schema: json.RawMessage(s.Schema)})
+	}
+	b, _ := json.Marshal(map[string]any{
+		"stores": out,
+		"note":   "Use these ids as dataStoreId. If none fits, propose one with create_data_store.",
+	})
+	return string(b)
+}
+
 // GET /api/data-stores/:id
 func (h *WorkflowHandler) GetDataStore(c *gin.Context) {
 	st, ok := h.loadOwnedStore(c, c.Param("id"))
