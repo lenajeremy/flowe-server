@@ -725,6 +725,7 @@ func (h *WorkflowHandler) execChatToolWithActivity(c *gin.Context, flusher http.
 	out := h.execChatTool(c, flusher, req, name, input)
 
 	status := "ok"
+	doneLabel := label
 	// Surface a tool-level error (and a rejected proposal) as a failed step.
 	var probe map[string]any
 	if json.Unmarshal([]byte(out), &probe) == nil {
@@ -733,8 +734,27 @@ func (h *WorkflowHandler) execChatToolWithActivity(c *gin.Context, flusher http.
 		} else if s, _ := probe["status"].(string); s == "rejected" || s == "timeout" {
 			status = "error"
 		}
+		// "Waiting for your approval" is only true while it's waiting — restate
+		// the finished step as what actually happened.
+		if name == "create_data_store" {
+			m, _ := input.(map[string]any)
+			suffix := ""
+			if n, _ := m["name"].(string); n != "" {
+				suffix = " · " + n
+			}
+			switch s, _ := probe["status"].(string); s {
+			case "approved":
+				doneLabel = "Created the data store" + suffix
+			case "rejected":
+				doneLabel = "Data store rejected" + suffix
+			case "timeout":
+				doneLabel = "Approval timed out" + suffix
+			case "cancelled":
+				doneLabel = "Approval cancelled" + suffix
+			}
+		}
 	}
-	res, _ := json.Marshal(map[string]string{"tool": name, "label": label, "status": status})
+	res, _ := json.Marshal(map[string]string{"tool": name, "label": doneLabel, "status": status})
 	sendSSE(c.Writer, flusher, "tool_result", string(res))
 	return out
 }
