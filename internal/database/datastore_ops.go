@@ -4,13 +4,40 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 
 	"workflow-ai/server/internal/database/models"
 	"workflow-ai/server/internal/executor"
+	"workflow-ai/server/internal/hub"
 
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
+
+// livePreviewCap bounds the value pushed to watching canvases — the node card
+// shows a glance, not the whole record. The Data page serves the full value.
+const livePreviewCap = 512
+
+func preview(s string) string {
+	if len(s) > livePreviewCap {
+		return s[:livePreviewCap] + "…"
+	}
+	return s
+}
+
+func formatFloat(f float64) string { return strconv.FormatFloat(f, 'f', -1, 64) }
+
+// publishKV notifies open canvases that a key changed.
+func publishKV(storeID, key, value string) {
+	hub.Data.Publish(hub.DataChange{StoreID: storeID, Key: key, Value: preview(value)})
+}
+
+// publishCount notifies open canvases of a collection's new row count.
+func (o DataStoreOps) publishCount(storeID string) {
+	if n, err := o.RecordCount(storeID); err == nil {
+		hub.Data.Publish(hub.DataChange{StoreID: storeID, Count: &n})
+	}
+}
 
 // DataStoreOps implements executor.DataStoreOps against Postgres. Wired at boot
 // so the executor's Data node can read/write durable (workflow/account) stores.
@@ -54,10 +81,14 @@ func (o DataStoreOps) KVGet(storeID, key string) (json.RawMessage, bool, error) 
 
 func (o DataStoreOps) KVSet(storeID, key string, value json.RawMessage) error {
 	kv := models.DataKV{StoreID: storeID, Key: key, Value: models.JSONB(value)}
-	return o.DB.Clauses(clause.OnConflict{
+	err := o.DB.Clauses(clause.OnConflict{
 		Columns:   []clause.Column{{Name: "store_id"}, {Name: "key"}},
 		DoUpdates: clause.AssignmentColumns([]string{"value", "updated_at"}),
 	}).Create(&kv).Error
+	if err == nil {
+		publishKV(storeID, key, string(value))
+	}
+	return err
 }
 
 func (o DataStoreOps) KVIncrement(storeID, key string, amount float64) (float64, error) {
@@ -80,12 +111,19 @@ func (o DataStoreOps) KVIncrement(storeID, key string, amount float64) (float64,
 		}
 		return tx.Model(&kv).Update("value", models.JSONB(b)).Error
 	})
+	if err == nil {
+		publishKV(storeID, key, formatFloat(result))
+	}
 	return result, err
 }
 
 func (o DataStoreOps) KVDelete(storeID, key string) error {
-	return o.DB.Unscoped().Where("store_id = ? AND key = ?", storeID, key).
+	err := o.DB.Unscoped().Where("store_id = ? AND key = ?", storeID, key).
 		Delete(&models.DataKV{}).Error
+	if err == nil {
+		hub.Data.Publish(hub.DataChange{StoreID: storeID, Key: key, Deleted: true})
+	}
+	return err
 }
 
 // ── collection ───────────────────────────────────────────────────
@@ -95,6 +133,7 @@ func (o DataStoreOps) RecordAppend(storeID string, record json.RawMessage) (stri
 	if err := o.DB.Create(&rec).Error; err != nil {
 		return "", err
 	}
+	o.publishCount(storeID)
 	return rec.ID.String(), nil
 }
 
@@ -124,6 +163,7 @@ func (o DataStoreOps) RecordUpdate(storeID, recordID string, record json.RawMess
 	if res.RowsAffected == 0 {
 		return fmt.Errorf("record %s not found", recordID)
 	}
+	o.publishCount(storeID)
 	return nil
 }
 
@@ -136,6 +176,7 @@ func (o DataStoreOps) RecordDelete(storeID, recordID string) error {
 	if res.RowsAffected == 0 {
 		return fmt.Errorf("record %s not found", recordID)
 	}
+	o.publishCount(storeID)
 	return nil
 }
 
@@ -146,7 +187,12 @@ func (o DataStoreOps) RecordCount(storeID string) (int64, error) {
 }
 
 func (o DataStoreOps) RecordClear(storeID string) error {
-	return o.DB.Unscoped().Where("store_id = ?", storeID).Delete(&models.DataRecord{}).Error
+	err := o.DB.Unscoped().Where("store_id = ?", storeID).Delete(&models.DataRecord{}).Error
+	if err == nil {
+		zero := int64(0)
+		hub.Data.Publish(hub.DataChange{StoreID: storeID, Count: &zero, Deleted: true})
+	}
+	return err
 }
 
 // ── text ─────────────────────────────────────────────────────────
@@ -188,6 +234,9 @@ func (o DataStoreOps) TextAppend(storeID, text string) (string, error) {
 		}
 		return tx.Model(&kv).Update("value", models.JSONB(b)).Error
 	})
+	if err == nil {
+		publishKV(storeID, textKey, result)
+	}
 	return result, err
 }
 

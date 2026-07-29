@@ -324,10 +324,36 @@ var toolCreateDataStore = map[string]any{
 	},
 }
 
+var toolSetSchedule = map[string]any{
+	"name":        "set_schedule",
+	"description": "Sets when a workflow with a scheduledTrigger node actually runs. The cadence lives outside the node's data, so placing a scheduledTrigger is NOT enough — call this whenever the user states or implies a cadence ('every 2 minutes', 'daily at 9am', 'every Monday'), and never tell them to set it by hand. Also remind them the workflow must be Published for schedules to fire.",
+	"input_schema": map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"frequency": map[string]any{
+				"type": "string", "enum": []string{"interval", "hourly", "daily", "weekly", "monthly"},
+				"description": "interval = every N minutes/hours (use interval_minutes); hourly = on the hour; daily/weekly/monthly use run_time",
+			},
+			"interval_minutes": map[string]any{
+				"type":        "number",
+				"description": "For frequency=interval: how many minutes between runs. Minimum 1.",
+			},
+			"run_time": map[string]any{
+				"type":        "string",
+				"description": "For daily/weekly/monthly: 'HH:MM' 24h in UTC. Convert if the user names a timezone, and say which time you set.",
+			},
+			"day_of_week":  map[string]any{"type": "number", "description": "weekly only: 0=Sunday … 6=Saturday"},
+			"day_of_month": map[string]any{"type": "number", "description": "monthly only: 1–28"},
+			"repeat":       map[string]any{"type": "boolean", "description": "false = run once then disable itself (default true)"},
+		},
+		"required": []string{"frequency"},
+	},
+}
+
 // builderTools is the single source of truth for the AI builder's tool set
 // (Anthropic uses it directly; openAIToolDefs converts it).
 func builderTools() []map[string]any {
-	return []map[string]any{toolGetNodes, toolGetCurrentWorkflow, toolCreateWorkflow, toolUpdateWorkflow, toolListIntegrationResources, toolListDataStores, toolCreateDataStore}
+	return []map[string]any{toolGetNodes, toolGetCurrentWorkflow, toolCreateWorkflow, toolUpdateWorkflow, toolListIntegrationResources, toolListDataStores, toolCreateDataStore, toolSetSchedule}
 }
 
 // nodeCatalog documents every node type (fields, semantics) — shared by the
@@ -399,7 +425,7 @@ func nodeCatalog() []map[string]any {
 		},
 		{
 			"type": "scheduledTrigger", "label": "Scheduled Trigger", "category": "Triggers",
-			"description": "Starts workflow on a recurring schedule (fixed interval, or daily/weekly/monthly). The user sets the cadence in the node sidebar after generation — do NOT emit schedule data fields.",
+			"description": "Starts the workflow on a recurring schedule. The cadence is NOT node data — place this node and then call set_schedule to choose it (every N minutes, hourly, daily/weekly/monthly at a time). Schedules only fire once the workflow is Published.",
 			"dataFields":  map[string]any{"label": "string – display name"},
 			"handles":     map[string]any{"inputs": []string{}, "outputs": []string{"source (right)"}},
 		},
@@ -592,7 +618,12 @@ Integrations (notion, linear, github, gitlab, gmail, stripe, shopify):
 Persistence (Data stores):
 - Trigger outputs carry NO memory — a scheduled run knows nothing about previous runs. For anything that must survive across runs (counters like "email #3 of 10", dedup like "skip orders already handled", cursors, accumulating digests), use a data node backed by a Data store. Do not fake state with LLM prompts.
 - Call list_data_stores first and set a REAL dataStoreId. If no suitable store exists, call create_data_store BEFORE building the nodes that need it — it pauses and waits for the user's answer, then returns either the approved store's real store_id (use it as dataStoreId and carry on) or a rejection (don't use the store; build what you can and say which part needs persistence).
-- Scope guide: workflow (default — persists across this workflow's runs), account (shared across the user's workflows), run (scratch state inside a single run).`
+- Scope guide: workflow (default — persists across this workflow's runs), account (shared across the user's workflows), run (scratch state inside a single run).
+
+Schedules:
+- A scheduledTrigger node carries no cadence. Whenever you place or keep one and the user has stated any timing ("every 2 minutes", "each morning", "Mondays"), call set_schedule to set it. Never end a turn telling the user to open the node and set the cadence themselves — that is your job.
+- Times are UTC; if the user names a local time, convert it and say what you set.
+- Schedules only fire when the workflow is Published, so if set_schedule reports published:false, tell them to hit Publish.`
 
 // ── Handler ─────────────────────────────────────────────────────
 
@@ -677,6 +708,8 @@ func toolActivityLabel(name string, input any) string {
 			return "Waiting for your approval · " + n
 		}
 		return "Waiting for your approval"
+	case "set_schedule":
+		return "Setting the schedule"
 	default:
 		return name
 	}
@@ -738,6 +771,9 @@ func (h *WorkflowHandler) execChatTool(c *gin.Context, flusher http.Flusher, req
 
 	case "list_data_stores":
 		return h.dataStoresForAI(currentUserID(c), req.WorkflowID)
+
+	case "set_schedule":
+		return h.setScheduleForAI(c, req.WorkflowID, input)
 
 	case "create_data_store":
 		// Blocks this turn until the user decides. Nothing is created here —

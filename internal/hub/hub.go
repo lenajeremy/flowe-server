@@ -68,6 +68,68 @@ func (h *WorkflowHub) Publish(workflowID string, runID string) {
 	}
 }
 
+// ── Data store changes ────────────────────────────────────────
+// Lets open canvases watch the stores their Data nodes point at, so a value
+// written by a scheduled run shows up live without a trip to the Data page.
+// Topic is the store ID; the SSE handler only subscribes a client to stores it
+// has already proved the caller owns.
+
+// DataChange describes one write to a store. Value carries the new value for
+// kv/text writes; Count carries the row count for collection writes. Deleted
+// marks a key (or the whole store's data) being cleared.
+type DataChange struct {
+	StoreID string `json:"store_id"`
+	Key     string `json:"key,omitempty"`
+	Value   string `json:"value,omitempty"`
+	Count   *int64 `json:"count,omitempty"`
+	Deleted bool   `json:"deleted,omitempty"`
+}
+
+type DataHub struct {
+	mu   sync.Mutex
+	subs map[string][]chan DataChange // storeID → subscribers
+}
+
+var Data = &DataHub{subs: make(map[string][]chan DataChange)}
+
+// Subscribe adds ch to a store's watchers. Unlike the other hubs the caller
+// owns the channel and passes it in, because one client watches several stores
+// at once — so Unsubscribe must never close it.
+func (h *DataHub) Subscribe(storeID string, ch chan DataChange) {
+	h.mu.Lock()
+	h.subs[storeID] = append(h.subs[storeID], ch)
+	h.mu.Unlock()
+	telemetry.AddHubSubscriber("data", 1)
+}
+
+func (h *DataHub) Unsubscribe(storeID string, ch chan DataChange) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	list := h.subs[storeID]
+	for i, s := range list {
+		if s == ch {
+			h.subs[storeID] = append(list[:i], list[i+1:]...)
+			telemetry.AddHubSubscriber("data", -1)
+			break
+		}
+	}
+	if len(h.subs[storeID]) == 0 {
+		delete(h.subs, storeID)
+	}
+}
+
+func (h *DataHub) Publish(ev DataChange) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, ch := range h.subs[ev.StoreID] {
+		select {
+		case ch <- ev:
+		default:
+			telemetry.HubDropped("data")
+		}
+	}
+}
+
 // Subscribe returns a buffered channel pre-loaded with any events already emitted
 // for this run, followed by live events as they arrive.
 func (h *RunHub) Subscribe(runID string) chan executor.ExecutionEvent {

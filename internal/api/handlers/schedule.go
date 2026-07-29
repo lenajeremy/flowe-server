@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"workflow-ai/server/internal/auth"
 	"workflow-ai/server/internal/database/models"
 	"workflow-ai/server/internal/executor"
 	"workflow-ai/server/internal/hub"
@@ -246,46 +247,116 @@ func (h *WorkflowHandler) SetSchedule(c *gin.Context) {
 		enabled = *body.Enabled
 	}
 
-	now := time.Now().UTC()
-	tmp := models.ScheduledTrigger{
+	sched := h.upsertSchedule(wf.UserID, workflowID, models.ScheduledTrigger{
 		Frequency:       body.Frequency,
 		IntervalSeconds: body.IntervalSeconds,
 		RunTime:         body.RunTime,
 		DayOfWeek:       body.DayOfWeek,
 		DayOfMonth:      body.DayOfMonth,
-	}
-	nextRun := calcNextRunAt(tmp, now)
+		Repeat:          repeat,
+		Enabled:         enabled,
+	})
+	c.JSON(http.StatusOK, sched)
+}
+
+// upsertSchedule writes a workflow's schedule and recomputes next_run_at.
+// Shared by the sidebar's REST endpoint and the AI builder's set_schedule tool
+// so both produce identical rows.
+func (h *WorkflowHandler) upsertSchedule(userID, workflowID string, in models.ScheduledTrigger) models.ScheduledTrigger {
+	nextRun := calcNextRunAt(in, time.Now().UTC())
 
 	var sched models.ScheduledTrigger
 	if err := h.db.DB.Where("workflow_id = ?", workflowID).First(&sched).Error; err != nil {
-		sched = models.ScheduledTrigger{
-			UserID:          wf.UserID,
-			WorkflowID:      workflowID,
-			Frequency:       body.Frequency,
-			IntervalSeconds: body.IntervalSeconds,
-			RunTime:         body.RunTime,
-			DayOfWeek:       body.DayOfWeek,
-			DayOfMonth:      body.DayOfMonth,
-			Repeat:          repeat,
-			Enabled:         enabled,
-			NextRunAt:       &nextRun,
-		}
+		sched = in
+		sched.UserID = userID
+		sched.WorkflowID = workflowID
+		sched.NextRunAt = &nextRun
 		h.db.DB.Create(&sched)
 	} else {
 		h.db.DB.Model(&sched).Updates(map[string]interface{}{
-			"frequency":        body.Frequency,
-			"interval_seconds": body.IntervalSeconds,
-			"run_time":         body.RunTime,
-			"day_of_week":      body.DayOfWeek,
-			"day_of_month":     body.DayOfMonth,
-			"repeat":           repeat,
-			"enabled":          enabled,
+			"frequency":        in.Frequency,
+			"interval_seconds": in.IntervalSeconds,
+			"run_time":         in.RunTime,
+			"day_of_week":      in.DayOfWeek,
+			"day_of_month":     in.DayOfMonth,
+			"repeat":           in.Repeat,
+			"enabled":          in.Enabled,
 			"next_run_at":      nextRun,
 		})
 		h.db.DB.Where("workflow_id = ?", workflowID).First(&sched)
 	}
+	return sched
+}
 
-	c.JSON(http.StatusOK, sched)
+// setScheduleForAI backs the builder's set_schedule tool. It writes through the
+// same upsert the sidebar uses, so the AI can finish a "run every 2 minutes"
+// request instead of handing the cadence back to the user.
+func (h *WorkflowHandler) setScheduleForAI(c *gin.Context, workflowID string, input any) string {
+	if workflowID == "" {
+		return `{"error":"this workflow has not been saved yet, so it has no schedule — tell the user to save it, then ask again"}`
+	}
+	var wf models.Workflow
+	if err := h.db.DB.First(&wf, "id = ? AND user_id = ?", workflowID, auth.UserID(c)).Error; err != nil {
+		return `{"error":"workflow not found"}`
+	}
+
+	var body struct {
+		Frequency       string   `json:"frequency"`
+		IntervalMinutes *float64 `json:"interval_minutes"`
+		RunTime         string   `json:"run_time"`
+		DayOfWeek       int      `json:"day_of_week"`
+		DayOfMonth      int      `json:"day_of_month"`
+		Repeat          *bool    `json:"repeat"`
+	}
+	if b, err := json.Marshal(input); err == nil {
+		_ = json.Unmarshal(b, &body)
+	}
+
+	validFreqs := map[string]bool{"interval": true, "hourly": true, "daily": true, "weekly": true, "monthly": true}
+	if !validFreqs[body.Frequency] {
+		return `{"error":"frequency must be one of interval, hourly, daily, weekly, monthly"}`
+	}
+
+	intervalSeconds := 0
+	if body.Frequency == "interval" {
+		if body.IntervalMinutes == nil || *body.IntervalMinutes < 1 {
+			return `{"error":"frequency=interval needs interval_minutes of at least 1"}`
+		}
+		intervalSeconds = int(*body.IntervalMinutes * 60)
+	}
+	runTime := body.RunTime
+	if runTime == "" {
+		runTime = "09:00"
+	}
+	repeat := true
+	if body.Repeat != nil {
+		repeat = *body.Repeat
+	}
+
+	sched := h.upsertSchedule(wf.UserID, workflowID, models.ScheduledTrigger{
+		Frequency:       body.Frequency,
+		IntervalSeconds: intervalSeconds,
+		RunTime:         runTime,
+		DayOfWeek:       body.DayOfWeek,
+		DayOfMonth:      body.DayOfMonth,
+		Repeat:          repeat,
+		Enabled:         true,
+	})
+
+	slog.InfoContext(c.Request.Context(), "schedule set by AI builder",
+		"workflow_id", workflowID, "frequency", sched.Frequency, "interval_seconds", sched.IntervalSeconds)
+
+	out, _ := json.Marshal(map[string]any{
+		"status":           "saved",
+		"frequency":        sched.Frequency,
+		"interval_seconds": sched.IntervalSeconds,
+		"run_time":         sched.RunTime,
+		"next_run_at":      sched.NextRunAt,
+		"published":        wf.Published,
+		"message": "Schedule saved — do NOT ask the user to set the cadence themselves. " +
+			"Times are UTC. If published is false, tell them to hit Publish, since only published workflows run on schedule.",
+	})
+	return string(out)
 }
 
 // DELETE /api/workflows/:id/schedule

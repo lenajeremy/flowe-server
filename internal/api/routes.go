@@ -106,6 +106,7 @@ func InitServer(port int, db *database.DBClient, rdb *redis.Client) {
 
 		// Persistence (Data stores)
 		api.GET("/data-stores", wh.ListDataStores)
+		api.GET("/data-stores/events", wh.DataStoreEvents)
 		api.POST("/data-stores", wh.CreateDataStore)
 		api.GET("/data-stores/:id", wh.GetDataStore)
 		api.PATCH("/data-stores/:id", wh.UpdateDataStore)

@@ -2,12 +2,18 @@ package handlers
 
 import (
 	"encoding/json"
+	"fmt"
+	"log/slog"
 	"net/http"
+	"strings"
+	"time"
 
 	"workflow-ai/server/internal/auth"
 	"workflow-ai/server/internal/database"
 	"workflow-ai/server/internal/database/models"
 	"workflow-ai/server/internal/executor"
+	"workflow-ai/server/internal/hub"
+	"workflow-ai/server/internal/telemetry"
 
 	"github.com/gin-gonic/gin"
 )
@@ -188,6 +194,73 @@ func (h *WorkflowHandler) DeleteDataStore(c *gin.Context) {
 	h.db.DB.Unscoped().Where("store_id = ?", id).Delete(&models.DataRecord{})
 	h.db.DB.Unscoped().Delete(&models.DataStore{}, "id = ?", id)
 	c.JSON(http.StatusOK, gin.H{"status": "deleted"})
+}
+
+// GET /api/data-stores/events?ids=a,b,c — live stream of writes to the given
+// stores, so an open canvas can show current values on its Data nodes without
+// polling. Only ids the caller owns are subscribed; unknown ids are ignored.
+func (h *WorkflowHandler) DataStoreEvents(c *gin.Context) {
+	raw := c.Query("ids")
+	if raw == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "ids is required"})
+		return
+	}
+	wanted := strings.Split(raw, ",")
+	if len(wanted) > 50 {
+		wanted = wanted[:50]
+	}
+
+	// Ownership check up front — never subscribe to someone else's store.
+	var owned []models.DataStore
+	h.db.DB.Where("user_id = ? AND id IN ?", auth.UserID(c), wanted).Find(&owned)
+	if len(owned) == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"error": "no matching stores"})
+		return
+	}
+
+	c.Header("Content-Type", "text/event-stream")
+	c.Header("Cache-Control", "no-cache")
+	c.Header("Connection", "keep-alive")
+	c.Header("X-Accel-Buffering", "no")
+
+	flusher, ok := c.Writer.(http.Flusher)
+	if !ok {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "streaming not supported"})
+		return
+	}
+
+	ch := make(chan hub.DataChange, 16)
+	for _, s := range owned {
+		id := s.ID.String()
+		hub.Data.Subscribe(id, ch)
+		defer hub.Data.Unsubscribe(id, ch)
+	}
+
+	ctx := c.Request.Context()
+	telemetry.AddSSEStream(ctx, "data_events", 1)
+	defer telemetry.AddSSEStream(ctx, "data_events", -1)
+	slog.DebugContext(ctx, "data events stream attached", "stores", len(owned))
+
+	// Ping immediately so the client knows the stream is live, then keep it warm
+	// through idle stretches (a schedule may not write for minutes).
+	fmt.Fprint(c.Writer, ": ok\n\n")
+	flusher.Flush()
+	ticker := time.NewTicker(25 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			fmt.Fprint(c.Writer, ": ping\n\n")
+			flusher.Flush()
+		case ev := <-ch:
+			b, _ := json.Marshal(ev)
+			fmt.Fprintf(c.Writer, "data: %s\n\n", b)
+			flusher.Flush()
+		}
+	}
 }
 
 // GET /api/data-stores/:id/entries  — the store's data, shaped by kind.
