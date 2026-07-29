@@ -210,6 +210,7 @@ type workflowSummary struct {
 	Description string       `json:"description"`
 	NodeCount   int          `json:"node_count"`
 	NodeTypes   models.JSONB `json:"node_types"` // distinct node types, for card icons
+	Published   bool         `json:"published"`
 	CreatedAt   time.Time    `json:"created_at"`
 	UpdatedAt   time.Time    `json:"updated_at"`
 }
@@ -221,7 +222,7 @@ func (h *WorkflowHandler) List(c *gin.Context) {
 		Select(`id, name, description, jsonb_array_length(nodes) AS node_count,
 			(SELECT COALESCE(jsonb_agg(DISTINCT n->'data'->>'nodeType'), '[]'::jsonb)
 			 FROM jsonb_array_elements(nodes) n) AS node_types,
-			created_at, updated_at`).
+			published, created_at, updated_at`).
 		Where("user_id = ?", auth.UserID(c)).
 		Order("updated_at desc").Scan(&summaries).Error; err != nil {
 		slog.Error("failed to list workflows", "error", err)
@@ -238,6 +239,41 @@ func (h *WorkflowHandler) GetOne(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, wf)
+}
+
+// SetPublished — POST /api/workflows/:id/publish and /unpublish.
+// Publishing only affects the background scheduler: manual runs, webhooks, and
+// API-key triggers work either way.
+func (h *WorkflowHandler) SetPublished(published bool) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		wf, ok := h.loadOwnedWorkflow(c, c.Param("id"))
+		if !ok {
+			return
+		}
+		if err := h.db.DB.Model(wf).Update("published", published).Error; err != nil {
+			slog.Error("failed to set published", "id", wf.ID, "published", published, "error", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update workflow"})
+			return
+		}
+
+		// While unpublished a schedule sits dormant with next_run_at in the past.
+		// Re-anchor it on publish so going live schedules the next occurrence
+		// instead of instantly firing an overdue one.
+		if published {
+			var sched models.ScheduledTrigger
+			if err := h.db.DB.Where("workflow_id = ?", wf.ID.String()).First(&sched).Error; err == nil {
+				now := time.Now().UTC()
+				if sched.NextRunAt == nil || sched.NextRunAt.Before(now) {
+					next := calcNextRunAt(sched, now)
+					h.db.DB.Model(&sched).Update("next_run_at", next)
+				}
+			}
+		}
+
+		slog.InfoContext(c.Request.Context(), "workflow publish state changed",
+			"workflow_id", wf.ID.String(), "workflow", wf.Name, "published", published)
+		c.JSON(http.StatusOK, gin.H{"id": wf.ID.String(), "published": published})
+	}
 }
 
 // Delete — DELETE /api/workflows/:id

@@ -165,12 +165,28 @@ Decisions locked 2026-07-29 (with Jeremiah):
   writes to account-scoped stores blocked or approval-gated (reuse the
   destructive-op exclusion set).
 
-### Build order (commit + push each batch)
-1. **Persistence core (backend):** schema + `DataStoreOps` + Data node (all ops,
-   all kinds, atomic increment/append, run-scope in-memory) + unit tests.
-2. **Data REST + panel (frontend):** CRUD endpoints, Data panel, node card +
-   ConfigPanel block.
-3. **AI integration:** list/create tools, approval-card protocol, catalog entry,
-   system-prompt update.
-4. **Publish flag:** `workflows.published`, endpoints + button, scheduler gate,
-   migration.
+### Build order — ✅ ALL SHIPPED 2026-07-29
+1. ✅ **Persistence core (backend):** schema + `DataStoreOps` + Data node (all
+   ops, all kinds, atomic increment/append, run-scope in-memory) + unit tests.
+2. ✅ **Data REST + panel (frontend):** CRUD endpoints, `/data` page (store list
+   by scope + per-kind editors with expandable JSON rows and inline editing),
+   Data node card + ConfigPanel block.
+3. ✅ **AI integration:** `list_data_stores` + `create_data_store`, in-chat
+   approval card, catalog entry, system-prompt update.
+4. ✅ **Publish flag:** `workflows.published`, publish/unpublish endpoints,
+   editor button + Unpublish menu, scheduler join gate, one-time backfill.
+
+Notes from the build:
+- The approval protocol is **turn-boundary, not mid-stream**: `create_data_store`
+  streams a `data_store_proposal` SSE event and returns "proposed" to the model;
+  the user's Accept click creates the store through the normal authed REST
+  endpoint, then the UI auto-sends a message giving the model the real id, which
+  it wires in with `update_workflow`. No paused/resumed tool loop.
+- The editor's old Publish button was **localStorage-only** (fake). It now
+  reflects `workflows.published` from the server.
+- Publishing **re-anchors** `next_run_at` when it's in the past, so going live
+  doesn't instantly fire a schedule that went overdue while dormant.
+- The backfill is guarded by `HasColumn` *before* AutoMigrate so it runs exactly
+  once and never re-publishes something deliberately unpublished. Watch out
+  locally: hot-reload can add the column on one restart and the backfill code on
+  the next, skipping it (harmless — fresh deploys are fine).

@@ -34,6 +34,10 @@ type Workflow struct {
 	Description string `json:"description"`
 	Nodes       JSONB  `json:"nodes" gorm:"type:jsonb;not null;default:'[]'"`
 	Edges       JSONB  `json:"edges" gorm:"type:jsonb;not null;default:'[]'"`
+	// Published gates SCHEDULED runs only — a workflow must be published for the
+	// background scheduler to fire it. Manual runs, webhooks, and API-key
+	// triggers always work, published or not.
+	Published bool `json:"published" gorm:"not null;default:false"`
 }
 
 // ApiKey stores hashed API keys for programmatic workflow triggers.

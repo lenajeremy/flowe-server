@@ -45,7 +45,14 @@ func (c *DBClient) Setup() error {
 	if c.DB.Migrator().HasTable(&models.IntegrationConnection{}) {
 		c.DB.Unscoped().Where("deleted_at IS NOT NULL").Delete(&models.IntegrationConnection{})
 	}
-	return c.DB.AutoMigrate(
+	// Publishing gates scheduled runs. Workflows that were already scheduling
+	// before the flag existed must stay live — detect that here, BEFORE
+	// AutoMigrate adds the column, so the backfill runs exactly once and never
+	// re-publishes something the user has since unpublished.
+	backfillPublished := c.DB.Migrator().HasTable(&models.Workflow{}) &&
+		!c.DB.Migrator().HasColumn(&models.Workflow{}, "published")
+
+	if err := c.DB.AutoMigrate(
 		&models.User{},
 		&models.LoginCode{},
 		&models.WorkflowRun{},
@@ -60,5 +67,17 @@ func (c *DBClient) Setup() error {
 		&models.DataStore{},
 		&models.DataKV{},
 		&models.DataRecord{},
-	)
+	); err != nil {
+		return err
+	}
+
+	if backfillPublished {
+		res := c.DB.Exec(`UPDATE workflows SET published = true WHERE id::text IN (
+			SELECT workflow_id FROM scheduled_triggers WHERE enabled = true)`)
+		if res.Error != nil {
+			return res.Error
+		}
+		slog.Info("published backfill: kept already-scheduled workflows live", "count", res.RowsAffected)
+	}
+	return nil
 }

@@ -86,7 +86,16 @@ func calcNextRunAt(s models.ScheduledTrigger, from time.Time) time.Time {
 func (h *WorkflowHandler) runDueSchedules() {
 	var schedules []models.ScheduledTrigger
 	now := time.Now().UTC()
-	h.db.DB.Where("enabled = true AND next_run_at IS NOT NULL AND next_run_at <= ?", now).Find(&schedules)
+	// Only PUBLISHED, live workflows auto-fire. Unpublished ones stay dormant
+	// (the row is untouched, so publishing resumes it) and deleted ones never
+	// fire. Manual/webhook/API triggers bypass this entirely.
+	h.db.DB.
+		Joins("JOIN workflows ON workflows.id::text = scheduled_triggers.workflow_id").
+		Where(`workflows.published = true AND workflows.deleted_at IS NULL
+			AND scheduled_triggers.enabled = true
+			AND scheduled_triggers.next_run_at IS NOT NULL
+			AND scheduled_triggers.next_run_at <= ?`, now).
+		Find(&schedules)
 
 	for _, sched := range schedules {
 		slog.Info("scheduler: firing workflow", "workflow_id", sched.WorkflowID, "frequency", sched.Frequency)

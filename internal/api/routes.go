@@ -95,6 +95,10 @@ func InitServer(port int, db *database.DBClient, rdb *redis.Client) {
 		api.GET("/workflows/:id/webhook", wh.GetWebhook)
 		api.DELETE("/workflows/:id/webhook", wh.DeleteWebhook)
 
+		// Publishing (gates scheduled runs only)
+		api.POST("/workflows/:id/publish", wh.SetPublished(true))
+		api.POST("/workflows/:id/unpublish", wh.SetPublished(false))
+
 		// Scheduled triggers
 		api.GET("/workflows/:id/schedule", wh.GetSchedule)
 		api.POST("/workflows/:id/schedule", wh.SetSchedule)
