@@ -32,6 +32,80 @@ type aiGenerateRequest struct {
 	WorkflowID string `json:"workflowId,omitempty"`
 	// History is the prior conversation as [{role, content}] pairs (user/assistant text only).
 	History []map[string]any `json:"history,omitempty"`
+
+	// aiRunCount caps how many times one turn may test-run the workflow.
+	aiRunCount int
+}
+
+// applyOpsToCanvas mirrors the frontend's applyPatch onto the request's working
+// copy of the canvas, so get_current_workflow and run_workflow see the edits the
+// model just made instead of the canvas as it was when the turn started.
+func applyOpsToCanvas(nodes, edges []any, ops []any) ([]any, []any) {
+	idOf := func(v any, key string) string {
+		m, _ := v.(map[string]any)
+		s, _ := m[key].(string)
+		return s
+	}
+	dropNode := func(list []any, id string) []any {
+		out := make([]any, 0, len(list))
+		for _, n := range list {
+			if idOf(n, "id") != id {
+				out = append(out, n)
+			}
+		}
+		return out
+	}
+
+	for _, raw := range ops {
+		op, _ := raw.(map[string]any)
+		switch name, _ := op["op"].(string); name {
+		case "add_node":
+			if n, ok := op["node"].(map[string]any); ok {
+				nodes = append(dropNode(nodes, idOf(n, "id")), n)
+			}
+		case "remove_node":
+			id, _ := op["node_id"].(string)
+			nodes = dropNode(nodes, id)
+			kept := make([]any, 0, len(edges))
+			for _, e := range edges {
+				if idOf(e, "source") != id && idOf(e, "target") != id {
+					kept = append(kept, e)
+				}
+			}
+			edges = kept
+		case "add_edge":
+			if e, ok := op["edge"].(map[string]any); ok {
+				edges = append(edges, e)
+			}
+		case "remove_edge":
+			id, _ := op["edge_id"].(string)
+			kept := make([]any, 0, len(edges))
+			for _, e := range edges {
+				if idOf(e, "id") != id {
+					kept = append(kept, e)
+				}
+			}
+			edges = kept
+		case "update_node":
+			id, _ := op["node_id"].(string)
+			patch, _ := op["data"].(map[string]any)
+			for _, n := range nodes {
+				nm, _ := n.(map[string]any)
+				if idOf(n, "id") != id || nm == nil {
+					continue
+				}
+				data, _ := nm["data"].(map[string]any)
+				if data == nil {
+					data = map[string]any{}
+				}
+				for k, v := range patch {
+					data[k] = v
+				}
+				nm["data"] = data
+			}
+		}
+	}
+	return nodes, edges
 }
 
 // ── Chat models ─────────────────────────────────────────────────
@@ -350,10 +424,19 @@ var toolSetSchedule = map[string]any{
 	},
 }
 
+var toolRunWorkflow = map[string]any{
+	"name":        "run_workflow",
+	"description": "Executes the workflow currently on the canvas and returns what every node produced — its output, or the error that stopped it. Use it to VERIFY your work and to debug a real failure the user reports, then fix the failing node from the actual error rather than guessing. This is a real run with real side effects (it will genuinely send emails and post messages), so run it at most twice per turn and never just to look busy. Runs containing irreversible operations (deletes, refunds, cancellations) are refused — ask the user to run those.",
+	"input_schema": map[string]any{
+		"type":       "object",
+		"properties": map[string]any{},
+	},
+}
+
 // builderTools is the single source of truth for the AI builder's tool set
 // (Anthropic uses it directly; openAIToolDefs converts it).
 func builderTools() []map[string]any {
-	return []map[string]any{toolGetNodes, toolGetCurrentWorkflow, toolCreateWorkflow, toolUpdateWorkflow, toolListIntegrationResources, toolListDataStores, toolCreateDataStore, toolSetSchedule}
+	return []map[string]any{toolGetNodes, toolGetCurrentWorkflow, toolCreateWorkflow, toolUpdateWorkflow, toolListIntegrationResources, toolListDataStores, toolCreateDataStore, toolSetSchedule, toolRunWorkflow}
 }
 
 // nodeCatalog documents every node type (fields, semantics) — shared by the
@@ -623,7 +706,12 @@ Persistence (Data stores):
 Schedules:
 - A scheduledTrigger node carries no cadence. Whenever you place or keep one and the user has stated any timing ("every 2 minutes", "each morning", "Mondays"), call set_schedule to set it. Never end a turn telling the user to open the node and set the cadence themselves — that is your job.
 - Times are UTC; if the user names a local time, convert it and say what you set.
-- Schedules only fire when the workflow is Published, so if set_schedule reports published:false, tell them to hit Publish.`
+- Schedules only fire when the workflow is Published, so if set_schedule reports published:false, tell them to hit Publish.
+
+Testing and debugging:
+- When the user says something is broken, doesn't run, or produced the wrong result, call run_workflow and read the per-node output instead of speculating. Fix the node the error actually points at, then re-run once to confirm.
+- run_workflow really executes: it sends the emails and posts the messages. Don't run a flow just to appear thorough, don't run it more than twice in a turn, and if it is refused for irreversible operations, explain what those steps would do and let the user run it.
+- Nodes needing user input (a blank recipient, a missing resource id) will fail in a test run — that's expected. Say which field the user must fill rather than inventing a value.`
 
 // ── Handler ─────────────────────────────────────────────────────
 
@@ -710,6 +798,8 @@ func toolActivityLabel(name string, input any) string {
 		return "Waiting for your approval"
 	case "set_schedule":
 		return "Setting the schedule"
+	case "run_workflow":
+		return "Test-running the workflow"
 	default:
 		return name
 	}
@@ -770,6 +860,15 @@ func (h *WorkflowHandler) execChatTool(c *gin.Context, flusher http.Flusher, req
 	case "create_workflow":
 		inputJSON, _ := json.Marshal(input)
 		sendSSE(c.Writer, flusher, "workflow", string(inputJSON))
+		// Keep the server's working copy in step with the canvas.
+		if m, ok := input.(map[string]any); ok {
+			if n, ok := m["nodes"].([]any); ok {
+				req.CurrentNodes = n
+			}
+			if e, ok := m["edges"].([]any); ok {
+				req.CurrentEdges = e
+			}
+		}
 		return `{"status": "success", "message": "Workflow created on the canvas."}`
 
 	case "get_current_workflow":
@@ -782,6 +881,11 @@ func (h *WorkflowHandler) execChatTool(c *gin.Context, flusher http.Flusher, req
 	case "update_workflow":
 		inputJSON, _ := json.Marshal(input)
 		sendSSE(c.Writer, flusher, "patch", string(inputJSON))
+		if m, ok := input.(map[string]any); ok {
+			if ops, ok := m["operations"].([]any); ok {
+				req.CurrentNodes, req.CurrentEdges = applyOpsToCanvas(req.CurrentNodes, req.CurrentEdges, ops)
+			}
+		}
 		return `{"status":"success","message":"Patch applied to canvas."}`
 
 	case "list_integration_resources":
@@ -794,6 +898,9 @@ func (h *WorkflowHandler) execChatTool(c *gin.Context, flusher http.Flusher, req
 
 	case "set_schedule":
 		return h.setScheduleForAI(c, req.WorkflowID, input)
+
+	case "run_workflow":
+		return h.runWorkflowForAI(c, req)
 
 	case "create_data_store":
 		// Blocks this turn until the user decides. Nothing is created here —
