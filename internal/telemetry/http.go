@@ -97,6 +97,13 @@ func (t *loggingTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 		"path", req.URL.Path,
 		"duration_ms", time.Since(start).Milliseconds(),
 	}
+	// Attribute the endpoint to whatever node reached for it. Providers build
+	// their requests from the node's context, so this correlates every call to a
+	// workflow, run and node with no per-provider wiring.
+	if cc, ok := CallContextFrom(req.Context()); ok {
+		attrs = append(attrs, cc.LogAttrs()...)
+		SpanAttrs(req.Context(), cc.SpanAttributes()...)
+	}
 	if err != nil {
 		slog.ErrorContext(req.Context(), "outbound http failed", append(attrs, "error", err.Error())...)
 		return resp, err

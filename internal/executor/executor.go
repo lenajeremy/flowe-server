@@ -42,6 +42,29 @@ func triggerFromContext(ctx context.Context) string {
 	return "manual"
 }
 
+type workflowIDCtxKey struct{}
+
+// WithWorkflowID tags a run with the saved workflow it belongs to, so every
+// call it makes is attributable to that workflow (the AST alone carries only a
+// name). Empty for ad-hoc runs of an unsaved canvas.
+func WithWorkflowID(ctx context.Context, id string) context.Context {
+	return context.WithValue(ctx, workflowIDCtxKey{}, id)
+}
+
+func workflowIDFromContext(ctx context.Context) string {
+	s, _ := ctx.Value(workflowIDCtxKey{}).(string)
+	return s
+}
+
+// The workflow's display name, set by RunWorkflow from the AST so node-level
+// telemetry can name the flow without threading it through every signature.
+type workflowNameCtxKey struct{}
+
+func workflowNameFromContext(ctx context.Context) string {
+	s, _ := ctx.Value(workflowNameCtxKey{}).(string)
+	return s
+}
+
 // IntegrationCredsLookup resolves the workflow owner's stored OAuth
 // credentials for a provider. workspace is the tenant identifier where the
 // API needs one (e.g. the Shopify shop domain); empty otherwise. Set by
@@ -369,17 +392,31 @@ func topoSort(nodes []WorkflowASTNode, edges []WorkflowASTEdge) []string {
 // Every path that runs a node — main graph, loop bodies, agent-chat single
 // nodes — funnels through here.
 func executeNode(ctx context.Context, node WorkflowASTNode, outputs map[string]string, edges []WorkflowASTEdge, keys APIKeys, runID, ownerID string, emit func(ExecutionEvent)) (string, error) {
+	// Identity for everything this node touches. Stamped into ctx so the shared
+	// outbound transport can attribute each endpoint it reaches back to this
+	// workflow/run/node without any per-provider plumbing.
+	cc := telemetry.CallContext{
+		WorkflowID:   workflowIDFromContext(ctx),
+		WorkflowName: workflowNameFromContext(ctx),
+		RunID:        runID,
+		Trigger:      triggerFromContext(ctx),
+		NodeID:       node.ID,
+		NodeLabel:    node.Data.Label,
+		NodeType:     string(node.Data.NodeType),
+		Op:           node.Data.IntegrationOp,
+	}
+
 	ctx, span := telemetry.Tracer.Start(ctx, "node "+string(node.Data.NodeType),
-		trace.WithAttributes(
-			attribute.String("flowe.node.id", node.ID),
-			attribute.String("flowe.node.type", string(node.Data.NodeType)),
-			attribute.String("flowe.node.label", node.Data.Label),
-			attribute.String("flowe.run.id", runID),
-		))
+		trace.WithAttributes(cc.SpanAttributes()...))
+	ctx = telemetry.WithCallContext(ctx, cc)
+
 	start := time.Now()
 	slog.DebugContext(ctx, "node started",
 		"run_id", runID, "node_id", node.ID, "node_type", node.Data.NodeType, "label", node.Data.Label)
 	out, err := runNodeInner(ctx, node, outputs, edges, keys, runID, ownerID, emit)
+
+	// The audit line: caller, arguments, and what came back.
+	telemetry.RecordNodeCall(ctx, cc, node.Data, out, err, time.Since(start))
 
 	// Integration nodes share one op field; provider identity is the node
 	// type. Centralising here covers all 13 providers plus future ones.
@@ -1101,6 +1138,7 @@ func RunWorkflow(ctx context.Context, workflow WorkflowAST, keys APIKeys, runID,
 
 	// Run-scoped stores live in-memory for this run only.
 	ctx = withRunScope(ctx)
+	ctx = context.WithValue(ctx, workflowNameCtxKey{}, workflow.Name)
 
 	slog.InfoContext(ctx, "workflow run started",
 		"run_id", runID, "workflow", workflow.Name, "trigger", trigger,

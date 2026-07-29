@@ -110,7 +110,8 @@ func (h *WorkflowHandler) Run(c *gin.Context) {
 		Jina:      config.GetEnv("JINA_API_KEY"),
 	}
 
-	executor.RunWorkflow(executor.WithTrigger(c.Request.Context(), "manual"), req.Workflow, keys, runID, uid, emit)
+	runCtx := executor.WithWorkflowID(c.Request.Context(), req.WorkflowID)
+	executor.RunWorkflow(executor.WithTrigger(runCtx, "manual"), req.Workflow, keys, runID, uid, emit)
 
 	// Serialize buffered events and update run record
 	eventsJSON, _ := json.Marshal(bufferedEvents)

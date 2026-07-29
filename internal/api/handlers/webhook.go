@@ -146,7 +146,7 @@ func (h *WorkflowHandler) ReceiveWebhook(c *gin.Context) {
 		var events []executor.ExecutionEvent
 		startTime := time.Now()
 		finalStatus := models.RunStatusCompleted
-		executor.RunWorkflow(executor.WithTrigger(bgCtx, "webhook"), ast, keys, runID, workflow.UserID, func(event executor.ExecutionEvent) {
+		executor.RunWorkflow(executor.WithTrigger(executor.WithWorkflowID(bgCtx, wh.WorkflowID), "webhook"), ast, keys, runID, workflow.UserID, func(event executor.ExecutionEvent) {
 			event.Timestamp = time.Since(startTime).Milliseconds()
 			events = append(events, event)
 			hub.Global.Publish(runID, event)

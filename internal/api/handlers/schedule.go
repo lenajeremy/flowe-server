@@ -173,7 +173,7 @@ func (h *WorkflowHandler) runWorkflowByID(workflowID string, nextRun *time.Time)
 	finalStatus := models.RunStatusCompleted
 	// The schedule fires with no request context — the loaded workflow's
 	// owner is what routes integration tokens to the right user.
-	executor.RunWorkflow(executor.WithTrigger(ctx, "schedule"), ast, keys, runID, workflow.UserID, func(ev executor.ExecutionEvent) {
+	executor.RunWorkflow(executor.WithTrigger(executor.WithWorkflowID(ctx, workflowID), "schedule"), ast, keys, runID, workflow.UserID, func(ev executor.ExecutionEvent) {
 		ev.Timestamp = time.Since(startTime).Milliseconds()
 		events = append(events, ev)
 		hub.Global.Publish(runID, ev)

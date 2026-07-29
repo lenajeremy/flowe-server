@@ -117,6 +117,39 @@ func RecordIntegrationCall(ctx context.Context, provider, operation string, exec
 		attribute.String("provider", provider)))
 }
 
+// argsLogCap / resultLogCap bound what one call line contributes to Loki. Big
+// enough to debug a bad request, small enough that a 1MB Drive read or a loop
+// over hundreds of rows can't flood the log pipeline.
+const (
+	argsLogCap   = 700
+	resultLogCap = 700
+)
+
+// RecordNodeCall emits the audit line for one node execution: who called
+// (workflow, run, node), what it asked for (redacted args), and what came back
+// (result or error). Paired with the "outbound http" lines from the shared
+// transport — same trace id, same run_id — this gives the whole story of a call
+// from intent through endpoint to result.
+//
+// High-cardinality identity (run/workflow ids) lives here in logs and traces,
+// never on metric labels, where it would explode Prometheus series.
+func RecordNodeCall(ctx context.Context, cc CallContext, args any, result string, callErr error, d time.Duration) {
+	attrs := cc.LogAttrs()
+	attrs = append(attrs, "duration_ms", d.Milliseconds())
+	if a := RedactArgs(args, argsLogCap); a != "" && a != "{}" {
+		attrs = append(attrs, "args", a)
+	}
+	if callErr != nil {
+		attrs = append(attrs, "status", "error", "error", callErr.Error())
+		slog.ErrorContext(ctx, "node call", attrs...)
+		return
+	}
+	attrs = append(attrs, "status", "ok",
+		"result_chars", len(result),
+		"result", Clip(result, resultLogCap))
+	slog.InfoContext(ctx, "node call", attrs...)
+}
+
 func AuthEvent(ctx context.Context, event, status string) {
 	authEvents.Add(ctx, 1, metric.WithAttributes(
 		attribute.String("event", event),
