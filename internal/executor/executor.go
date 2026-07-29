@@ -736,6 +736,9 @@ func runNodeInner(ctx context.Context, node WorkflowASTNode, outputs map[string]
 	case NodeTypeScheduledTrigger:
 		return `{"trigger":"scheduled","time":"` + time.Now().Format(time.RFC3339) + `"}`, nil
 
+	case NodeTypeData:
+		return runDataNode(ctx, d, outputs, ownerID)
+
 	case NodeTypeNotion:
 		token := substituteTemplates(d.IntegrationToken, outputs)
 		if token == "" && IntegrationCredsLookup != nil {
@@ -1095,6 +1098,9 @@ func RunWorkflow(ctx context.Context, workflow WorkflowAST, keys APIKeys, runID,
 			attribute.Int("flowe.workflow.nodes", len(workflow.Nodes)),
 		))
 	defer span.End()
+
+	// Run-scoped stores live in-memory for this run only.
+	ctx = withRunScope(ctx)
 
 	slog.InfoContext(ctx, "workflow run started",
 		"run_id", runID, "workflow", workflow.Name, "trigger", trigger,

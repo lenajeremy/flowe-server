@@ -28,6 +28,7 @@ const (
 	NodeTypeGoogleDrive      NodeType = "googledrive"
 	NodeTypeGoogleDocs       NodeType = "googledocs"
 	NodeTypeGoogleSheets     NodeType = "googlesheets"
+	NodeTypeData             NodeType = "data"
 )
 
 type FlowNodeData struct {
@@ -63,6 +64,17 @@ type FlowNodeData struct {
 	// scheduledTrigger has no node-data config: the schedule (interval or
 	// calendar) lives in the ScheduledTrigger table, set via the node sidebar
 	// and driven by the background scheduler.
+
+	// data (persistence) — reads/writes a DataStore selected by id
+	DataStoreId  string `json:"dataStoreId"`
+	DataOp       string `json:"dataOp"`       // get|set|increment|delete|append|query|update|count|clear
+	DataKey      string `json:"dataKey"`      // kv key
+	DataValue    string `json:"dataValue"`    // kv value / text content (templates ok)
+	DataAmount   string `json:"dataAmount"`   // increment amount (default 1)
+	DataRecord   string `json:"dataRecord"`   // collection record, JSON object (templates ok)
+	DataFilter   string `json:"dataFilter"`   // collection query filter, JSON object
+	DataRecordId string `json:"dataRecordId"` // collection record id (update/delete)
+	DataLimit    string `json:"dataLimit"`    // collection query limit
 
 	// LLM structured output
 	OutputSchema string `json:"outputSchema"` // JSON schema string

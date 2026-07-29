@@ -57,5 +57,8 @@ func (c *DBClient) Setup() error {
 		&models.WorkflowChat{},
 		&models.ChatSession{},
 		&models.IntegrationConnection{},
+		&models.DataStore{},
+		&models.DataKV{},
+		&models.DataRecord{},
 	)
 }

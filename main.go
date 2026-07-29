@@ -91,6 +91,9 @@ func main() {
 		}
 		return handlers.UserGrantToken(dbClient.DB, userID, provider)
 	}
+	// Durable persistence (workflow/account Data stores). Run-scoped stores stay
+	// in-memory inside the executor and never reach the DB.
+	executor.DataStores = database.DataStoreOps{DB: dbClient.DB}
 
 	const port = 8080
 	api.InitServer(port, dbClient, redisClient)
