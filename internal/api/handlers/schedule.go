@@ -43,6 +43,13 @@ func calcNextRunAt(s models.ScheduledTrigger, from time.Time) time.Time {
 	fmt.Sscanf(s.RunTime, "%d:%d", &h, &m)
 
 	switch s.Frequency {
+	case "interval":
+		secs := s.IntervalSeconds
+		if secs < 60 {
+			secs = 60 // the scheduler loop only ticks every minute
+		}
+		return from.Add(time.Duration(secs) * time.Second)
+
 	case "hourly":
 		return from.Truncate(time.Hour).Add(time.Hour)
 
@@ -194,22 +201,31 @@ func (h *WorkflowHandler) SetSchedule(c *gin.Context) {
 		return
 	}
 	var body struct {
-		Frequency  string `json:"frequency"`
-		RunTime    string `json:"run_time"`
-		DayOfWeek  int    `json:"day_of_week"`
-		DayOfMonth int    `json:"day_of_month"`
-		Repeat     *bool  `json:"repeat"`
-		Enabled    *bool  `json:"enabled"`
+		Frequency       string `json:"frequency"`
+		IntervalSeconds int    `json:"interval_seconds"`
+		RunTime         string `json:"run_time"`
+		DayOfWeek       int    `json:"day_of_week"`
+		DayOfMonth      int    `json:"day_of_month"`
+		Repeat          *bool  `json:"repeat"`
+		Enabled         *bool  `json:"enabled"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
-	validFreqs := map[string]bool{"hourly": true, "daily": true, "weekly": true, "monthly": true}
+	validFreqs := map[string]bool{"interval": true, "hourly": true, "daily": true, "weekly": true, "monthly": true}
 	if !validFreqs[body.Frequency] {
 		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("invalid frequency: %q", body.Frequency)})
 		return
+	}
+
+	// Interval schedules can't fire faster than the scheduler's 60s tick.
+	if body.Frequency == "interval" {
+		if body.IntervalSeconds < 60 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "interval_seconds must be at least 60"})
+			return
+		}
 	}
 
 	repeat := true
@@ -223,36 +239,39 @@ func (h *WorkflowHandler) SetSchedule(c *gin.Context) {
 
 	now := time.Now().UTC()
 	tmp := models.ScheduledTrigger{
-		Frequency:  body.Frequency,
-		RunTime:    body.RunTime,
-		DayOfWeek:  body.DayOfWeek,
-		DayOfMonth: body.DayOfMonth,
+		Frequency:       body.Frequency,
+		IntervalSeconds: body.IntervalSeconds,
+		RunTime:         body.RunTime,
+		DayOfWeek:       body.DayOfWeek,
+		DayOfMonth:      body.DayOfMonth,
 	}
 	nextRun := calcNextRunAt(tmp, now)
 
 	var sched models.ScheduledTrigger
 	if err := h.db.DB.Where("workflow_id = ?", workflowID).First(&sched).Error; err != nil {
 		sched = models.ScheduledTrigger{
-			UserID:     wf.UserID,
-			WorkflowID: workflowID,
-			Frequency:  body.Frequency,
-			RunTime:    body.RunTime,
-			DayOfWeek:  body.DayOfWeek,
-			DayOfMonth: body.DayOfMonth,
-			Repeat:     repeat,
-			Enabled:    enabled,
-			NextRunAt:  &nextRun,
+			UserID:          wf.UserID,
+			WorkflowID:      workflowID,
+			Frequency:       body.Frequency,
+			IntervalSeconds: body.IntervalSeconds,
+			RunTime:         body.RunTime,
+			DayOfWeek:       body.DayOfWeek,
+			DayOfMonth:      body.DayOfMonth,
+			Repeat:          repeat,
+			Enabled:         enabled,
+			NextRunAt:       &nextRun,
 		}
 		h.db.DB.Create(&sched)
 	} else {
 		h.db.DB.Model(&sched).Updates(map[string]interface{}{
-			"frequency":    body.Frequency,
-			"run_time":     body.RunTime,
-			"day_of_week":  body.DayOfWeek,
-			"day_of_month": body.DayOfMonth,
-			"repeat":       repeat,
-			"enabled":      enabled,
-			"next_run_at":  nextRun,
+			"frequency":        body.Frequency,
+			"interval_seconds": body.IntervalSeconds,
+			"run_time":         body.RunTime,
+			"day_of_week":      body.DayOfWeek,
+			"day_of_month":     body.DayOfMonth,
+			"repeat":           repeat,
+			"enabled":          enabled,
+			"next_run_at":      nextRun,
 		})
 		h.db.DB.Where("workflow_id = ?", workflowID).First(&sched)
 	}

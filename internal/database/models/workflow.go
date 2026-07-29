@@ -88,17 +88,18 @@ type WebhookTrigger struct {
 	Description string `json:"description"`
 }
 
-// ScheduledTrigger runs a workflow on a calendar-based schedule.
+// ScheduledTrigger runs a workflow on a calendar-based or fixed-interval schedule.
 type ScheduledTrigger struct {
 	BaseModel
-	UserID     string     `json:"user_id"      gorm:"type:uuid;not null;index"`
-	WorkflowID string     `json:"workflow_id"  gorm:"not null;uniqueIndex"`
-	Frequency  string     `json:"frequency"`    // "hourly" | "daily" | "weekly" | "monthly"
-	RunTime    string     `json:"run_time"`     // "HH:MM" (ignored for hourly)
-	DayOfWeek  int        `json:"day_of_week"`  // 0=Sun…6=Sat (weekly only)
-	DayOfMonth int        `json:"day_of_month"` // 1–31 (monthly only)
-	Repeat     bool       `json:"repeat"       gorm:"default:true"`
-	Enabled    bool       `json:"enabled"      gorm:"default:true"`
-	LastRunAt  *time.Time `json:"last_run_at"`
-	NextRunAt  *time.Time `json:"next_run_at"`
+	UserID          string     `json:"user_id"      gorm:"type:uuid;not null;index"`
+	WorkflowID      string     `json:"workflow_id"  gorm:"not null;uniqueIndex"`
+	Frequency       string     `json:"frequency"`         // "interval" | "hourly" | "daily" | "weekly" | "monthly"
+	IntervalSeconds int        `json:"interval_seconds"`  // interval length (frequency=="interval" only); floored to 60s
+	RunTime         string     `json:"run_time"`          // "HH:MM" (daily/weekly/monthly)
+	DayOfWeek       int        `json:"day_of_week"`       // 0=Sun…6=Sat (weekly only)
+	DayOfMonth      int        `json:"day_of_month"`      // 1–31 (monthly only)
+	Repeat          bool       `json:"repeat"       gorm:"default:true"`
+	Enabled         bool       `json:"enabled"      gorm:"default:true"`
+	LastRunAt       *time.Time `json:"last_run_at"`
+	NextRunAt       *time.Time `json:"next_run_at"`
 }

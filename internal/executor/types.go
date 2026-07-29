@@ -60,8 +60,9 @@ type FlowNodeData struct {
 	ApprovalTimeout int    `json:"approvalTimeout"` // seconds, 0 = no timeout
 	ApprovalEmail   string `json:"approvalEmail"`   // optional email to notify
 
-	// scheduledTrigger
-	Interval string `json:"interval"` // "5m","15m","30m","1h","6h","12h","24h"
+	// scheduledTrigger has no node-data config: the schedule (interval or
+	// calendar) lives in the ScheduledTrigger table, set via the node sidebar
+	// and driven by the background scheduler.
 
 	// LLM structured output
 	OutputSchema string `json:"outputSchema"` // JSON schema string

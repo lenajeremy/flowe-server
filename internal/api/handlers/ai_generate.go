@@ -344,8 +344,8 @@ func nodeCatalog() []map[string]any {
 		},
 		{
 			"type": "scheduledTrigger", "label": "Scheduled Trigger", "category": "Triggers",
-			"description": "Starts workflow on a recurring schedule.",
-			"dataFields":  map[string]any{"interval": "string – '5m', '15m', '30m', '1h', '6h', '12h', '24h'"},
+			"description": "Starts workflow on a recurring schedule (fixed interval, or daily/weekly/monthly). The user sets the cadence in the node sidebar after generation — do NOT emit schedule data fields.",
+			"dataFields":  map[string]any{"label": "string – display name"},
 			"handles":     map[string]any{"inputs": []string{}, "outputs": []string{"source (right)"}},
 		},
 		{
