@@ -1,187 +1,135 @@
 package handlers
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
-	"log/slog"
 	"strings"
 	"time"
 
-	"workflow-ai/server/config"
 	"workflow-ai/server/internal/auth"
 	"workflow-ai/server/internal/database/models"
 	"workflow-ai/server/internal/executor"
-	"workflow-ai/server/internal/hub"
 
 	"github.com/gin-gonic/gin"
 )
 
-// The AI builder can execute the workflow it just built and read back what each
-// node did, so it can debug instead of guessing. Guardrails: irreversible
-// integration ops are refused, the run is capped in time, and a turn can only
-// run a couple of times so a confused model can't loop on live side effects.
+// The AI builder debugs from run history rather than by executing anything: it
+// lists recent runs and reads the per-node events of whichever one failed. That
+// keeps the builder side-effect free and, more usefully, shows it real failures
+// from scheduled runs it could never have reproduced on demand.
 
 const (
-	aiRunTimeout      = 90 * time.Second
-	aiRunOutputCap    = 600 // per node, in the tool result
-	aiRunsPerTurn     = 2
-	aiRunMaxNodeCount = 40
+	aiRunOutputCap = 600 // per-node output in a tool result
+	aiRunListLimit = 15
+	aiRunNodeLimit = 60 // nodes reported per run (loops can emit many)
 )
 
-// irreversibleOps are integration operations a test run must never fire on its
-// own — money movement and destruction. Sends (email/message/issue) are allowed
-// because otherwise there is nothing worth testing.
-var irreversibleOps = []string{
-	"delete", "remove", "archive", "trash", "cancel", "refund", "merge", "close",
-	"revoke", "clear", "purge", "unsubscribe",
+type aiRunSummary struct {
+	RunID     string `json:"run_id"`
+	Status    string `json:"status"`
+	StartedAt string `json:"started_at"`
+	Error     string `json:"error,omitempty"`
+	FailedAt  string `json:"failed_at,omitempty"`
+	Nodes     int    `json:"nodes_touched"`
 }
 
-func destructiveNode(n executor.WorkflowASTNode) string {
-	op := strings.ToLower(n.Data.IntegrationOp)
-	if op == "" {
-		return ""
+// listRunsForAI backs the list_runs tool: the workflow's recent runs, newest
+// first, each tagged with the node that failed so the model knows what to open.
+func (h *WorkflowHandler) listRunsForAI(c *gin.Context, workflowID string) string {
+	q := h.db.DB.Model(&models.WorkflowRun{}).Where("user_id = ?", auth.UserID(c))
+	scope := "this workflow"
+	if workflowID != "" {
+		q = q.Where("workflow_id = ?", workflowID)
+	} else {
+		// Unsaved canvas — fall back to the account's recent runs so the model
+		// still has something to learn from.
+		scope = "your account (this workflow has not been saved yet)"
 	}
-	for _, bad := range irreversibleOps {
-		if strings.Contains(op, bad) {
-			return fmt.Sprintf("%s.%s", n.Data.NodeType, n.Data.IntegrationOp)
+
+	var runs []models.WorkflowRun
+	if err := q.Order("created_at DESC").Limit(aiRunListLimit).Find(&runs).Error; err != nil {
+		return `{"error":"could not read run history"}`
+	}
+	if len(runs) == 0 {
+		return `{"runs":[],"message":"No runs recorded yet. Ask the user to hit Run (or wait for the schedule to fire), then check again — do not guess at causes."}`
+	}
+
+	out := make([]aiRunSummary, 0, len(runs))
+	for _, r := range runs {
+		s := aiRunSummary{
+			RunID:     r.ID.String(),
+			Status:    string(r.Status),
+			StartedAt: r.CreatedAt.UTC().Format(time.RFC3339),
+			Error:     r.ErrorMessage,
 		}
+		var events []executor.ExecutionEvent
+		if len(r.Events) > 0 && json.Unmarshal(r.Events, &events) == nil {
+			seen := map[string]bool{}
+			for _, ev := range events {
+				if ev.NodeID != nil && !seen[*ev.NodeID] {
+					seen[*ev.NodeID] = true
+				}
+				if ev.Type == executor.EventNodeError && ev.NodeLabel != nil && s.FailedAt == "" {
+					s.FailedAt = *ev.NodeLabel
+				}
+			}
+			s.Nodes = len(seen)
+		}
+		out = append(out, s)
 	}
-	return ""
-}
 
-// astFromRequest reads the builder's working copy of the canvas — which
-// execChatTool keeps current as create_workflow/update_workflow are called.
-func astFromRequest(req *aiGenerateRequest) (executor.WorkflowAST, error) {
-	var ast executor.WorkflowAST
-	nodesJSON, err := json.Marshal(req.CurrentNodes)
-	if err != nil {
-		return ast, err
-	}
-	edgesJSON, err := json.Marshal(req.CurrentEdges)
-	if err != nil {
-		return ast, err
-	}
-	if err := json.Unmarshal(nodesJSON, &ast.Nodes); err != nil {
-		return ast, err
-	}
-	if err := json.Unmarshal(edgesJSON, &ast.Edges); err != nil {
-		return ast, err
-	}
-	ast.Version = "1.0"
-	ast.Name = "AI test run"
-	return ast, nil
+	b, _ := json.Marshal(map[string]any{
+		"runs":    out,
+		"scope":   scope,
+		"message": "Call get_run_logs with the run_id of the run you want to understand — prefer the most recent failing one.",
+	})
+	return string(b)
 }
 
 type aiRunNodeResult struct {
 	ID     string `json:"id"`
 	Label  string `json:"label"`
 	Type   string `json:"type"`
-	Status string `json:"status"` // ok | error | skipped
+	Status string `json:"status"` // ok | error | running
 	Output string `json:"output,omitempty"`
 	Error  string `json:"error,omitempty"`
 }
 
-// runWorkflowForAI executes the current canvas and returns a per-node report.
-func (h *WorkflowHandler) runWorkflowForAI(c *gin.Context, req *aiGenerateRequest) string {
-	uid := auth.UserID(c)
-
-	if req.aiRunCount >= aiRunsPerTurn {
-		return fmt.Sprintf(`{"error":"you have already test-run this workflow %d times in this turn — stop running it and either fix the problem from the results you have or tell the user what is wrong"}`, req.aiRunCount)
-	}
-	req.aiRunCount++
-
-	// Same per-user cap the manual Run button obeys.
-	if !auth.Allow(c.Request.Context(), h.redis, "rl:run:"+uid, 60, time.Minute) {
-		return `{"error":"too many runs in the last minute — tell the user to try again shortly"}`
+// runLogsForAI backs the get_run_logs tool: one row per node for a single run,
+// with the output it produced or the error that stopped it.
+func (h *WorkflowHandler) runLogsForAI(c *gin.Context, input any) string {
+	m, _ := input.(map[string]any)
+	runID, _ := m["run_id"].(string)
+	runID = strings.TrimSpace(runID)
+	if runID == "" {
+		return `{"error":"run_id is required — get one from list_runs"}`
 	}
 
-	ast, err := astFromRequest(req)
-	if err != nil {
-		return `{"error":"could not read the current workflow"}`
+	var run models.WorkflowRun
+	if err := h.db.DB.First(&run, "id = ? AND user_id = ?", runID, auth.UserID(c)).Error; err != nil {
+		return `{"error":"run not found"}`
 	}
-	if len(ast.Nodes) == 0 {
-		return `{"error":"there is nothing on the canvas to run yet"}`
-	}
-	if len(ast.Nodes) > aiRunMaxNodeCount {
-		return fmt.Sprintf(`{"error":"this workflow has %d nodes, too many to test-run automatically — ask the user to run it"}`, len(ast.Nodes))
-	}
-
-	// Refuse to fire anything irreversible without a human.
-	var blocked []string
-	for _, n := range ast.Nodes {
-		if d := destructiveNode(n); d != "" {
-			blocked = append(blocked, d)
-		}
-	}
-	if len(blocked) > 0 {
-		out, _ := json.Marshal(map[string]any{
-			"error":   "refused to run: this workflow performs irreversible operations",
-			"ops":     blocked,
-			"message": "Do not try again. Explain to the user what these steps would do and let them run it themselves with the Run button.",
-		})
-		return string(out)
-	}
-
-	// Persist the run like any other so it shows up in history, and publish it so
-	// the open canvas attaches and the user sees exactly what the AI ran.
-	run := &models.WorkflowRun{
-		UserID:       uid,
-		WorkflowID:   req.WorkflowID,
-		WorkflowName: ast.Name,
-		Status:       models.RunStatusRunning,
-	}
-	if err := h.db.DB.Create(run).Error; err != nil {
-		slog.ErrorContext(c.Request.Context(), "failed to persist AI test run", "error", err)
-	}
-	runID := run.ID.String()
-	if req.WorkflowID != "" {
-		hub.Workflow.Publish(req.WorkflowID, runID)
-	}
-
-	keys := executor.APIKeys{
-		Anthropic: config.GetEnv("ANTHROPIC_API_KEY"),
-		OpenAI:    config.GetEnv("OPENAI_API_KEY"),
-		Brave:     config.GetEnv("BRAVE_API_KEY"),
-		Jina:      config.GetEnv("JINA_API_KEY"),
-	}
-
-	// Bounded: an approval node with no timeout would otherwise wait forever.
-	ctx, cancel := context.WithTimeout(executor.WithTrigger(context.WithoutCancel(c.Request.Context()), "ai_test"), aiRunTimeout)
-	defer cancel()
 
 	var events []executor.ExecutionEvent
-	finalStatus := models.RunStatusCompleted
-	var runErr string
-
-	executor.RunWorkflow(ctx, ast, keys, runID, uid, func(ev executor.ExecutionEvent) {
-		hub.Global.Publish(runID, ev)
-		events = append(events, ev)
-		if ev.Type == executor.EventWorkflowError {
-			finalStatus = models.RunStatusError
-			runErr = ev.Message
-		}
-	})
-
-	eventsJSON, _ := json.Marshal(events)
-	updates := map[string]any{"status": finalStatus, "events": models.JSONB(eventsJSON)}
-	if runErr != "" {
-		updates["error_message"] = runErr
+	if len(run.Events) > 0 {
+		_ = json.Unmarshal(run.Events, &events)
 	}
-	h.db.DB.Model(run).Updates(updates)
-	hub.Global.ClearBuffer(runID)
+	if len(events) == 0 {
+		return fmt.Sprintf(`{"run_id":%q,"status":%q,"nodes":[],"message":"This run recorded no node events%s"}`,
+			runID, run.Status,
+			map[bool]string{true: " — it is still running, so check again shortly.", false: "."}[run.Status == models.RunStatusRunning])
+	}
 
-	// Fold the event stream into one row per node, newest state winning.
 	order := []string{}
 	byNode := map[string]*aiRunNodeResult{}
-	ensure := func(ev executor.ExecutionEvent) *aiRunNodeResult {
-		id := ""
-		if ev.NodeID != nil {
-			id = *ev.NodeID
+	for _, ev := range events {
+		if ev.NodeID == nil {
+			continue
 		}
+		id := *ev.NodeID
 		r, ok := byNode[id]
 		if !ok {
-			r = &aiRunNodeResult{ID: id, Status: "skipped"}
+			r = &aiRunNodeResult{ID: id, Status: "running"}
 			if ev.NodeLabel != nil {
 				r.Label = *ev.NodeLabel
 			}
@@ -191,13 +139,6 @@ func (h *WorkflowHandler) runWorkflowForAI(c *gin.Context, req *aiGenerateReques
 			byNode[id] = r
 			order = append(order, id)
 		}
-		return r
-	}
-	for _, ev := range events {
-		if ev.NodeID == nil {
-			continue
-		}
-		r := ensure(ev)
 		switch ev.Type {
 		case executor.EventNodeOutput:
 			if ev.Output != nil {
@@ -212,30 +153,31 @@ func (h *WorkflowHandler) runWorkflowForAI(c *gin.Context, req *aiGenerateReques
 			r.Error = ev.Message
 		}
 	}
+
+	if len(order) > aiRunNodeLimit {
+		order = order[:aiRunNodeLimit]
+	}
 	results := make([]aiRunNodeResult, 0, len(order))
 	for _, id := range order {
 		results = append(results, *byNode[id])
 	}
 
-	slog.InfoContext(c.Request.Context(), "AI test run finished",
-		"run_id", runID, "status", finalStatus, "nodes", len(results))
-
 	payload := map[string]any{
-		"status":   string(finalStatus),
-		"run_id":   runID,
-		"nodes":    results,
-		"finished": true,
+		"run_id":     runID,
+		"status":     string(run.Status),
+		"started_at": run.CreatedAt.UTC().Format(time.RFC3339),
+		"nodes":      results,
 	}
-	if runErr != "" {
-		payload["error"] = runErr
+	if run.ErrorMessage != "" {
+		payload["error"] = run.ErrorMessage
 	}
-	if finalStatus == models.RunStatusCompleted {
-		payload["message"] = "Every node ran. If an output is not what the user asked for, fix the node config and you may re-run once."
+	if run.Status == models.RunStatusError {
+		payload["message"] = "Fix the node whose status is error, using its exact error text. If the error names a missing value the user must supply (a recipient, a resource id), say which field they need to fill instead of inventing one."
 	} else {
-		payload["message"] = "The run failed. Use the failing node's error to fix its configuration, then re-run to confirm. Do not guess."
+		payload["message"] = "This run succeeded. If the result still isn't what the user wanted, compare each node's output against their intent and adjust the node that produced the wrong value."
 	}
-	out, _ := json.Marshal(payload)
-	return string(out)
+	b, _ := json.Marshal(payload)
+	return string(b)
 }
 
 func truncateForAI(s string) string {

@@ -32,14 +32,11 @@ type aiGenerateRequest struct {
 	WorkflowID string `json:"workflowId,omitempty"`
 	// History is the prior conversation as [{role, content}] pairs (user/assistant text only).
 	History []map[string]any `json:"history,omitempty"`
-
-	// aiRunCount caps how many times one turn may test-run the workflow.
-	aiRunCount int
 }
 
 // applyOpsToCanvas mirrors the frontend's applyPatch onto the request's working
-// copy of the canvas, so get_current_workflow and run_workflow see the edits the
-// model just made instead of the canvas as it was when the turn started.
+// copy of the canvas, so get_current_workflow sees the edits the model just made
+// instead of the canvas as it was when the turn started.
 func applyOpsToCanvas(nodes, edges []any, ops []any) ([]any, []any) {
 	idOf := func(v any, key string) string {
 		m, _ := v.(map[string]any)
@@ -424,19 +421,31 @@ var toolSetSchedule = map[string]any{
 	},
 }
 
-var toolRunWorkflow = map[string]any{
-	"name":        "run_workflow",
-	"description": "Executes the workflow currently on the canvas and returns what every node produced — its output, or the error that stopped it. Use it to VERIFY your work and to debug a real failure the user reports, then fix the failing node from the actual error rather than guessing. This is a real run with real side effects (it will genuinely send emails and post messages), so run it at most twice per turn and never just to look busy. Runs containing irreversible operations (deletes, refunds, cancellations) are refused — ask the user to run those.",
+var toolListRuns = map[string]any{
+	"name":        "list_runs",
+	"description": "Lists this workflow's recent executions, newest first — status, when it started, the error message, and which node failed. Call this FIRST whenever the user says something didn't work, ran wrong, or stopped working, then open the relevant run with get_run_logs. Includes runs started by the schedule, so it shows failures the user may not have watched happen.",
 	"input_schema": map[string]any{
 		"type":       "object",
 		"properties": map[string]any{},
 	},
 }
 
+var toolGetRunLogs = map[string]any{
+	"name":        "get_run_logs",
+	"description": "Returns the logs of one run: every node it touched, in order, with the output that node produced or the error that stopped it. Use the exact error to fix the offending node instead of guessing. Get run ids from list_runs.",
+	"input_schema": map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"run_id": map[string]any{"type": "string", "description": "The run to inspect, from list_runs"},
+		},
+		"required": []string{"run_id"},
+	},
+}
+
 // builderTools is the single source of truth for the AI builder's tool set
 // (Anthropic uses it directly; openAIToolDefs converts it).
 func builderTools() []map[string]any {
-	return []map[string]any{toolGetNodes, toolGetCurrentWorkflow, toolCreateWorkflow, toolUpdateWorkflow, toolListIntegrationResources, toolListDataStores, toolCreateDataStore, toolSetSchedule, toolRunWorkflow}
+	return []map[string]any{toolGetNodes, toolGetCurrentWorkflow, toolCreateWorkflow, toolUpdateWorkflow, toolListIntegrationResources, toolListDataStores, toolCreateDataStore, toolSetSchedule, toolListRuns, toolGetRunLogs}
 }
 
 // nodeCatalog documents every node type (fields, semantics) — shared by the
@@ -708,10 +717,11 @@ Schedules:
 - Times are UTC; if the user names a local time, convert it and say what you set.
 - Schedules only fire when the workflow is Published, so if set_schedule reports published:false, tell them to hit Publish.
 
-Testing and debugging:
-- When the user says something is broken, doesn't run, or produced the wrong result, call run_workflow and read the per-node output instead of speculating. Fix the node the error actually points at, then re-run once to confirm.
-- run_workflow really executes: it sends the emails and posts the messages. Don't run a flow just to appear thorough, don't run it more than twice in a turn, and if it is refused for irreversible operations, explain what those steps would do and let the user run it.
-- Nodes needing user input (a blank recipient, a missing resource id) will fail in a test run — that's expected. Say which field the user must fill rather than inventing a value.`
+Debugging with run history:
+- When the user says something is broken, didn't run, or produced the wrong result, call list_runs and then get_run_logs on the relevant run. Diagnose from the recorded error, quote it back to them, and fix the node it points at — never speculate about a cause you have not read.
+- You cannot execute workflows yourself. After a fix, tell the user to hit Run (or wait for the schedule); next turn you can read that run's logs to confirm it worked.
+- If a run failed because a value is missing that only the user has (a recipient address, a resource id, a connected account), name the exact field they need to fill instead of inventing a value.
+- No runs recorded yet means you have nothing to diagnose: say so and ask them to run it once, rather than guessing.`
 
 // ── Handler ─────────────────────────────────────────────────────
 
@@ -798,8 +808,10 @@ func toolActivityLabel(name string, input any) string {
 		return "Waiting for your approval"
 	case "set_schedule":
 		return "Setting the schedule"
-	case "run_workflow":
-		return "Test-running the workflow"
+	case "list_runs":
+		return "Checking recent runs"
+	case "get_run_logs":
+		return "Reading the run logs"
 	default:
 		return name
 	}
@@ -899,8 +911,11 @@ func (h *WorkflowHandler) execChatTool(c *gin.Context, flusher http.Flusher, req
 	case "set_schedule":
 		return h.setScheduleForAI(c, req.WorkflowID, input)
 
-	case "run_workflow":
-		return h.runWorkflowForAI(c, req)
+	case "list_runs":
+		return h.listRunsForAI(c, req.WorkflowID)
+
+	case "get_run_logs":
+		return h.runLogsForAI(c, input)
 
 	case "create_data_store":
 		// Blocks this turn until the user decides. Nothing is created here —
