@@ -278,6 +278,9 @@ func kvOp(b storeBackend, store *DataStore, op string, d FlowNodeData, sub func(
 		return string(v), nil
 	case "set":
 		val := toJSONValue(sub(d.DataValue))
+		if err := CheckDataSize(val); err != nil {
+			return "", fmt.Errorf("Data node: %w", err)
+		}
 		if err := b.KVSet(store.ID, key, val); err != nil {
 			return "", err
 		}
@@ -311,8 +314,11 @@ func collectionOp(b storeBackend, store *DataStore, op string, d FlowNodeData, s
 		if err != nil {
 			return "", fmt.Errorf("Data node: record must be a JSON object: %w", err)
 		}
-		if err := validateRecord(store.Schema, rec); err != nil {
-			return "", err
+		if err := CheckDataSize(rec); err != nil {
+			return "", fmt.Errorf("Data node: %w", err)
+		}
+		if err := ValidateRecord(store.Schema, rec); err != nil {
+			return "", fmt.Errorf("Data node: %w", err)
 		}
 		id, err := b.RecordAppend(store.ID, rec)
 		if err != nil {
@@ -345,8 +351,11 @@ func collectionOp(b storeBackend, store *DataStore, op string, d FlowNodeData, s
 		if err != nil {
 			return "", fmt.Errorf("Data node: record must be a JSON object: %w", err)
 		}
-		if err := validateRecord(store.Schema, rec); err != nil {
-			return "", err
+		if err := CheckDataSize(rec); err != nil {
+			return "", fmt.Errorf("Data node: %w", err)
+		}
+		if err := ValidateRecord(store.Schema, rec); err != nil {
+			return "", fmt.Errorf("Data node: %w", err)
 		}
 		if err := b.RecordUpdate(store.ID, id, rec); err != nil {
 			return "", err
@@ -380,12 +389,19 @@ func textOp(b storeBackend, store *DataStore, op string, d FlowNodeData, sub fun
 		return b.TextGet(store.ID)
 	case "set":
 		txt := sub(d.DataValue)
+		if err := CheckDataSize([]byte(txt)); err != nil {
+			return "", fmt.Errorf("Data node: %w", err)
+		}
 		if err := b.TextSet(store.ID, txt); err != nil {
 			return "", err
 		}
 		return txt, nil
 	case "append":
-		return b.TextAppend(store.ID, sub(d.DataValue))
+		txt := sub(d.DataValue)
+		if err := CheckDataSize([]byte(txt)); err != nil {
+			return "", fmt.Errorf("Data node: %w", err)
+		}
+		return b.TextAppend(store.ID, txt)
 	default:
 		return "", fmt.Errorf("Data node: op %q is not valid for a text store", op)
 	}
@@ -452,20 +468,61 @@ type schemaColumn struct {
 	Type string `json:"type"` // text | number | boolean | datetime | json
 }
 
-// validateRecord checks a record against a typed collection schema. A nil
-// schema (schemaless) accepts anything. Missing columns are allowed (nullable);
-// present columns must match their declared type.
-func validateRecord(schema, record json.RawMessage) error {
+// MaxDataValueBytes caps a single stored value/record/text write. Guards
+// against workflow loops ballooning a store row by row.
+const MaxDataValueBytes = 64 << 10
+
+// CheckDataSize enforces MaxDataValueBytes; shared by the node and REST paths.
+func CheckDataSize(b []byte) error {
+	if len(b) > MaxDataValueBytes {
+		return fmt.Errorf("value exceeds the %dKB limit", MaxDataValueBytes>>10)
+	}
+	return nil
+}
+
+var validColumnTypes = map[string]bool{"text": true, "number": true, "boolean": true, "datetime": true, "json": true}
+
+// ValidateSchema checks a typed-collection schema definition: a JSON array of
+// {name,type} with known types and non-empty unique names. nil = schemaless, ok.
+func ValidateSchema(schema json.RawMessage) error {
 	if len(schema) == 0 {
 		return nil
 	}
 	var cols []schemaColumn
 	if err := json.Unmarshal(schema, &cols); err != nil {
-		return nil // malformed schema shouldn't block writes
+		return fmt.Errorf("schema must be a JSON array of {name,type} columns")
+	}
+	seen := map[string]bool{}
+	for _, c := range cols {
+		if c.Name == "" {
+			return fmt.Errorf("schema columns need a name")
+		}
+		if seen[c.Name] {
+			return fmt.Errorf("duplicate schema column %q", c.Name)
+		}
+		seen[c.Name] = true
+		if !validColumnTypes[c.Type] {
+			return fmt.Errorf("schema column %q has unknown type %q (use text, number, boolean, datetime, or json)", c.Name, c.Type)
+		}
+	}
+	return nil
+}
+
+// ValidateRecord checks a record against a typed collection schema. A nil
+// schema (schemaless) accepts anything. Missing columns are allowed (nullable);
+// present columns must match their declared type. Shared by the node and REST
+// paths so panel edits obey the same rules as workflow writes.
+func ValidateRecord(schema, record json.RawMessage) error {
+	if len(schema) == 0 {
+		return nil
+	}
+	var cols []schemaColumn
+	if err := json.Unmarshal(schema, &cols); err != nil {
+		return nil // malformed legacy schema shouldn't block writes
 	}
 	var m map[string]any
 	if err := json.Unmarshal(record, &m); err != nil {
-		return fmt.Errorf("Data node: record must be a JSON object")
+		return fmt.Errorf("record must be a JSON object")
 	}
 	for _, c := range cols {
 		v, ok := m[c.Name]
@@ -473,7 +530,7 @@ func validateRecord(schema, record json.RawMessage) error {
 			continue
 		}
 		if !typeMatches(c.Type, v) {
-			return fmt.Errorf("Data node: field %q must be %s", c.Name, c.Type)
+			return fmt.Errorf("field %q must be %s", c.Name, c.Type)
 		}
 	}
 	return nil

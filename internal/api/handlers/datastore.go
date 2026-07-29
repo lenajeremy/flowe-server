@@ -7,6 +7,7 @@ import (
 	"workflow-ai/server/internal/auth"
 	"workflow-ai/server/internal/database"
 	"workflow-ai/server/internal/database/models"
+	"workflow-ai/server/internal/executor"
 
 	"github.com/gin-gonic/gin"
 )
@@ -69,6 +70,10 @@ func (h *WorkflowHandler) CreateDataStore(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "scope must be run, workflow, or account"})
 		return
 	}
+	if err := executor.ValidateSchema(body.Schema); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
 
 	// run/workflow stores belong to a workflow the caller owns; account stores
 	// are global and carry no workflow id.
@@ -129,6 +134,10 @@ func (h *WorkflowHandler) UpdateDataStore(c *gin.Context) {
 		updates["name"] = *body.Name
 	}
 	if body.Schema != nil {
+		if err := executor.ValidateSchema(body.Schema); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
 		updates["schema"] = models.JSONB(body.Schema)
 	}
 	if len(updates) > 0 {
@@ -200,15 +209,43 @@ func (h *WorkflowHandler) PutDataEntry(c *gin.Context) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "key is required"})
 			return
 		}
+		if len(body.Value) == 0 || !json.Valid(body.Value) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "value must be valid JSON"})
+			return
+		}
+		if err := executor.CheckDataSize(body.Value); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
 		err = h.ops().KVSet(id, body.Key, body.Value)
 	case "text":
+		// Accept a JSON string ({"value":"…"} — including the empty string,
+		// which clears the text) or fall back to the raw bytes.
 		var s string
-		_ = json.Unmarshal(body.Value, &s) // accept a JSON string or raw
-		if s == "" {
+		if unmarshalErr := json.Unmarshal(body.Value, &s); unmarshalErr != nil {
 			s = string(body.Value)
+		}
+		if err := executor.CheckDataSize([]byte(s)); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
 		}
 		err = h.ops().TextSet(id, s)
 	case "collection":
+		// Panel edits obey the same rules as workflow writes: JSON object,
+		// size cap, and the store's schema (when typed).
+		var m map[string]any
+		if json.Unmarshal(body.Record, &m) != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "record must be a JSON object"})
+			return
+		}
+		if err := executor.CheckDataSize(body.Record); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		if err := executor.ValidateRecord(json.RawMessage(st.Schema), body.Record); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
 		if body.ID != "" {
 			err = h.ops().RecordUpdate(id, body.ID, body.Record)
 		} else {
