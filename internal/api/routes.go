@@ -117,6 +117,7 @@ func InitServer(port int, db *database.DBClient, rdb *redis.Client) {
 
 		// AI workflow generation
 		api.POST("/ai/generate-workflow", wh.AIGenerate)
+		api.POST("/ai/data-store-proposals/:id/resolve", wh.ResolveDataStoreProposal)
 		api.GET("/ai/models", wh.AIModels)
 
 		// AI chat history per workflow

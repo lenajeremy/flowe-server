@@ -287,9 +287,13 @@ var toolListDataStores = map[string]any{
 	},
 }
 
+// proposalWait is how long the builder stays paused on a data-store approval
+// card before giving up and finishing without the store.
+const proposalWait = 10 * time.Minute
+
 var toolCreateDataStore = map[string]any{
 	"name":        "create_data_store",
-	"description": "PROPOSES a new persistent Data store to the user. This does NOT create anything: the user sees an approval card in chat and the store only exists after they approve it (a later message will tell you the store's real id). After calling this, finish the workflow with the data node's dataStoreId left empty and tell the user you'll wire it up once they approve. Never call this twice for the same store in one turn.",
+	"description": "Asks the user to approve a new persistent Data store. This call BLOCKS until they answer: the result tells you whether it was approved (with the new store's real store_id, ready to use as dataStoreId) or rejected. Call it BEFORE building nodes that depend on the store, then continue once you have the answer. Never propose the same store twice.",
 	"input_schema": map[string]any{
 		"type": "object",
 		"properties": map[string]any{
@@ -587,7 +591,7 @@ Integrations (notion, linear, github, gitlab, gmail, stripe, shopify):
 
 Persistence (Data stores):
 - Trigger outputs carry NO memory — a scheduled run knows nothing about previous runs. For anything that must survive across runs (counters like "email #3 of 10", dedup like "skip orders already handled", cursors, accumulating digests), use a data node backed by a Data store. Do not fake state with LLM prompts.
-- Call list_data_stores first and set a REAL dataStoreId. If no suitable store exists, call create_data_store — that only PROPOSES it: the user must approve a card in chat, and the store exists only after approval. Build the rest of the workflow with dataStoreId left empty, and when a later message gives you the approved store's id, fill it in with update_workflow.
+- Call list_data_stores first and set a REAL dataStoreId. If no suitable store exists, call create_data_store BEFORE building the nodes that need it — it pauses and waits for the user's answer, then returns either the approved store's real store_id (use it as dataStoreId and carry on) or a rejection (don't use the store; build what you can and say which part needs persistence).
 - Scope guide: workflow (default — persists across this workflow's runs), account (shared across the user's workflows), run (scratch state inside a single run).`
 
 // ── Handler ─────────────────────────────────────────────────────
@@ -642,6 +646,66 @@ func (h *WorkflowHandler) AIGenerate(c *gin.Context) {
 		"model", model.ID, "duration_ms", time.Since(start).Milliseconds(), "ok", chatOK)
 }
 
+// toolActivityLabel is what the chat UI shows for each builder tool call —
+// plain description of the work, not the tool's wire name.
+func toolActivityLabel(name string, input any) string {
+	m, _ := input.(map[string]any)
+	switch name {
+	case "get_available_nodes":
+		return "Reading the node catalog"
+	case "get_current_workflow":
+		return "Reading the canvas"
+	case "create_workflow":
+		if nodes, ok := m["nodes"].([]any); ok {
+			return fmt.Sprintf("Building the workflow · %d nodes", len(nodes))
+		}
+		return "Building the workflow"
+	case "update_workflow":
+		if ops, ok := m["operations"].([]any); ok {
+			return fmt.Sprintf("Updating the workflow · %d change(s)", len(ops))
+		}
+		return "Updating the workflow"
+	case "list_integration_resources":
+		if p, _ := m["provider"].(string); p != "" {
+			return "Checking your " + p + " connection"
+		}
+		return "Checking connected integrations"
+	case "list_data_stores":
+		return "Checking your data stores"
+	case "create_data_store":
+		if n, _ := m["name"].(string); n != "" {
+			return "Waiting for your approval · " + n
+		}
+		return "Waiting for your approval"
+	default:
+		return name
+	}
+}
+
+// execChatToolWithActivity wraps a tool call in tool_start/tool_result SSE
+// events so the chat UI can show what the builder is doing, step by step.
+func (h *WorkflowHandler) execChatToolWithActivity(c *gin.Context, flusher http.Flusher, req *aiGenerateRequest, name string, input any) string {
+	label := toolActivityLabel(name, input)
+	chip, _ := json.Marshal(map[string]string{"tool": name, "label": label})
+	sendSSE(c.Writer, flusher, "tool_start", string(chip))
+
+	out := h.execChatTool(c, flusher, req, name, input)
+
+	status := "ok"
+	// Surface a tool-level error (and a rejected proposal) as a failed step.
+	var probe map[string]any
+	if json.Unmarshal([]byte(out), &probe) == nil {
+		if _, bad := probe["error"]; bad {
+			status = "error"
+		} else if s, _ := probe["status"].(string); s == "rejected" || s == "timeout" {
+			status = "error"
+		}
+	}
+	res, _ := json.Marshal(map[string]string{"tool": name, "label": label, "status": status})
+	sendSSE(c.Writer, flusher, "tool_result", string(res))
+	return out
+}
+
 // execChatTool runs one builder tool call and returns its result JSON.
 // create_workflow / update_workflow additionally stream their input to the
 // client so the canvas updates immediately.
@@ -676,12 +740,56 @@ func (h *WorkflowHandler) execChatTool(c *gin.Context, flusher http.Flusher, req
 		return h.dataStoresForAI(currentUserID(c), req.WorkflowID)
 
 	case "create_data_store":
-		// Never creates — streams a proposal card to the chat UI. The user's
-		// Accept click creates the store through the normal authed REST path,
-		// and a follow-up chat message tells the model the real id.
-		inputJSON, _ := json.Marshal(input)
-		sendSSE(c.Writer, flusher, "data_store_proposal", string(inputJSON))
-		return `{"status":"proposed","message":"NOT created yet — the user now sees an approval card in chat. Finish your reply: explain what the store is for, leave dataStoreId empty in any data node, and say you'll wire it up once they approve. If they approve, a later message will give you the store's real id — use update_workflow to fill it in then."}`
+		// Blocks this turn until the user decides. Nothing is created here —
+		// accepting creates the store in ResolveDataStoreProposal and hands the
+		// real id back below, so the model can wire it in the same turn.
+		var spec storeProposalSpec
+		if b, err := json.Marshal(input); err == nil {
+			_ = json.Unmarshal(b, &spec)
+		}
+		if spec.Name == "" || !validKinds[spec.Kind] || !validScopes[spec.Scope] {
+			return `{"error":"a data store proposal needs a name, a kind (kv|collection|text) and a scope (run|workflow|account)"}`
+		}
+
+		proposalID, ch := registerProposal(currentUserID(c), req.WorkflowID, spec)
+		defer clearProposal(proposalID)
+
+		card, _ := json.Marshal(map[string]any{
+			"proposalId": proposalID,
+			"name":       spec.Name,
+			"kind":       spec.Kind,
+			"scope":      spec.Scope,
+			"schema":     spec.Schema,
+			"reason":     spec.Reason,
+		})
+		sendSSE(c.Writer, flusher, "data_store_proposal", string(card))
+		slog.InfoContext(c.Request.Context(), "data store proposed, builder paused",
+			"proposal_id", proposalID, "name", spec.Name, "kind", spec.Kind, "scope", spec.Scope)
+
+		select {
+		case out := <-ch:
+			if out.Action == "approved" {
+				slog.InfoContext(c.Request.Context(), "data store proposal approved",
+					"proposal_id", proposalID, "store_id", out.StoreID)
+				return fmt.Sprintf(`{"status":"approved","store_id":%q,"name":%q,"kind":%q,"scope":%q,"message":"The user approved it and the store now EXISTS. Use this store_id as dataStoreId on the data node and finish the workflow now."}`,
+					out.StoreID, spec.Name, spec.Kind, spec.Scope)
+			}
+			slog.InfoContext(c.Request.Context(), "data store proposal rejected", "proposal_id", proposalID)
+			note := out.Note
+			if note == "" {
+				note = "no reason given"
+			}
+			return fmt.Sprintf(`{"status":"rejected","note":%q,"message":"The user REJECTED this store — it was not created. Do not use it or propose it again. Build what you can without it and tell them plainly which part needs persistence."}`, note)
+
+		case <-time.After(proposalWait):
+			sendSSE(c.Writer, flusher, "data_store_timeout", proposalID)
+			slog.WarnContext(c.Request.Context(), "data store proposal timed out", "proposal_id", proposalID)
+			return `{"status":"timeout","message":"The user did not respond in time and the store was NOT created. Wrap up: build what you can without it and tell them they can ask again to set it up."}`
+
+		case <-c.Request.Context().Done():
+			slog.InfoContext(c.Request.Context(), "data store proposal abandoned (client gone)", "proposal_id", proposalID)
+			return `{"status":"cancelled","message":"The user cancelled. Stop here."}`
+		}
 
 	default:
 		return fmt.Sprintf(`{"error": "unknown tool: %s"}`, name)
@@ -754,7 +862,7 @@ func (h *WorkflowHandler) runAnthropicChat(c *gin.Context, flusher http.Flusher,
 			toolResults = append(toolResults, map[string]any{
 				"type":        "tool_result",
 				"tool_use_id": toolID,
-				"content":     h.execChatTool(c, flusher, req, toolName, bm["input"]),
+				"content":     h.execChatToolWithActivity(c, flusher, req, toolName, bm["input"]),
 			})
 		}
 
@@ -824,7 +932,7 @@ func (h *WorkflowHandler) runOpenAIChat(c *gin.Context, flusher http.Flusher, re
 			messages = append(messages, map[string]any{
 				"role":         "tool",
 				"tool_call_id": tc["id"],
-				"content":      h.execChatTool(c, flusher, req, name, input),
+				"content":      h.execChatToolWithActivity(c, flusher, req, name, input),
 			})
 		}
 	}
