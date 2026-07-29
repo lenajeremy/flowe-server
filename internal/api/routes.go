@@ -100,6 +100,17 @@ func InitServer(port int, db *database.DBClient, rdb *redis.Client) {
 		api.POST("/workflows/:id/schedule", wh.SetSchedule)
 		api.DELETE("/workflows/:id/schedule", wh.DeleteSchedule)
 
+		// Persistence (Data stores)
+		api.GET("/data-stores", wh.ListDataStores)
+		api.POST("/data-stores", wh.CreateDataStore)
+		api.GET("/data-stores/:id", wh.GetDataStore)
+		api.PATCH("/data-stores/:id", wh.UpdateDataStore)
+		api.DELETE("/data-stores/:id", wh.DeleteDataStore)
+		api.GET("/data-stores/:id/entries", wh.ListDataEntries)
+		api.PUT("/data-stores/:id/entries", wh.PutDataEntry)
+		api.DELETE("/data-stores/:id/entries/:entry", wh.DeleteDataEntry)
+		api.POST("/data-stores/:id/clear", wh.ClearDataStore)
+
 		// AI workflow generation
 		api.POST("/ai/generate-workflow", wh.AIGenerate)
 		api.GET("/ai/models", wh.AIModels)
