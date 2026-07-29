@@ -86,6 +86,33 @@ func TestKVSetTemplatingAndTypes(t *testing.T) {
 	}
 }
 
+// A read of something never written must be empty, not the literal "null" —
+// the output gets templated straight into prompts and emails.
+func TestGetMissingIsEmpty(t *testing.T) {
+	withDataStores(t, &DataStore{ID: "m1", Kind: "kv", Scope: "workflow"})
+	ctx := context.Background()
+	if got := run(t, ctx, FlowNodeData{DataStoreId: "m1", DataOp: "get", DataKey: "never_set"}, nil); got != "" {
+		t.Fatalf("get on a missing key = %q, want empty", got)
+	}
+	// An explicitly stored null reads as empty too.
+	run(t, ctx, FlowNodeData{DataStoreId: "m1", DataOp: "set", DataKey: "k", DataValue: "null"}, nil)
+	if got := run(t, ctx, FlowNodeData{DataStoreId: "m1", DataOp: "get", DataKey: "k"}, nil); got != "" {
+		t.Fatalf("get on a stored null = %q, want empty", got)
+	}
+	// A deleted key goes back to empty.
+	run(t, ctx, FlowNodeData{DataStoreId: "m1", DataOp: "set", DataKey: "d", DataValue: "5"}, nil)
+	run(t, ctx, FlowNodeData{DataStoreId: "m1", DataOp: "delete", DataKey: "d"}, nil)
+	if got := run(t, ctx, FlowNodeData{DataStoreId: "m1", DataOp: "get", DataKey: "d"}, nil); got != "" {
+		t.Fatalf("get after delete = %q, want empty", got)
+	}
+
+	// Text stores behave the same.
+	withDataStores(t, &DataStore{ID: "m2", Kind: "text", Scope: "workflow"})
+	if got := run(t, ctx, FlowNodeData{DataStoreId: "m2", DataOp: "get"}, nil); got != "" {
+		t.Fatalf("text get on an empty store = %q, want empty", got)
+	}
+}
+
 func TestCollectionAppendQueryCount(t *testing.T) {
 	withDataStores(t, &DataStore{ID: "c1", Kind: "collection", Scope: "workflow"})
 	ctx := context.Background()

@@ -405,7 +405,7 @@ func nodeCatalog() []map[string]any {
 		},
 		{
 			"type": "data", "label": "Data Store", "category": "Data",
-			"description": "Reads/writes persistent memory (a Data store). This is how workflows remember things across runs: counters ('email #N'), dedup lists ('orders already handled'), cursors, accumulating digests. Ops by store kind — kv: get/set/increment/delete · collection: append/query/update/delete/count/clear · text: get/set/append. Output is the op result as JSON (increment returns the new number).",
+			"description": "Reads/writes persistent memory (a Data store). This is how workflows remember things across runs: counters ('email #N'), dedup lists ('orders already handled'), cursors, accumulating digests. Ops by store kind — kv: get/set/increment/delete · collection: append/query/update/delete/count/clear · text: get/set/append. Output is the op result as JSON (increment returns the new number). A kv/text get on something never written yields an EMPTY string (not 'null'), so first-run branches should test for empty; prefer increment over get+set for counters since it is atomic and starts at 0.",
 			"dataFields": map[string]any{
 				"dataStoreId":  "string – REAL store id from list_data_stores (leave empty only when a create_data_store proposal is pending approval)",
 				"dataOp":       "kv: 'get'|'set'|'increment'|'delete' · collection: 'append'|'query'|'update'|'delete'|'count'|'clear' · text: 'get'|'set'|'append'",

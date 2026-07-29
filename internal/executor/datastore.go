@@ -272,8 +272,11 @@ func kvOp(b storeBackend, store *DataStore, op string, d FlowNodeData, sub func(
 		if err != nil {
 			return "", err
 		}
-		if !ok {
-			return "null", nil
+		// A missing key (or a stored null) reads as empty, not "null" — the
+		// output is templated straight into prompts and emails, where the word
+		// "null" would leak into the text.
+		if !ok || len(v) == 0 || string(v) == "null" {
+			return "", nil
 		}
 		return string(v), nil
 	case "set":
