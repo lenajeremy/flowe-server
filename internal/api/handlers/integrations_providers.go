@@ -41,6 +41,12 @@ func exchangeGithubCode(code string) (*models.IntegrationConnection, error) {
 		AccessToken string `json:"access_token"`
 		Scope       string `json:"scope"`
 		ErrorDesc   string `json:"error_description"`
+		// A GitHub App with expiring user tokens returns these; a classic OAuth
+		// App omits them and its token never expires. Capturing them is what
+		// keeps scheduled runs working past the 8-hour user-token lifetime —
+		// without them the connection silently dies overnight.
+		RefreshToken string `json:"refresh_token"`
+		ExpiresIn    int64  `json:"expires_in"`
 	}
 	if err := json.Unmarshal(raw, &tok); err != nil || tok.AccessToken == "" {
 		if tok.ErrorDesc != "" {
@@ -50,9 +56,14 @@ func exchangeGithubCode(code string) (*models.IntegrationConnection, error) {
 	}
 
 	conn := &models.IntegrationConnection{
-		Provider:    "github",
-		AccessToken: tok.AccessToken,
-		Scope:       tok.Scope,
+		Provider:     "github",
+		AccessToken:  tok.AccessToken,
+		Scope:        tok.Scope,
+		RefreshToken: tok.RefreshToken,
+	}
+	if tok.ExpiresIn > 0 {
+		exp := time.Now().Add(time.Duration(tok.ExpiresIn) * time.Second)
+		conn.ExpiresAt = &exp
 	}
 	// Best-effort: resolve the account login for display.
 	if login := githubLogin(tok.AccessToken); login != "" {

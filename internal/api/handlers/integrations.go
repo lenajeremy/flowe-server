@@ -764,22 +764,35 @@ if (window.opener) { window.opener.postMessage(` + string(payload) + `, ` + stri
 // ── Credential access with transparent refresh ────────────────
 
 // FreshAccessToken returns a valid access token and workspace/tenant
-// identifier for a user's provider connection, refreshing expiring tokens
-// (gmail, gitlab) transparently and persisting the rotated credentials.
-// Returns empty strings when no connection exists.
+// identifier for a user's provider connection, transparently refreshing
+// expiring tokens (github, gmail, gitlab, google*, outlook) and persisting the
+// rotated credentials. Returns empty strings when no connection exists.
 func FreshAccessToken(db *gorm.DB, userID, provider string) (token, workspace string) {
 	var conn models.IntegrationConnection
 	if err := db.Where("user_id = ? AND provider = ?", userID, provider).First(&conn).Error; err != nil {
 		return "", ""
 	}
-	// Non-expiring token (or no expiry recorded): use as-is.
-	if conn.ExpiresAt == nil || time.Until(*conn.ExpiresAt) > 2*time.Minute || conn.RefreshToken == "" {
+	// Nothing to do for a token with no recorded expiry (classic OAuth Apps,
+	// Slack, Notion…) or one that is still comfortably valid.
+	if conn.ExpiresAt == nil || time.Until(*conn.ExpiresAt) > 2*time.Minute {
 		return conn.AccessToken, conn.WorkspaceID
 	}
-	// Expiring soon — refresh. (Backend-auth expansion implements the
-	// per-provider refresh exchange; see refreshConnection.)
+	// Expired/expiring with nothing to refresh from: the call is going to 401,
+	// so say why now — a stale token looks identical to a wrong one in the logs.
+	if conn.RefreshToken == "" {
+		slog.Warn("integration token expired and cannot be refreshed — reconnect required",
+			"provider", provider, "user_id", userID, "expired_at", conn.ExpiresAt)
+		return conn.AccessToken, conn.WorkspaceID
+	}
 	if refreshed, err := refreshConnection(db, &conn); err == nil {
+		slog.Info("integration token refreshed", "provider", provider, "user_id", userID,
+			"expires_at", refreshed.ExpiresAt)
 		return refreshed.AccessToken, refreshed.WorkspaceID
+	} else {
+		// The refresh token itself is spent or revoked — only reconnecting fixes
+		// this, and the user needs to be told rather than left with silent 401s.
+		slog.Error("integration token refresh failed — reconnect required",
+			"provider", provider, "user_id", userID, "error", err.Error())
 	}
 	return conn.AccessToken, conn.WorkspaceID
 }
@@ -799,40 +812,70 @@ func UserGrantToken(db *gorm.DB, userID, provider string) string {
 // (gmail via Google, gitlab). It persists the rotated access token, expiry,
 // and (when the provider returns one) refresh token, then returns the updated
 // connection. Providers without refresh flows return the connection unchanged.
-func refreshConnection(db *gorm.DB, conn *models.IntegrationConnection) (*models.IntegrationConnection, error) {
-	var tokenURL, clientIDEnv, secretEnv string
-	switch conn.Provider {
-	case "gmail":
-		tokenURL, clientIDEnv, secretEnv = "https://oauth2.googleapis.com/token", "GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET"
-	case "gitlab":
-		tokenURL, clientIDEnv, secretEnv = "https://gitlab.com/oauth/token", "GITLAB_CLIENT_ID", "GITLAB_CLIENT_SECRET"
-	case "googlecalendar", "googledrive", "googledocs", "googlesheets":
-		tokenURL, clientIDEnv, secretEnv = "https://oauth2.googleapis.com/token", "GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET"
-	case "outlook":
-		tokenURL, clientIDEnv, secretEnv = "https://login.microsoftonline.com/common/oauth2/v2.0/token", "MICROSOFT_CLIENT_ID", "MICROSOFT_CLIENT_SECRET"
-	default:
-		return conn, nil
+// refreshTokenEndpoints maps a provider to its refresh exchange. Package-level
+// so tests can point a provider at a stub server; production values only.
+// GitHub App user tokens live 8 hours and their refresh token (~6 months)
+// rotates on every use. Classic OAuth Apps never reach here — they return no
+// refresh token, so ExpiresAt stays nil and the token is used as-is.
+var refreshTokenEndpoints = map[string]struct{ tokenURL, clientIDEnv, secretEnv string }{
+	"github":         {"https://github.com/login/oauth/access_token", "GITHUB_CLIENT_ID", "GITHUB_CLIENT_SECRET"},
+	"gmail":          {"https://oauth2.googleapis.com/token", "GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET"},
+	"gitlab":         {"https://gitlab.com/oauth/token", "GITLAB_CLIENT_ID", "GITLAB_CLIENT_SECRET"},
+	"googlecalendar": {"https://oauth2.googleapis.com/token", "GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET"},
+	"googledrive":    {"https://oauth2.googleapis.com/token", "GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET"},
+	"googledocs":     {"https://oauth2.googleapis.com/token", "GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET"},
+	"googlesheets":   {"https://oauth2.googleapis.com/token", "GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET"},
+	"outlook":        {"https://login.microsoftonline.com/common/oauth2/v2.0/token", "MICROSOFT_CLIENT_ID", "MICROSOFT_CLIENT_SECRET"},
+}
+
+// refreshedToken is one provider's answer to a refresh-token grant.
+type refreshedToken struct {
+	AccessToken  string `json:"access_token"`
+	RefreshToken string `json:"refresh_token"`
+	ExpiresIn    int64  `json:"expires_in"`
+	ErrorDesc    string `json:"error_description"`
+}
+
+// exchangeRefreshToken performs the refresh grant for a provider. Split from
+// persistence so the wire format can be tested without a database; returns
+// ok=false for providers that have no refresh flow.
+func exchangeRefreshToken(conn *models.IntegrationConnection) (tok refreshedToken, ok bool, err error) {
+	ep, supported := refreshTokenEndpoints[conn.Provider]
+	if !supported {
+		return tok, false, nil
 	}
 
 	form := url.Values{}
 	form.Set("grant_type", "refresh_token")
 	form.Set("refresh_token", conn.RefreshToken)
-	form.Set("client_id", os.Getenv(clientIDEnv))
-	form.Set("client_secret", os.Getenv(secretEnv))
+	form.Set("client_id", os.Getenv(ep.clientIDEnv))
+	form.Set("client_secret", os.Getenv(ep.secretEnv))
 
-	req, _ := http.NewRequest(http.MethodPost, tokenURL, strings.NewReader(form.Encode()))
+	req, _ := http.NewRequest(http.MethodPost, ep.tokenURL, strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	// GitHub answers form-encoded unless JSON is requested explicitly, and it
+	// reports refresh failures with a 200 — so ask for JSON and check the body.
+	req.Header.Set("Accept", "application/json")
 	raw, err := doOAuthRequest(req)
 	if err != nil {
-		return nil, err
-	}
-	var tok struct {
-		AccessToken  string `json:"access_token"`
-		RefreshToken string `json:"refresh_token"`
-		ExpiresIn    int64  `json:"expires_in"`
+		return tok, true, err
 	}
 	if json.Unmarshal(raw, &tok) != nil || tok.AccessToken == "" {
-		return nil, fmt.Errorf("%s token refresh returned no access token", conn.Provider)
+		if tok.ErrorDesc != "" {
+			return tok, true, fmt.Errorf("%s token refresh failed: %s", conn.Provider, tok.ErrorDesc)
+		}
+		return tok, true, fmt.Errorf("%s token refresh returned no access token", conn.Provider)
+	}
+	return tok, true, nil
+}
+
+func refreshConnection(db *gorm.DB, conn *models.IntegrationConnection) (*models.IntegrationConnection, error) {
+	tok, supported, err := exchangeRefreshToken(conn)
+	if !supported {
+		return conn, nil
+	}
+	if err != nil {
+		return nil, err
 	}
 
 	// A map update bypasses the model's BeforeSave hook, so encrypt the token
@@ -844,10 +887,13 @@ func refreshConnection(db *gorm.DB, conn *models.IntegrationConnection) (*models
 		conn.ExpiresAt = &exp
 		updates["expires_at"] = exp
 	}
-	if tok.RefreshToken != "" { // gitlab rotates the refresh token; google does not
+	// github and gitlab rotate the refresh token on use; google does not.
+	if tok.RefreshToken != "" {
 		conn.RefreshToken = tok.RefreshToken
 		updates["refresh_token"] = cryptobox.Encrypt(tok.RefreshToken)
 	}
-	db.Model(&models.IntegrationConnection{}).Where("id = ?", conn.ID).Updates(updates)
+	if db != nil {
+		db.Model(&models.IntegrationConnection{}).Where("id = ?", conn.ID).Updates(updates)
+	}
 	return conn, nil
 }
