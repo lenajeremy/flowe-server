@@ -1,7 +1,7 @@
 {
-  "uid": "flowe-toolcalls",
-  "title": "Flowe · Tool Calls",
-  "tags": ["flowe", "calls", "integrations"],
+  "uid": "fernary-toolcalls",
+  "title": "Fernary · Tool Calls",
+  "tags": ["fernary", "calls", "integrations"],
   "schemaVersion": 39,
   "editable": true,
   "graphTooltip": 1,
@@ -45,7 +45,7 @@
         {
           "refId": "A",
           "queryType": "instant",
-          "expr": "sum(count_over_time({service_name=\"flowe-server\"} |= `node call` |= `$workflow` |= `$run` [$__range]))"
+          "expr": "sum(count_over_time({service_name=\"fernary-server\"} |= `node call` |= `$workflow` |= `$run` [$__range]))"
         }
       ]
     },
@@ -72,7 +72,7 @@
         {
           "refId": "A",
           "queryType": "instant",
-          "expr": "sum(count_over_time({service_name=\"flowe-server\"} |= `node call` |= `status=error` |= `$workflow` |= `$run` [$__range]))"
+          "expr": "sum(count_over_time({service_name=\"fernary-server\"} |= `node call` |= `status=error` |= `$workflow` |= `$run` [$__range]))"
         }
       ]
     },
@@ -99,7 +99,7 @@
         {
           "refId": "A",
           "queryType": "instant",
-          "expr": "sum(count_over_time({service_name=\"flowe-server\"} |= `outbound http` |~ `status=(4|5)[0-9][0-9]` |= `$workflow` |= `$run` [$__range]))"
+          "expr": "sum(count_over_time({service_name=\"fernary-server\"} |= `outbound http` |~ `status=(4|5)[0-9][0-9]` |= `$workflow` |= `$run` [$__range]))"
         }
       ]
     },
@@ -116,7 +116,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (provider) (rate(flowe_integration_calls_total[5m]))",
+          "expr": "sum by (provider) (rate(fernary_integration_calls_total[5m]))",
           "legendFormat": "{{provider}}"
         }
       ]
@@ -134,7 +134,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (provider, operation) (rate(flowe_integration_calls_total{status=\"error\"}[5m]))",
+          "expr": "sum by (provider, operation) (rate(fernary_integration_calls_total{status=\"error\"}[5m]))",
           "legendFormat": "{{provider}} · {{operation}}"
         }
       ]
@@ -162,7 +162,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "{service_name=\"flowe-server\"} |= `node call` |= `$workflow` |= `$run`"
+          "expr": "{service_name=\"fernary-server\"} |= `node call` |= `$workflow` |= `$run`"
         }
       ]
     },
@@ -182,7 +182,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "{service_name=\"flowe-server\"} |= `outbound http` |= `$workflow` |= `$run`"
+          "expr": "{service_name=\"fernary-server\"} |= `outbound http` |= `$workflow` |= `$run`"
         }
       ]
     },
@@ -202,7 +202,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "{service_name=\"flowe-server\"} |~ `node call|outbound http` |~ `status=error|status=(4|5)[0-9][0-9]` |= `$workflow` |= `$run`"
+          "expr": "{service_name=\"fernary-server\"} |~ `node call|outbound http` |~ `status=error|status=(4|5)[0-9][0-9]` |= `$workflow` |= `$run`"
         }
       ]
     }

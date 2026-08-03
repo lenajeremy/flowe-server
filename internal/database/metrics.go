@@ -16,7 +16,7 @@ const startKey = "telemetry:query_start"
 const slowQueryThreshold = 200 * time.Millisecond
 
 // InstrumentQueries registers before/after callbacks on every GORM operation
-// so each query lands in the flowe.db.query.duration histogram and slow
+// so each query lands in the fernary.db.query.duration histogram and slow
 // queries surface in the logs with their statement.
 func InstrumentQueries(db *gorm.DB) {
 	register := func(op string, before func(string, func(*gorm.DB)) error, after func(string, func(*gorm.DB)) error) {

@@ -22,7 +22,7 @@ func InitServer(port int, db *database.DBClient, rdb *redis.Client) {
 	// AccessLog and Recovery run inside the span so their log lines carry
 	// trace ids (they replace gin.Logger/gin.Recovery, which only ever wrote
 	// to stdout and were invisible to Loki).
-	r.Use(otelgin.Middleware("flowe-server", otelgin.WithGinFilter(func(c *gin.Context) bool {
+	r.Use(otelgin.Middleware("fernary-server", otelgin.WithGinFilter(func(c *gin.Context) bool {
 		return c.FullPath() != "/health"
 	})))
 	r.Use(telemetry.AccessLog())

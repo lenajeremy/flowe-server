@@ -28,16 +28,16 @@ var (
 	httpActive, _ = meter.Int64UpDownCounter("http.server.active_requests",
 		metric.WithDescription("In-flight HTTP requests"), metric.WithUnit("{request}"))
 
-	workflowRuns, _ = meter.Int64Counter("flowe.workflow.runs",
+	workflowRuns, _ = meter.Int64Counter("fernary.workflow.runs",
 		metric.WithDescription("Completed workflow runs by status and trigger"), metric.WithUnit("{run}"))
-	workflowDuration, _ = meter.Float64Histogram("flowe.workflow.run.duration",
+	workflowDuration, _ = meter.Float64Histogram("fernary.workflow.run.duration",
 		metric.WithDescription("End-to-end workflow run duration"), metric.WithUnit("s"), runBuckets)
-	workflowActive, _ = meter.Int64UpDownCounter("flowe.workflow.runs.active",
+	workflowActive, _ = meter.Int64UpDownCounter("fernary.workflow.runs.active",
 		metric.WithDescription("Workflow runs currently executing"), metric.WithUnit("{run}"))
 
-	nodeExecutions, _ = meter.Int64Counter("flowe.node.executions",
+	nodeExecutions, _ = meter.Int64Counter("fernary.node.executions",
 		metric.WithDescription("Node executions by node type and outcome"), metric.WithUnit("{execution}"))
-	nodeDuration, _ = meter.Float64Histogram("flowe.node.duration",
+	nodeDuration, _ = meter.Float64Histogram("fernary.node.duration",
 		metric.WithDescription("Single node execution duration"), metric.WithUnit("s"), runBuckets)
 )
 
@@ -79,9 +79,9 @@ func RecordNodeExecution(ctx context.Context, nodeType string, execErr error, d 
 }
 
 // ObserveDBPool exposes sql.DB pool stats as gauges
-// (flowe.db.pool.connections{state=open|idle|in_use}).
+// (fernary.db.pool.connections{state=open|idle|in_use}).
 func ObserveDBPool(db *sql.DB) {
-	gauge, err := meter.Int64ObservableGauge("flowe.db.pool.connections",
+	gauge, err := meter.Int64ObservableGauge("fernary.db.pool.connections",
 		metric.WithDescription("Database connection pool state"), metric.WithUnit("{connection}"))
 	if err != nil {
 		return

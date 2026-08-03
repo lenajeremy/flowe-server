@@ -20,51 +20,51 @@ var dbBuckets = metric.WithExplicitBucketBoundaries(
 	0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5)
 
 var (
-	llmCalls, _ = meter.Int64Counter("flowe.llm.calls",
+	llmCalls, _ = meter.Int64Counter("fernary.llm.calls",
 		metric.WithDescription("LLM API calls by provider, model and outcome"), metric.WithUnit("{call}"))
-	llmDuration, _ = meter.Float64Histogram("flowe.llm.duration",
+	llmDuration, _ = meter.Float64Histogram("fernary.llm.duration",
 		metric.WithDescription("LLM API call duration"), metric.WithUnit("s"), runBuckets)
 
-	integrationCalls, _ = meter.Int64Counter("flowe.integration.calls",
+	integrationCalls, _ = meter.Int64Counter("fernary.integration.calls",
 		metric.WithDescription("Integration node operations by provider, op and outcome"), metric.WithUnit("{call}"))
-	integrationDuration, _ = meter.Float64Histogram("flowe.integration.duration",
+	integrationDuration, _ = meter.Float64Histogram("fernary.integration.duration",
 		metric.WithDescription("Integration node operation duration"), metric.WithUnit("s"), runBuckets)
 
-	authEvents, _ = meter.Int64Counter("flowe.auth.events",
+	authEvents, _ = meter.Int64Counter("fernary.auth.events",
 		metric.WithDescription("Auth flow events (login_start, login_verify, oauth, logout, unauthorized)"), metric.WithUnit("{event}"))
-	rateLimitHits, _ = meter.Int64Counter("flowe.ratelimit.hits",
+	rateLimitHits, _ = meter.Int64Counter("fernary.ratelimit.hits",
 		metric.WithDescription("Requests rejected by a rate limiter"), metric.WithUnit("{hit}"))
 
-	sseStreams, _ = meter.Int64UpDownCounter("flowe.sse.streams",
+	sseStreams, _ = meter.Int64UpDownCounter("fernary.sse.streams",
 		metric.WithDescription("Open SSE streams by kind"), metric.WithUnit("{stream}"))
-	runEvents, _ = meter.Int64Counter("flowe.run.events",
+	runEvents, _ = meter.Int64Counter("fernary.run.events",
 		metric.WithDescription("Workflow execution events emitted, by type"), metric.WithUnit("{event}"))
 
-	webhooksReceived, _ = meter.Int64Counter("flowe.webhooks.received",
+	webhooksReceived, _ = meter.Int64Counter("fernary.webhooks.received",
 		metric.WithDescription("Inbound webhook deliveries by outcome"), metric.WithUnit("{delivery}"))
-	scheduleFires, _ = meter.Int64Counter("flowe.schedule.fires",
+	scheduleFires, _ = meter.Int64Counter("fernary.schedule.fires",
 		metric.WithDescription("Scheduled trigger fires by outcome"), metric.WithUnit("{fire}"))
 
-	approvalsPending, _ = meter.Int64UpDownCounter("flowe.approvals.pending",
+	approvalsPending, _ = meter.Int64UpDownCounter("fernary.approvals.pending",
 		metric.WithDescription("Human-approval nodes currently waiting"), metric.WithUnit("{approval}"))
-	approvalWait, _ = meter.Float64Histogram("flowe.approval.wait",
+	approvalWait, _ = meter.Float64Histogram("fernary.approval.wait",
 		metric.WithDescription("How long approval nodes waited for a decision"), metric.WithUnit("s"), runBuckets)
-	approvalsResolved, _ = meter.Int64Counter("flowe.approvals.resolved",
+	approvalsResolved, _ = meter.Int64Counter("fernary.approvals.resolved",
 		metric.WithDescription("Approval outcomes (approved, rejected, timeout, cancelled)"), metric.WithUnit("{approval}"))
 
-	emailsSent, _ = meter.Int64Counter("flowe.emails.sent",
+	emailsSent, _ = meter.Int64Counter("fernary.emails.sent",
 		metric.WithDescription("Emails sent by kind and outcome"), metric.WithUnit("{email}"))
-	templateMisses, _ = meter.Int64Counter("flowe.template.misses",
+	templateMisses, _ = meter.Int64Counter("fernary.template.misses",
 		metric.WithDescription("Template references to a node with no output ([no output from …])"), metric.WithUnit("{miss}"))
-	panicsRecovered, _ = meter.Int64Counter("flowe.panics",
+	panicsRecovered, _ = meter.Int64Counter("fernary.panics",
 		metric.WithDescription("Panics recovered by HTTP middleware"), metric.WithUnit("{panic}"))
 
-	dbQueryDuration, _ = meter.Float64Histogram("flowe.db.query.duration",
+	dbQueryDuration, _ = meter.Float64Histogram("fernary.db.query.duration",
 		metric.WithDescription("GORM query duration by operation"), metric.WithUnit("s"), dbBuckets)
 
-	hubSubscribers, _ = meter.Int64UpDownCounter("flowe.hub.subscribers",
+	hubSubscribers, _ = meter.Int64UpDownCounter("fernary.hub.subscribers",
 		metric.WithDescription("Live pub/sub subscribers by hub"), metric.WithUnit("{subscriber}"))
-	hubDropped, _ = meter.Int64Counter("flowe.hub.dropped",
+	hubDropped, _ = meter.Int64Counter("fernary.hub.dropped",
 		metric.WithDescription("Events dropped because a subscriber channel was full"), metric.WithUnit("{event}"))
 )
 

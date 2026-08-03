@@ -57,7 +57,7 @@ func Setup(ctx context.Context) (func(context.Context) error, slog.Handler) {
 		resource.WithFromEnv(),
 		resource.WithTelemetrySDK(),
 		resource.WithAttributes(
-			semconv.ServiceName(envOr("OTEL_SERVICE_NAME", "flowe-server")),
+			semconv.ServiceName(envOr("OTEL_SERVICE_NAME", "fernary-server")),
 			semconv.ServiceInstanceID(hostname),
 			attribute.String("deployment.environment", envOr("RAILWAY_ENVIRONMENT", "local")),
 		),

@@ -1,7 +1,7 @@
 {
-  "uid": "flowe-workflows",
-  "title": "Flowe · Workflow Engine",
-  "tags": ["flowe"],
+  "uid": "fernary-workflows",
+  "title": "Fernary · Workflow Engine",
+  "tags": ["fernary"],
   "schemaVersion": 39,
   "editable": true,
   "graphTooltip": 1,
@@ -26,7 +26,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(increase(flowe_workflow_runs_total{job=\"flowe-server\"}[24h]))",
+          "expr": "sum(increase(fernary_workflow_runs_total{job=\"fernary-server\"}[24h]))",
           "instant": true
         }
       ]
@@ -59,7 +59,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(increase(flowe_workflow_runs_total{job=\"flowe-server\", status=\"error\"}[24h]))",
+          "expr": "sum(increase(fernary_workflow_runs_total{job=\"fernary-server\", status=\"error\"}[24h]))",
           "instant": true
         }
       ]
@@ -82,7 +82,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(flowe_workflow_runs_active{job=\"flowe-server\"})"
+          "expr": "sum(fernary_workflow_runs_active{job=\"fernary-server\"})"
         }
       ]
     },
@@ -99,7 +99,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (status) (rate(flowe_workflow_runs_total{job=\"flowe-server\"}[$__rate_interval])) * 60",
+          "expr": "sum by (status) (rate(fernary_workflow_runs_total{job=\"fernary-server\"}[$__rate_interval])) * 60",
           "legendFormat": "{{status}}"
         }
       ]
@@ -117,7 +117,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (trigger) (rate(flowe_workflow_runs_total{job=\"flowe-server\"}[$__rate_interval])) * 60",
+          "expr": "sum by (trigger) (rate(fernary_workflow_runs_total{job=\"fernary-server\"}[$__rate_interval])) * 60",
           "legendFormat": "{{trigger}}"
         }
       ]
@@ -135,12 +135,12 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "histogram_quantile(0.50, sum by (le) (rate(flowe_workflow_run_duration_seconds_bucket{job=\"flowe-server\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(fernary_workflow_run_duration_seconds_bucket{job=\"fernary-server\"}[$__rate_interval])))",
           "legendFormat": "p50"
         },
         {
           "refId": "B",
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(flowe_workflow_run_duration_seconds_bucket{job=\"flowe-server\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(fernary_workflow_run_duration_seconds_bucket{job=\"fernary-server\"}[$__rate_interval])))",
           "legendFormat": "p95"
         }
       ]
@@ -158,7 +158,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (node_type) (rate(flowe_node_executions_total{job=\"flowe-server\"}[$__rate_interval]))",
+          "expr": "sum by (node_type) (rate(fernary_node_executions_total{job=\"fernary-server\"}[$__rate_interval]))",
           "legendFormat": "{{node_type}}"
         }
       ]
@@ -176,7 +176,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "histogram_quantile(0.95, sum by (node_type, le) (rate(flowe_node_duration_seconds_bucket{job=\"flowe-server\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.95, sum by (node_type, le) (rate(fernary_node_duration_seconds_bucket{job=\"fernary-server\"}[$__rate_interval])))",
           "legendFormat": "{{node_type}}"
         }
       ]
@@ -194,7 +194,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "100 * sum by (node_type) (rate(flowe_node_executions_total{job=\"flowe-server\", status=\"error\"}[$__rate_interval])) / sum by (node_type) (rate(flowe_node_executions_total{job=\"flowe-server\"}[$__rate_interval]))",
+          "expr": "100 * sum by (node_type) (rate(fernary_node_executions_total{job=\"fernary-server\", status=\"error\"}[$__rate_interval])) / sum by (node_type) (rate(fernary_node_executions_total{job=\"fernary-server\"}[$__rate_interval]))",
           "legendFormat": "{{node_type}}"
         }
       ]
@@ -212,7 +212,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (server_address) (rate(http_client_request_duration_seconds_count{job=\"flowe-server\"}[$__rate_interval]))",
+          "expr": "sum by (server_address) (rate(http_client_request_duration_seconds_count{job=\"fernary-server\"}[$__rate_interval]))",
           "legendFormat": "{{server_address}}"
         }
       ]
@@ -230,7 +230,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "histogram_quantile(0.95, sum by (server_address, le) (rate(http_client_request_duration_seconds_bucket{job=\"flowe-server\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.95, sum by (server_address, le) (rate(http_client_request_duration_seconds_bucket{job=\"fernary-server\"}[$__rate_interval])))",
           "legendFormat": "{{server_address}}"
         }
       ]
@@ -250,7 +250,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "{service_name=\"flowe-server\"} | severity_text=~\"ERROR|WARN\""
+          "expr": "{service_name=\"fernary-server\"} | severity_text=~\"ERROR|WARN\""
         }
       ]
     },
@@ -267,7 +267,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (model) (rate(flowe_llm_calls_total{job=\"flowe-server\"}[$__rate_interval])) * 60",
+          "expr": "sum by (model) (rate(fernary_llm_calls_total{job=\"fernary-server\"}[$__rate_interval])) * 60",
           "legendFormat": "{{model}}"
         }
       ]
@@ -285,7 +285,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "histogram_quantile(0.95, sum by (model, le) (rate(flowe_llm_duration_seconds_bucket{job=\"flowe-server\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.95, sum by (model, le) (rate(fernary_llm_duration_seconds_bucket{job=\"fernary-server\"}[$__rate_interval])))",
           "legendFormat": "{{model}}"
         }
       ]
@@ -303,7 +303,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (provider, model) (rate(flowe_llm_calls_total{job=\"flowe-server\", status=\"error\"}[$__rate_interval])) * 60",
+          "expr": "sum by (provider, model) (rate(fernary_llm_calls_total{job=\"fernary-server\", status=\"error\"}[$__rate_interval])) * 60",
           "legendFormat": "{{provider}}/{{model}}"
         }
       ]
@@ -321,7 +321,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (provider, operation) (rate(flowe_integration_calls_total{job=\"flowe-server\"}[$__rate_interval])) * 60",
+          "expr": "sum by (provider, operation) (rate(fernary_integration_calls_total{job=\"fernary-server\"}[$__rate_interval])) * 60",
           "legendFormat": "{{provider}}/{{operation}}"
         }
       ]
@@ -339,7 +339,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "100 * sum by (provider) (rate(flowe_integration_calls_total{job=\"flowe-server\", status=\"error\"}[$__rate_interval])) / sum by (provider) (rate(flowe_integration_calls_total{job=\"flowe-server\"}[$__rate_interval]))",
+          "expr": "100 * sum by (provider) (rate(fernary_integration_calls_total{job=\"fernary-server\", status=\"error\"}[$__rate_interval])) / sum by (provider) (rate(fernary_integration_calls_total{job=\"fernary-server\"}[$__rate_interval]))",
           "legendFormat": "{{provider}}"
         }
       ]
@@ -357,7 +357,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "histogram_quantile(0.95, sum by (provider, le) (rate(flowe_integration_duration_seconds_bucket{job=\"flowe-server\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.95, sum by (provider, le) (rate(fernary_integration_duration_seconds_bucket{job=\"fernary-server\"}[$__rate_interval])))",
           "legendFormat": "{{provider}}"
         }
       ]
@@ -390,7 +390,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(flowe_approvals_pending{job=\"flowe-server\"}) or vector(0)"
+          "expr": "sum(fernary_approvals_pending{job=\"fernary-server\"}) or vector(0)"
         }
       ]
     },
@@ -407,7 +407,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (result) (rate(flowe_approvals_resolved_total{job=\"flowe-server\"}[$__rate_interval])) * 60",
+          "expr": "sum by (result) (rate(fernary_approvals_resolved_total{job=\"fernary-server\"}[$__rate_interval])) * 60",
           "legendFormat": "{{result}}"
         }
       ]
@@ -425,7 +425,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(flowe_approval_wait_seconds_bucket{job=\"flowe-server\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(fernary_approval_wait_seconds_bucket{job=\"fernary-server\"}[$__rate_interval])))",
           "legendFormat": "p95"
         }
       ]
@@ -443,7 +443,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (type) (rate(flowe_run_events_total{job=\"flowe-server\"}[$__rate_interval])) * 60",
+          "expr": "sum by (type) (rate(fernary_run_events_total{job=\"fernary-server\"}[$__rate_interval])) * 60",
           "legendFormat": "{{type}}"
         }
       ]
@@ -465,7 +465,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (kind) (flowe_sse_streams{job=\"flowe-server\"})",
+          "expr": "sum by (kind) (fernary_sse_streams{job=\"fernary-server\"})",
           "legendFormat": "{{kind}}"
         }
       ]
@@ -483,12 +483,12 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (status) (rate(flowe_webhooks_received_total{job=\"flowe-server\"}[$__rate_interval])) * 60",
+          "expr": "sum by (status) (rate(fernary_webhooks_received_total{job=\"fernary-server\"}[$__rate_interval])) * 60",
           "legendFormat": "webhook · {{status}}"
         },
         {
           "refId": "B",
-          "expr": "sum by (status) (rate(flowe_schedule_fires_total{job=\"flowe-server\"}[$__rate_interval])) * 60",
+          "expr": "sum by (status) (rate(fernary_schedule_fires_total{job=\"fernary-server\"}[$__rate_interval])) * 60",
           "legendFormat": "schedule · {{status}}"
         }
       ]
@@ -506,7 +506,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (kind, status) (rate(flowe_emails_sent_total{job=\"flowe-server\"}[$__rate_interval])) * 60",
+          "expr": "sum by (kind, status) (rate(fernary_emails_sent_total{job=\"fernary-server\"}[$__rate_interval])) * 60",
           "legendFormat": "{{kind}}/{{status}}"
         }
       ]

@@ -11,7 +11,7 @@ services:
       - POSTGRES_HOST=postgres
       - REDIS_HOST=redis
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318
-      - OTEL_SERVICE_NAME=flowe-server
+      - OTEL_SERVICE_NAME=fernary-server
     volumes:
       - .:/app
       - go_cache:/root/.cache/go-build

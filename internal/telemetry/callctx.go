@@ -65,14 +65,14 @@ func (cc CallContext) SpanAttributes() []attribute.KeyValue {
 			out = append(out, attribute.String(k, v))
 		}
 	}
-	add("flowe.workflow.id", cc.WorkflowID)
-	add("flowe.workflow.name", cc.WorkflowName)
-	add("flowe.run.id", cc.RunID)
-	add("flowe.trigger", cc.Trigger)
-	add("flowe.node.id", cc.NodeID)
-	add("flowe.node.label", cc.NodeLabel)
-	add("flowe.node.type", cc.NodeType)
-	add("flowe.integration.op", cc.Op)
+	add("fernary.workflow.id", cc.WorkflowID)
+	add("fernary.workflow.name", cc.WorkflowName)
+	add("fernary.run.id", cc.RunID)
+	add("fernary.trigger", cc.Trigger)
+	add("fernary.node.id", cc.NodeID)
+	add("fernary.node.label", cc.NodeLabel)
+	add("fernary.node.type", cc.NodeType)
+	add("fernary.integration.op", cc.Op)
 	return out
 }
 

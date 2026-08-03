@@ -204,7 +204,7 @@ func runGoogleDrive(ctx context.Context, token string, d FlowNodeData, outputs m
 // gdriveMultipartUpload creates a file with content in one multipart request.
 func gdriveMultipartUpload(ctx context.Context, token string, meta map[string]any, mime, content string) (string, error) {
 	metaJSON, _ := json.Marshal(meta)
-	boundary := "flowe-upload-boundary"
+	boundary := "fernary-upload-boundary"
 	var body strings.Builder
 	body.WriteString("--" + boundary + "\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n")
 	body.Write(metaJSON)

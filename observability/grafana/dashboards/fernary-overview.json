@@ -1,7 +1,7 @@
 {
-  "uid": "flowe-overview",
-  "title": "Flowe · Service Overview",
-  "tags": ["flowe"],
+  "uid": "fernary-overview",
+  "title": "Fernary · Service Overview",
+  "tags": ["fernary"],
   "schemaVersion": 39,
   "editable": true,
   "graphTooltip": 1,
@@ -21,7 +21,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (http_route) (rate(http_server_request_duration_seconds_count{job=\"flowe-server\"}[$__rate_interval]))",
+          "expr": "sum by (http_route) (rate(http_server_request_duration_seconds_count{job=\"fernary-server\"}[$__rate_interval]))",
           "legendFormat": "{{http_route}}"
         }
       ]
@@ -39,17 +39,17 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "histogram_quantile(0.50, sum by (le) (rate(http_server_request_duration_seconds_bucket{job=\"flowe-server\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(http_server_request_duration_seconds_bucket{job=\"fernary-server\"}[$__rate_interval])))",
           "legendFormat": "p50"
         },
         {
           "refId": "B",
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(http_server_request_duration_seconds_bucket{job=\"flowe-server\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(http_server_request_duration_seconds_bucket{job=\"fernary-server\"}[$__rate_interval])))",
           "legendFormat": "p95"
         },
         {
           "refId": "C",
-          "expr": "histogram_quantile(0.99, sum by (le) (rate(http_server_request_duration_seconds_bucket{job=\"flowe-server\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(http_server_request_duration_seconds_bucket{job=\"fernary-server\"}[$__rate_interval])))",
           "legendFormat": "p99"
         }
       ]
@@ -67,7 +67,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "100 * (sum(rate(http_server_request_duration_seconds_count{job=\"flowe-server\", http_response_status_code=~\"5..\"}[$__rate_interval])) or vector(0)) / sum(rate(http_server_request_duration_seconds_count{job=\"flowe-server\"}[$__rate_interval]))",
+          "expr": "100 * (sum(rate(http_server_request_duration_seconds_count{job=\"fernary-server\", http_response_status_code=~\"5..\"}[$__rate_interval])) or vector(0)) / sum(rate(http_server_request_duration_seconds_count{job=\"fernary-server\"}[$__rate_interval]))",
           "legendFormat": "5xx %"
         }
       ]
@@ -85,7 +85,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(http_server_active_requests{job=\"flowe-server\"})",
+          "expr": "sum(http_server_active_requests{job=\"fernary-server\"})",
           "legendFormat": "active"
         }
       ]
@@ -103,7 +103,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "histogram_quantile(0.95, sum by (http_route, le) (rate(http_server_request_duration_seconds_bucket{job=\"flowe-server\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.95, sum by (http_route, le) (rate(http_server_request_duration_seconds_bucket{job=\"fernary-server\"}[$__rate_interval])))",
           "legendFormat": "{{http_route}}"
         }
       ]
@@ -121,7 +121,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "go_goroutine_count{job=\"flowe-server\"}",
+          "expr": "go_goroutine_count{job=\"fernary-server\"}",
           "legendFormat": "goroutines"
         }
       ]
@@ -143,7 +143,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (go_memory_type) (go_memory_used_bytes{job=\"flowe-server\"})",
+          "expr": "sum by (go_memory_type) (go_memory_used_bytes{job=\"fernary-server\"})",
           "legendFormat": "{{go_memory_type}}"
         }
       ]
@@ -161,7 +161,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "flowe_db_pool_connections{job=\"flowe-server\"}",
+          "expr": "fernary_db_pool_connections{job=\"fernary-server\"}",
           "legendFormat": "{{state}}"
         }
       ]
@@ -181,7 +181,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "{service_name=\"flowe-server\"}"
+          "expr": "{service_name=\"fernary-server\"}"
         }
       ]
     },
@@ -200,7 +200,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "{service_name=\"flowe-server\"} | severity_text=~\"ERROR|WARN\""
+          "expr": "{service_name=\"fernary-server\"} | severity_text=~\"ERROR|WARN\""
         }
       ]
     },
@@ -217,7 +217,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (http_response_status_code) (rate(http_server_request_duration_seconds_count{job=\"flowe-server\"}[$__rate_interval]))",
+          "expr": "sum by (http_response_status_code) (rate(http_server_request_duration_seconds_count{job=\"fernary-server\"}[$__rate_interval]))",
           "legendFormat": "{{http_response_status_code}}"
         }
       ]
@@ -269,7 +269,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (detected_level) (count_over_time({service_name=\"flowe-server\"} [$__auto]))",
+          "expr": "sum by (detected_level) (count_over_time({service_name=\"fernary-server\"} [$__auto]))",
           "legendFormat": "{{detected_level}}"
         }
       ]
@@ -287,7 +287,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "histogram_quantile(0.95, sum by (operation, le) (rate(flowe_db_query_duration_seconds_bucket{job=\"flowe-server\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.95, sum by (operation, le) (rate(fernary_db_query_duration_seconds_bucket{job=\"fernary-server\"}[$__rate_interval])))",
           "legendFormat": "{{operation}}"
         }
       ]
@@ -305,7 +305,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (event) (rate(flowe_auth_events_total{job=\"flowe-server\"}[$__rate_interval]))",
+          "expr": "sum by (event) (rate(fernary_auth_events_total{job=\"fernary-server\"}[$__rate_interval]))",
           "legendFormat": "{{event}}"
         }
       ]

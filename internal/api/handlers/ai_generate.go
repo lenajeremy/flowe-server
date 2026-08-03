@@ -749,7 +749,7 @@ func (h *WorkflowHandler) AIGenerate(c *gin.Context) {
 	start := time.Now()
 	slog.InfoContext(c.Request.Context(), "ai generate requested",
 		"model", model.ID, "provider", model.Provider, "prompt_chars", len(req.Prompt))
-	telemetry.SpanAttrs(c.Request.Context(), attribute.String("flowe.ai.model", model.ID))
+	telemetry.SpanAttrs(c.Request.Context(), attribute.String("fernary.ai.model", model.ID))
 
 	// Set up SSE
 	c.Header("Content-Type", "text/event-stream")

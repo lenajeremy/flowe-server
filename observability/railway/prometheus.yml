@@ -2,7 +2,7 @@ global:
   scrape_interval: 5s
 
 scrape_configs:
-  # honor_labels keeps job="flowe-server" (set by the collector from
+  # honor_labels keeps job="fernary-server" (set by the collector from
   # service.name) instead of overwriting it with this scrape job's name.
   - job_name: otel-collector
     honor_labels: true

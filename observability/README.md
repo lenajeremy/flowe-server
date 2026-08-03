@@ -1,6 +1,6 @@
-# Flowe Observability Stack
+# Fernary Observability Stack
 
-Local LGTM-style stack (Loki, Grafana, Tempo, Prometheus + OTel Collector) for the Flowe Go server.
+Local LGTM-style stack (Loki, Grafana, Tempo, Prometheus + OTel Collector) for the Fernary Go server.
 
 ## What runs where
 
@@ -18,18 +18,18 @@ Local LGTM-style stack (Loki, Grafana, Tempo, Prometheus + OTel Collector) for t
 docker compose up -d otel-collector prometheus loki tempo grafana
 ```
 
-Grafana: http://localhost:3000 (no login — anonymous Admin). Datasources (Prometheus, Loki, Tempo) and the three dashboards in the **Flowe** folder are provisioned automatically:
+Grafana: http://localhost:3000 (no login — anonymous Admin). Datasources (Prometheus, Loki, Tempo) and the three dashboards in the **Fernary** folder are provisioned automatically:
 
-- **Flowe · Service Overview** (`flowe-overview`) — HTTP rate/errors/latency, status codes, runtime, DB pool/query p95, auth events, logs
-- **Flowe · Workflow Engine** (`flowe-workflows`) — workflow runs, node executions, LLM & integration calls, approvals, run events, SSE streams, webhooks/schedules, emails, outbound HTTP, error logs
-- **Flowe · Logs & Debugging** (`flowe-debug`) — log volume/tails (access, outbound, workflow lifecycle, slow DB), status classes, 4xx/5xx by route, rate limits, unauthorized events, panics/drops/misses stats
+- **Fernary · Service Overview** (`fernary-overview`) — HTTP rate/errors/latency, status codes, runtime, DB pool/query p95, auth events, logs
+- **Fernary · Workflow Engine** (`fernary-workflows`) — workflow runs, node executions, LLM & integration calls, approvals, run events, SSE streams, webhooks/schedules, emails, outbound HTTP, error logs
+- **Fernary · Logs & Debugging** (`fernary-debug`) — log volume/tails (access, outbound, workflow lifecycle, slow DB), status classes, 4xx/5xx by route, rate limits, unauthorized events, panics/drops/misses stats
 
 ## How the app connects
 
 The `app` service exports OTLP over HTTP to the collector inside the compose network:
 
 - `OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318`
-- `OTEL_SERVICE_NAME=flowe-server`
+- `OTEL_SERVICE_NAME=fernary-server`
 
 Signal flow:
 
@@ -39,6 +39,6 @@ app ──OTLP http──▶ otel-collector ──┬─▶ tempo:4317        (t
                                     └─▶ :8889 ◀─scrape─ prometheus (metrics)
 ```
 
-Prometheus scrapes the collector with `honor_labels: true`, so series keep `job="flowe-server"` (derived from `service.name`). Query logs in Loki with `{service_name="flowe-server"}`.
+Prometheus scrapes the collector with `honor_labels: true`, so series keep `job="fernary-server"` (derived from `service.name`). Query logs in Loki with `{service_name="fernary-server"}`.
 
 Config files live in this directory: `otel-collector.yaml`, `prometheus.yml`, `loki.yaml`, `tempo.yaml`, and `grafana/` (provisioning + dashboard JSON).

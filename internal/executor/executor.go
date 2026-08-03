@@ -447,8 +447,8 @@ func executeNode(ctx context.Context, node WorkflowASTNode, outputs map[string]s
 	// type. Centralising here covers all 13 providers plus future ones.
 	if op := node.Data.IntegrationOp; op != "" {
 		telemetry.SpanAttrs(ctx,
-			attribute.String("flowe.integration.provider", string(node.Data.NodeType)),
-			attribute.String("flowe.integration.op", op))
+			attribute.String("fernary.integration.provider", string(node.Data.NodeType)),
+			attribute.String("fernary.integration.op", op))
 		telemetry.RecordIntegrationCall(ctx, string(node.Data.NodeType), op, err, time.Since(start))
 	}
 
@@ -1151,10 +1151,10 @@ func RunWorkflow(ctx context.Context, workflow WorkflowAST, keys APIKeys, runID,
 	trigger := triggerFromContext(ctx)
 	ctx, span := telemetry.Tracer.Start(ctx, "workflow.run",
 		trace.WithAttributes(
-			attribute.String("flowe.run.id", runID),
-			attribute.String("flowe.workflow.name", workflow.Name),
-			attribute.String("flowe.trigger", trigger),
-			attribute.Int("flowe.workflow.nodes", len(workflow.Nodes)),
+			attribute.String("fernary.run.id", runID),
+			attribute.String("fernary.workflow.name", workflow.Name),
+			attribute.String("fernary.trigger", trigger),
+			attribute.Int("fernary.workflow.nodes", len(workflow.Nodes)),
 		))
 	defer span.End()
 
