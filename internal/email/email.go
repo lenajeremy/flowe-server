@@ -3,10 +3,10 @@
 //
 // Two shells are offered:
 //
-//   - WrapBrandless — a clean, neutral, light card with no mention of Flowe.
+//   - WrapBrandless — a clean, neutral, light card with no mention of Fernary.
 //     Used for mail the *user's workflow* sends (the Email node), whose author
 //     is the sender, not us.
-//   - WrapBranded — Flowe's own dark, branded card. Used for platform mail
+//   - WrapBranded — Fernary's own dark, branded card. Used for platform mail
 //     (sign-in codes, approval requests).
 //
 // Email-node bodies are authored as Markdown, converted with RenderMarkdown,
@@ -70,12 +70,12 @@ func WrapBrandless(contentHTML, preview string) string {
 	return shell(lightPalette, contentHTML, preview)
 }
 
-// WrapBranded wraps an HTML fragment in Flowe's branded shell (wordmark
+// WrapBranded wraps an HTML fragment in Fernary's branded shell (wordmark
 // header + footer). preview is the inbox preheader text.
 func WrapBranded(contentHTML, preview string) string {
 	p := darkPalette
-	p.header = `<div style="text-align:center;margin:0 0 28px"><span style="font-size:19px;font-weight:700;letter-spacing:-0.02em;color:#ffffff">Flowe</span></div>`
-	p.footer = `<p style="color:#667179;font-size:11px;text-align:center;margin:28px 0 0;line-height:1.5">Sent by Flowe · Automation for everyone</p>`
+	p.header = `<div style="text-align:center;margin:0 0 28px"><span style="font-size:19px;font-weight:700;letter-spacing:-0.02em;color:#ffffff">Fernary</span></div>`
+	p.footer = `<p style="color:#667179;font-size:11px;text-align:center;margin:28px 0 0;line-height:1.5">Sent by Fernary · Automation for everyone</p>`
 	return shell(p, contentHTML, preview)
 }
 

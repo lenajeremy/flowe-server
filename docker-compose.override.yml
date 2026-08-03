@@ -1,0 +1,8 @@
+# Local-only override (not committed). Remaps the postgres host port to avoid a
+# clash with another project already bound to 5432. The app reaches postgres via
+# the internal compose network (POSTGRES_HOST=postgres), so this only affects
+# host-side access (psql/pgweb from your machine → localhost:5434).
+services:
+  postgres:
+    ports: !override
+      - "5434:5432"

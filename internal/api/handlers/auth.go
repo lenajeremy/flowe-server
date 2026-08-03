@@ -68,7 +68,7 @@ func authFromEmail() string {
 	if v := os.Getenv("AUTH_FROM_EMAIL"); v != "" {
 		return v
 	}
-	return "workflow-ai <noreply@usecelery.io>"
+	return "Fernary <noreply@usecelery.io>"
 }
 
 func publicUser(u *models.User) gin.H {
@@ -172,19 +172,19 @@ Or click this link to sign in instantly:
 
 If you didn't request this, you can safely ignore this email.`, code, magicLink)
 
-	inner := fmt.Sprintf(`<h2 style="margin-top:0;text-align:center">Sign in to Flowe</h2>
+	inner := fmt.Sprintf(`<h2 style="margin-top:0;text-align:center">Sign in to Fernary</h2>
 <p style="text-align:center;color:#667179;font-size:13px;margin:0 0 24px">Enter this code — it expires in 10 minutes.</p>
 <p style="text-align:center;color:#ffffff;font-size:32px;font-family:ui-monospace,monospace;letter-spacing:8px;margin:0 0 8px">%s</p>
 %s
 <p style="text-align:center;color:#667179;font-size:11px;margin:24px 0 0">If you didn't request this, you can safely ignore this email.</p>`,
 		code, mail.Button(magicLink, "Sign in instantly"))
-	html := mail.WrapBranded(inner, "Your Flowe sign-in code")
+	html := mail.WrapBranded(inner, "Your Fernary sign-in code")
 
 	client := resend.NewClient(apiKey)
 	_, err := client.Emails.Send(&resend.SendEmailRequest{
 		From:    authFromEmail(),
 		To:      []string{email},
-		Subject: code + " is your Flowe sign-in code",
+		Subject: code + " is your Fernary sign-in code",
 		Text:    text,
 		Html:    html,
 	})
