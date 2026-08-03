@@ -64,13 +64,6 @@ func frontendURL() string {
 	return raw
 }
 
-func authFromEmail() string {
-	if v := os.Getenv("AUTH_FROM_EMAIL"); v != "" {
-		return v
-	}
-	return "Fernary <noreply@usecelery.io>"
-}
-
 func publicUser(u *models.User) gin.H {
 	return gin.H{
 		"id":         u.ID.String(),
@@ -172,17 +165,26 @@ Or click this link to sign in instantly:
 
 If you didn't request this, you can safely ignore this email.`, code, magicLink)
 
+	// The code sits in a bordered slab so it reads as a thing to copy rather than
+	// as decoration, and stays legible if a client strips the background colour.
+	// Colours come from the branded palette (mail.Muted/Heading) so this can't
+	// drift from the shell around it the way the old hardcoded greys did.
 	inner := fmt.Sprintf(`<h2 style="margin-top:0;text-align:center">Sign in to Fernary</h2>
-<p style="text-align:center;color:#667179;font-size:13px;margin:0 0 24px">Enter this code — it expires in 10 minutes.</p>
-<p style="text-align:center;color:#ffffff;font-size:32px;font-family:ui-monospace,monospace;letter-spacing:8px;margin:0 0 8px">%s</p>
+<p style="text-align:center;color:%s;font-size:13px;margin:0 0 22px">Enter this code — it expires in 10 minutes.</p>
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="width:auto;margin:0 auto 4px"><tr>
+<td align="center" style="background:%s;border:1px solid %s;border-radius:10px;padding:14px 26px;text-align:center">
+<span style="color:%s;font-size:30px;font-weight:600;font-family:'Google Sans Code',ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:9px">%s</span>
+</td></tr></table>
 %s
-<p style="text-align:center;color:#667179;font-size:11px;margin:24px 0 0">If you didn't request this, you can safely ignore this email.</p>`,
-		code, mail.Button(magicLink, "Sign in instantly"))
+<p style="text-align:center;color:%s;font-size:11px;margin:26px 0 0">If you didn't request this, you can safely ignore this email — nobody can sign in without the code above.</p>`,
+		mail.Muted, mail.CodeSlabBg, mail.Rule, mail.Heading, code,
+		mail.Button(magicLink, "Sign in instantly"),
+		mail.Muted)
 	html := mail.WrapBranded(inner, "Your Fernary sign-in code")
 
 	client := resend.NewClient(apiKey)
 	_, err := client.Emails.Send(&resend.SendEmailRequest{
-		From:    authFromEmail(),
+		From:    mail.FromAddress(),
 		To:      []string{email},
 		Subject: code + " is your Fernary sign-in code",
 		Text:    text,

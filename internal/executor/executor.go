@@ -677,7 +677,9 @@ func runNodeInner(ctx context.Context, node WorkflowASTNode, outputs map[string]
 		// Text keeps the raw Markdown as a readable plain-text fallback.
 		htmlBody := email.WrapBrandless(email.RenderMarkdown(body), subject)
 		client := resend.NewClient(resendKey)
-		from := "Fernary <noreply@usecelery.io>"
+		// Same verified sending domain as platform mail — the shell is unbranded
+		// but the envelope still has to come from a domain we own.
+		from := email.FromAddress()
 		if len(recipients) == 1 {
 			sent, err := client.Emails.Send(&resend.SendEmailRequest{
 				From: from, To: recipients, Subject: subject, Text: body, Html: htmlBody,
@@ -748,7 +750,7 @@ func runNodeInner(ctx context.Context, node WorkflowASTNode, outputs map[string]
 				htmlBody := email.Action("Action required", message, upstreamOutput, runURL, "Review & respond", node.Data.Label)
 				client := resend.NewClient(resendKey)
 				_, mailErr := client.Emails.Send(&resend.SendEmailRequest{
-					From:    "Fernary <noreply@usecelery.io>",
+					From:    email.FromAddress(),
 					To:      []string{d.ApprovalEmail},
 					Subject: "Action Required: " + node.Data.Label,
 					Text:    emailText,
