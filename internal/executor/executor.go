@@ -42,6 +42,31 @@ func triggerFromContext(ctx context.Context) string {
 	return "manual"
 }
 
+// Approval waits are bounded, always. An unbounded gate strands the run
+// (holding a goroutine) and, on a schedule, strands a fresh one every cycle
+// with nothing surfacing that they're waiting — so a missing or oversized
+// timeout is corrected here rather than trusted from node data.
+const (
+	// DefaultApprovalTimeout covers "someone will look at this tomorrow" and is
+	// applied to nodes saved before timeouts were mandatory (stored as 0).
+	DefaultApprovalTimeout = 24 * 60 * 60
+	// MaxApprovalTimeout is the ceiling any approval may wait.
+	MaxApprovalTimeout = 3 * 24 * 60 * 60
+)
+
+// NormalizeApprovalTimeout resolves a node's configured wait (in seconds) to an
+// enforceable one: absent/invalid becomes the default, anything beyond the
+// ceiling is capped.
+func NormalizeApprovalTimeout(secs int) int {
+	if secs <= 0 {
+		return DefaultApprovalTimeout
+	}
+	if secs > MaxApprovalTimeout {
+		return MaxApprovalTimeout
+	}
+	return secs
+}
+
 type workflowIDCtxKey struct{}
 
 // WithWorkflowID tags a run with the saved workflow it belongs to, so every
@@ -728,10 +753,7 @@ func runNodeInner(ctx context.Context, node WorkflowASTNode, outputs map[string]
 				telemetry.EmailSent(ctx, "approval", mailErr)
 			}
 		}
-		timeout := d.ApprovalTimeout
-		if timeout <= 0 {
-			timeout = 86400 * 7 // 7-day default for "no timeout"
-		}
+		timeout := NormalizeApprovalTimeout(d.ApprovalTimeout)
 		waitStart := time.Now()
 		result := "cancelled"
 		telemetry.ApprovalPending(ctx, 1)

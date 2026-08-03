@@ -494,7 +494,7 @@ func nodeCatalog() []map[string]any {
 		{
 			"type": "humanApproval", "label": "Human Approval", "category": "Logic",
 			"description": "Pauses workflow and waits for human to approve or reject.",
-			"dataFields":  map[string]any{"approvalMessage": "string – message shown to reviewer", "approvalTimeout": "number – seconds (default 7 days)", "approvalEmail": "string – optional email to notify"},
+			"dataFields":  map[string]any{"approvalMessage": "string – message shown to reviewer", "approvalTimeout": "number – seconds to wait before giving up; REQUIRED and always bounded (default 86400 = 24h, ceiling 259200 = 3 days). Never 0 — an unbounded gate strands the run, and on a schedule strands one every cycle.", "approvalEmail": "string – optional email to notify"},
 			"handles":     map[string]any{"inputs": []string{"target (left)"}, "outputs": []string{"source (right)"}},
 		},
 		{
