@@ -390,10 +390,12 @@ func callOpenAIWithTools(ctx context.Context, model, system, user string, maxTok
 	const maxIter = 10
 	for range maxIter {
 		body, _ := json.Marshal(map[string]any{
-			"model":      model,
-			"max_tokens": maxTok,
-			"messages":   messages,
-			"tools":      tools,
+			"model": model,
+			// max_completion_tokens replaced max_tokens; gpt-5.x hard-errors on
+			// the old name (openAIRequest was fixed for this, this path wasn't).
+			"max_completion_tokens": maxTok,
+			"messages":              messages,
+			"tools":                 tools,
 		})
 		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://api.openai.com/v1/chat/completions", bytes.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
