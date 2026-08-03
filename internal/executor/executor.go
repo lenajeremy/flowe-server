@@ -189,6 +189,8 @@ func callAnthropic(ctx context.Context, model, system, user string, temp float64
 	ctx, llmDone := telemetry.StartLLM(ctx, "anthropic", model)
 	defer func() { llmDone(len(out), err) }()
 
+	system = WithClock(system)
+
 	var msgContent interface{}
 	if len(imgs) > 0 {
 		blocks := make([]anthropicBlock, 0, len(imgs)+1)
@@ -270,6 +272,8 @@ type openAIResponse struct {
 func callOpenAI(ctx context.Context, model, system, user string, temp float64, maxTok int, key string, imgs []imageRef) (out string, err error) {
 	ctx, llmDone := telemetry.StartLLM(ctx, "openai", model)
 	defer func() { llmDone(len(out), err) }()
+
+	system = WithClock(system)
 
 	var userContent interface{}
 	if len(imgs) > 0 {

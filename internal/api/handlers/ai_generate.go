@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"workflow-ai/server/internal/auth"
+	"workflow-ai/server/internal/executor"
 	"workflow-ai/server/internal/telemetry"
 
 	"github.com/gin-gonic/gin"
@@ -442,10 +443,16 @@ var toolGetRunLogs = map[string]any{
 	},
 }
 
+var toolGetCurrentTime = map[string]any{
+	"name":         executor.ClockToolName,
+	"description":  executor.ClockToolDesc + " The system prompt already states the current UTC time; call this to convert into the user's timezone before setting a schedule, or after a long conversation.",
+	"input_schema": executor.ClockToolSchema(),
+}
+
 // builderTools is the single source of truth for the AI builder's tool set
 // (Anthropic uses it directly; openAIToolDefs converts it).
 func builderTools() []map[string]any {
-	return []map[string]any{toolGetNodes, toolGetCurrentWorkflow, toolCreateWorkflow, toolUpdateWorkflow, toolListIntegrationResources, toolListDataStores, toolCreateDataStore, toolSetSchedule, toolListRuns, toolGetRunLogs}
+	return []map[string]any{toolGetNodes, toolGetCurrentWorkflow, toolCreateWorkflow, toolUpdateWorkflow, toolListIntegrationResources, toolListDataStores, toolCreateDataStore, toolSetSchedule, toolListRuns, toolGetRunLogs, toolGetCurrentTime}
 }
 
 // nodeCatalog documents every node type (fields, semantics) — shared by the
@@ -812,6 +819,11 @@ func toolActivityLabel(name string, input any) string {
 		return "Checking recent runs"
 	case "get_run_logs":
 		return "Reading the run logs"
+	case executor.ClockToolName:
+		if tz, _ := m["timezone"].(string); tz != "" {
+			return "Checking the time in " + tz
+		}
+		return "Checking the current time"
 	default:
 		return name
 	}
@@ -868,6 +880,13 @@ func (h *WorkflowHandler) execChatTool(c *gin.Context, flusher http.Flusher, req
 	switch name {
 	case "get_available_nodes":
 		return getAvailableNodesResult()
+
+	case executor.ClockToolName:
+		tz := ""
+		if m, ok := input.(map[string]any); ok {
+			tz, _ = m["timezone"].(string)
+		}
+		return executor.CurrentTime(tz)
 
 	case "create_workflow":
 		inputJSON, _ := json.Marshal(input)
@@ -1000,7 +1019,7 @@ func (h *WorkflowHandler) runAnthropicChat(c *gin.Context, flusher http.Flusher,
 			"max_tokens": 16000,
 			"thinking":   model.Thinking,
 			"stream":     true,
-			"system":     workflowSystemPrompt,
+			"system":     executor.WithClockAndTool(workflowSystemPrompt),
 			"tools":      allTools,
 			"messages":   messages,
 		})
@@ -1053,7 +1072,7 @@ func (h *WorkflowHandler) runAnthropicChat(c *gin.Context, flusher http.Flusher,
 // chat-completions endpoint (OpenAI, Gemini, xAI). The returned bool is false
 // when the loop ended on a request/stream error (instrumentation only).
 func (h *WorkflowHandler) runOpenAIChat(c *gin.Context, flusher http.Flusher, req *aiGenerateRequest, model chatModelSpec, apiKey, url string) bool {
-	messages := []map[string]any{{"role": "system", "content": workflowSystemPrompt}}
+	messages := []map[string]any{{"role": "system", "content": executor.WithClockAndTool(workflowSystemPrompt)}}
 	for _, h := range req.History {
 		role, _ := h["role"].(string)
 		content, _ := h["content"].(string)

@@ -49,6 +49,11 @@ func anthropicWebTools(hasSearch bool) []map[string]any {
 			"required": []string{"url"},
 		},
 	})
+	tools = append(tools, map[string]any{
+		"name":         ClockToolName,
+		"description":  ClockToolDesc,
+		"input_schema": ClockToolSchema(),
+	})
 	return tools
 }
 
@@ -91,6 +96,14 @@ func openAIWebTools(hasSearch bool) []map[string]any {
 			},
 		},
 	})
+	tools = append(tools, map[string]any{
+		"type": "function",
+		"function": map[string]any{
+			"name":        ClockToolName,
+			"description": ClockToolDesc,
+			"parameters":  ClockToolSchema(),
+		},
+	})
 	return tools
 }
 
@@ -123,6 +136,14 @@ func executeTool(ctx context.Context, name string, input json.RawMessage, keys A
 			return "error: " + err.Error()
 		}
 		return result
+
+	case ClockToolName:
+		// No input at all is valid — the timezone is optional.
+		var params struct {
+			Timezone string `json:"timezone"`
+		}
+		_ = json.Unmarshal(input, &params)
+		return CurrentTime(params.Timezone)
 	}
 	return "error: unknown tool " + name
 }
@@ -239,6 +260,7 @@ func callAnthropicWithTools(ctx context.Context, model, system, user string, max
 	ctx, llmDone := telemetry.StartLLM(ctx, "anthropic", model)
 	defer func() { llmDone(len(out), err) }()
 
+	system = WithClockAndTool(system)
 	tools := anthropicWebTools(keys.Brave != "")
 
 	// Build initial user message
@@ -364,6 +386,7 @@ func callOpenAIWithTools(ctx context.Context, model, system, user string, maxTok
 	ctx, llmDone := telemetry.StartLLM(ctx, "openai", model)
 	defer func() { llmDone(len(out), err) }()
 
+	system = WithClockAndTool(system)
 	tools := openAIWebTools(keys.Brave != "")
 
 	// Build initial user message content

@@ -348,6 +348,15 @@ func (h *WorkflowHandler) AgentChatTurn(c *gin.Context) {
 	// execTool runs one node with overrides against session state.
 	var callRecords []agentToolCallRecord
 	execTool := func(name string, input any) string {
+		// The clock is the one tool that isn't a node — answer it before the
+		// node lookup, and don't record it as a node call.
+		if name == executor.ClockToolName {
+			tz := ""
+			if m, ok := input.(map[string]any); ok {
+				tz, _ = m["timezone"].(string)
+			}
+			return executor.CurrentTime(tz)
+		}
 		var tool *agentTool
 		for i := range tools {
 			if tools[i].Schema["name"] == name {
@@ -418,25 +427,30 @@ func agentSystemPrompt(ast executor.WorkflowAST, tools []agentTool, state map[st
 	for k := range state {
 		stateKeys = append(stateKeys, k)
 	}
-	return fmt.Sprintf(`You are the workflow %q, acting as a conversational agent for its owner.
+	return executor.WithClockAndTool(fmt.Sprintf(`You are the workflow %q, acting as a conversational agent for its owner.
 
-Your tools are this workflow's nodes: %s. Each tool's saved configuration is its default behaviour; pass arguments only to adjust a call to the user's current request (e.g. tweak a prompt, change a search query). You NEVER modify the workflow itself.
+Your tools are this workflow's nodes: %s. Each tool's saved configuration is its default behaviour; pass arguments only to adjust a call to the user's current request (e.g. tweak a prompt, change a search query). You NEVER modify the workflow itself. You also have get_current_time, which is not a node — it runs nothing and changes nothing.
 
 Rules:
 - Execute tools only when the user's request needs them — don't run everything preemptively.
 - Prior tool outputs are stored as state (current keys: [%s]) and template tokens like {{nodeId.output.field}} in tool arguments resolve against that state.
 - If the user asks for something no tool can do, say so plainly and describe what this workflow CAN do.
 - Be concise. Summarize tool results in plain language rather than dumping raw JSON, unless asked.`,
-		ast.Name, strings.Join(names, ", "), strings.Join(stateKeys, ", "))
+		ast.Name, strings.Join(names, ", "), strings.Join(stateKeys, ", ")))
 }
 
 // ── Provider loops (mirrors the builder-chat loops, different tools) ──
 
 func (h *WorkflowHandler) agentAnthropicLoop(c *gin.Context, flusher http.Flusher, model chatModelSpec, apiKey, system string, history []agentStoredMessage, userMsg string, tools []agentTool, execTool func(string, any) string) string {
-	toolSchemas := make([]map[string]any, 0, len(tools))
+	toolSchemas := make([]map[string]any, 0, len(tools)+1)
 	for _, t := range tools {
 		toolSchemas = append(toolSchemas, t.Schema)
 	}
+	toolSchemas = append(toolSchemas, map[string]any{
+		"name":         executor.ClockToolName,
+		"description":  executor.ClockToolDesc,
+		"input_schema": executor.ClockToolSchema(),
+	})
 	var messages []map[string]any
 	for _, m := range history {
 		if m.Content != "" {
@@ -496,7 +510,7 @@ func (h *WorkflowHandler) agentAnthropicLoop(c *gin.Context, flusher http.Flushe
 }
 
 func (h *WorkflowHandler) agentOpenAILoop(c *gin.Context, flusher http.Flusher, model chatModelSpec, apiKey, url, system string, history []agentStoredMessage, userMsg string, tools []agentTool, execTool func(string, any) string) string {
-	toolSchemas := make([]map[string]any, 0, len(tools))
+	toolSchemas := make([]map[string]any, 0, len(tools)+1)
 	for _, t := range tools {
 		toolSchemas = append(toolSchemas, map[string]any{
 			"type": "function",
@@ -507,6 +521,14 @@ func (h *WorkflowHandler) agentOpenAILoop(c *gin.Context, flusher http.Flusher, 
 			},
 		})
 	}
+	toolSchemas = append(toolSchemas, map[string]any{
+		"type": "function",
+		"function": map[string]any{
+			"name":        executor.ClockToolName,
+			"description": executor.ClockToolDesc,
+			"parameters":  executor.ClockToolSchema(),
+		},
+	})
 	messages := []map[string]any{{"role": "system", "content": system}}
 	for _, m := range history {
 		if m.Content != "" {
