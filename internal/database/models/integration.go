@@ -17,10 +17,10 @@ import (
 // below and are never serialized to clients (json:"-").
 type IntegrationConnection struct {
 	BaseModel
-	UserID        string     `json:"user_id"        gorm:"type:uuid;not null;uniqueIndex:idx_integration_user_provider"`
-	Provider      string     `json:"provider"       gorm:"not null;uniqueIndex:idx_integration_user_provider"`
-	AccessToken   string     `json:"-"              gorm:"not null"`
-	RefreshToken  string     `json:"-"`
+	UserID       string `json:"user_id"        gorm:"type:uuid;not null;uniqueIndex:idx_integration_user_provider"`
+	Provider     string `json:"provider"       gorm:"not null;uniqueIndex:idx_integration_user_provider"`
+	AccessToken  string `json:"-"              gorm:"not null"`
+	RefreshToken string `json:"-"`
 	// UserAccessToken is a second grant acting as the human who connected
 	// (Slack xoxp- tokens) for providers where actions can run either as the
 	// bot or on the user's behalf. Empty for providers without user grants.

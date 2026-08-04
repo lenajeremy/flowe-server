@@ -1062,6 +1062,16 @@ func runNodeInner(ctx context.Context, node WorkflowASTNode, outputs map[string]
 		}
 		return runResend(ctx, key, d, outputs)
 
+	case NodeTypeSendGrid:
+		key := substituteTemplates(d.IntegrationToken, outputs)
+		if key == "" && IntegrationCredsLookup != nil {
+			key, _ = IntegrationCredsLookup(ownerID, "sendgrid")
+		}
+		if key == "" {
+			return "", fmt.Errorf("SendGrid is not connected — add your SendGrid API key in the node settings")
+		}
+		return runSendGrid(ctx, key, d, outputs)
+
 	case NodeTypeGranola:
 		key := substituteTemplates(d.IntegrationToken, outputs)
 		if key == "" && IntegrationCredsLookup != nil {

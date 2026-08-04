@@ -39,6 +39,7 @@ const (
 	NodeTypeGoogleKeep       NodeType = "googlekeep"
 	NodeTypeGranola          NodeType = "granola"
 	NodeTypeResend           NodeType = "resend"
+	NodeTypeSendGrid         NodeType = "sendgrid"
 	NodeTypeData             NodeType = "data"
 )
 
@@ -472,6 +473,35 @@ type FlowNodeData struct {
 	ResendEvents       string `json:"resendEvents,omitempty"`       // comma-separated webhook events
 	ResendWebhookId    string `json:"resendWebhookId,omitempty"`
 	ResendLimit        int    `json:"resendLimit,omitempty"`
+
+	// sendgrid
+	SendGridFrom         string `json:"sendgridFrom,omitempty"` // must be a verified sender
+	SendGridTo           string `json:"sendgridTo,omitempty"`
+	SendGridCc           string `json:"sendgridCc,omitempty"`
+	SendGridBcc          string `json:"sendgridBcc,omitempty"`
+	SendGridReplyTo      string `json:"sendgridReplyTo,omitempty"`
+	SendGridSubject      string `json:"sendgridSubject,omitempty"`
+	SendGridHtml         string `json:"sendgridHtml,omitempty"`
+	SendGridText         string `json:"sendgridText,omitempty"`
+	SendGridSendAt       string `json:"sendgridSendAt,omitempty"` // unix seconds for mail; "now" or ISO for single sends
+	SendGridTemplateId   string `json:"sendgridTemplateId,omitempty"`
+	SendGridTemplateData string `json:"sendgridTemplateData,omitempty"` // JSON object
+	SendGridEmail        string `json:"sendgridEmail,omitempty"`        // contact / suppression address
+	SendGridContactId    string `json:"sendgridContactId,omitempty"`
+	SendGridFirstName    string `json:"sendgridFirstName,omitempty"`
+	SendGridLastName     string `json:"sendgridLastName,omitempty"`
+	SendGridCustomFields string `json:"sendgridCustomFields,omitempty"` // JSON keyed by field ID
+	SendGridListId       string `json:"sendgridListId,omitempty"`       // comma-separated where several are allowed
+	SendGridSegmentId    string `json:"sendgridSegmentId,omitempty"`
+	SendGridSingleSendId string `json:"sendgridSingleSendId,omitempty"`
+	SendGridJobId        string `json:"sendgridJobId,omitempty"` // from upsert_contact
+	SendGridName         string `json:"sendgridName,omitempty"`
+	SendGridQuery        string `json:"sendgridQuery,omitempty"`     // SGQL
+	SendGridFieldType    string `json:"sendgridFieldType,omitempty"` // Text | Number | Date
+	SendGridStartDate    string `json:"sendgridStartDate,omitempty"` // YYYY-MM-DD
+	SendGridEndDate      string `json:"sendgridEndDate,omitempty"`
+	SendGridAggregate    string `json:"sendgridAggregate,omitempty"` // day | week | month
+	SendGridLimit        int    `json:"sendgridLimit,omitempty"`
 }
 
 type Position struct {

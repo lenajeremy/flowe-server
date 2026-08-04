@@ -15,7 +15,8 @@ import (
 // Exercises the gorm DataStoreOps against a real Postgres (jsonb containment,
 // OnConflict upsert, FOR UPDATE atomic increment) — the parts the executor's
 // fake-backed unit tests can't reach. Opt-in: set TEST_DATABASE_URL, e.g.
-//   TEST_DATABASE_URL="host=localhost user=postgres password=postgres dbname=workflow_ai port=5434 sslmode=disable"
+//
+//	TEST_DATABASE_URL="host=localhost user=postgres password=postgres dbname=workflow_ai port=5434 sslmode=disable"
 func dbForTest(t *testing.T) *gorm.DB {
 	t.Helper()
 	dsn := os.Getenv("TEST_DATABASE_URL")
