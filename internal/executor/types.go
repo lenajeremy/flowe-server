@@ -48,6 +48,7 @@ const (
 	NodeTypeDropbox          NodeType = "dropbox"
 	NodeTypeNetlify          NodeType = "netlify"
 	NodeTypeSupabase         NodeType = "supabase"
+	NodeTypeGumroad          NodeType = "gumroad"
 	NodeTypeData             NodeType = "data"
 )
 
@@ -761,6 +762,35 @@ type FlowNodeData struct {
 	SupabaseUriAllowList        string `json:"supabaseUriAllowList,omitempty"`
 	SupabaseVerifyJwt           string `json:"supabaseVerifyJwt,omitempty"`
 	SupabaseWithData            string `json:"supabaseWithData,omitempty"`
+
+	// gumroad
+	GumroadAfter           string `json:"gumroadAfter,omitempty"`     // YYYY-MM-DD, exclusive
+	GumroadAmount          string `json:"gumroadAmount,omitempty"`    // refund amount in cents; omit to refund in full
+	GumroadAmountOff       string `json:"gumroadAmountOff,omitempty"` // cents, or a percentage when the offer type is percent
+	GumroadBefore          string `json:"gumroadBefore,omitempty"`    // YYYY-MM-DD, exclusive
+	GumroadCategoryId      string `json:"gumroadCategoryId,omitempty"`
+	GumroadCode            string `json:"gumroadCode,omitempty"`
+	GumroadCustomPermalink string `json:"gumroadCustomPermalink,omitempty"`
+	GumroadDescription     string `json:"gumroadDescription,omitempty"`
+	GumroadEmail           string `json:"gumroadEmail,omitempty"`
+	GumroadIncrementUses   string `json:"gumroadIncrementUses,omitempty"` // "true" counts this check against the licence uses
+	GumroadLicenseKey      string `json:"gumroadLicenseKey,omitempty"`
+	GumroadMaxPurchases    string `json:"gumroadMaxPurchases,omitempty"`
+	GumroadName            string `json:"gumroadName,omitempty"`
+	GumroadOfferCodeId     string `json:"gumroadOfferCodeId,omitempty"`
+	GumroadOfferType       string `json:"gumroadOfferType,omitempty"`       // cents | percent
+	GumroadPageKey         string `json:"gumroadPageKey,omitempty"`         // opaque paging key from a previous list_sales
+	GumroadPrice           string `json:"gumroadPrice,omitempty"`           // CENTS — 1000 is $10.00
+	GumroadPriceDifference string `json:"gumroadPriceDifference,omitempty"` // variant surcharge, in cents
+	GumroadProductId       string `json:"gumroadProductId,omitempty"`
+	GumroadRequired        string `json:"gumroadRequired,omitempty"`
+	GumroadResourceName    string `json:"gumroadResourceName,omitempty"` // sale | refund | dispute | cancellation | subscription_updated
+	GumroadSaleId          string `json:"gumroadSaleId,omitempty"`
+	GumroadSubscriberId    string `json:"gumroadSubscriberId,omitempty"`
+	GumroadTitle           string `json:"gumroadTitle,omitempty"`
+	GumroadTrackingUrl     string `json:"gumroadTrackingUrl,omitempty"`
+	GumroadUrl             string `json:"gumroadUrl,omitempty"`
+	GumroadWebhookId       string `json:"gumroadWebhookId,omitempty"`
 }
 
 type Position struct {

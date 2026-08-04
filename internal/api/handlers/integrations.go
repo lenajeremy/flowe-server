@@ -227,6 +227,15 @@ var oauthProviders = map[string]oauthProvider{
 			"prompt":      {"consent"},
 		},
 	},
+	// Gumroad's OAuth scopes are coarse: edit_products covers the whole catalogue
+	// and view_sales the whole ledger. There is nothing narrower to ask for.
+	"gumroad": {
+		name:         "gumroad",
+		authorizeURL: "https://gumroad.com/oauth/authorize",
+		clientIDEnv:  "GUMROAD_CLIENT_ID",
+		secretEnv:    "GUMROAD_CLIENT_SECRET",
+		extraAuthQ:   url.Values{"scope": {"edit_products view_sales"}},
+	},
 	// Supabase Connect: PKCE is required and the token endpoint wants the client
 	// credentials as Basic auth. Scopes below are taken from the per-endpoint
 	// x-oauth-scope values in Supabase's own OpenAPI document, covering exactly the
@@ -335,7 +344,7 @@ var allProviders = []string{
 	"googleslides", "googleforms", "googlemeet", "googlechat", "googletasks",
 	"googlekeep", "outlook", "slack", "notion", "linear",
 	"github", "gitlab", "jira", "confluence", "bitbucket",
-	"stripe", "shopify", "granola", "resend", "sendgrid", "kit", "airtable", "clickup", "typeform", "calendly", "dropbox", "netlify", "supabase",
+	"stripe", "shopify", "granola", "resend", "sendgrid", "kit", "airtable", "clickup", "typeform", "calendly", "dropbox", "netlify", "supabase", "gumroad",
 }
 
 func oauthRedirectURI(provider string) string {
@@ -609,6 +618,8 @@ func (h *WorkflowHandler) CallbackIntegration(c *gin.Context) {
 		conn, err = exchangeFormPostCode("netlify", code, "https://api.netlify.com/oauth/token")
 	case "supabase":
 		conn, err = exchangeSupabaseCode(code, st.verifier)
+	case "gumroad":
+		conn, err = exchangeFormPostCode("gumroad", code, "https://api.gumroad.com/oauth/token")
 	case "typeform":
 		conn, err = exchangeFormPostCode("typeform", code, "https://api.typeform.com/oauth/token")
 	case "calendly":

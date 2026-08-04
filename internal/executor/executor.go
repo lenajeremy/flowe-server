@@ -1152,6 +1152,16 @@ func runNodeInner(ctx context.Context, node WorkflowASTNode, outputs map[string]
 		}
 		return runSupabase(ctx, token, d, outputs)
 
+	case NodeTypeGumroad:
+		token := substituteTemplates(d.IntegrationToken, outputs)
+		if token == "" && IntegrationCredsLookup != nil {
+			token, _ = IntegrationCredsLookup(ownerID, "gumroad")
+		}
+		if token == "" {
+			return "", fmt.Errorf("Gumroad is not connected — use Connect Gumroad in the node settings")
+		}
+		return runGumroad(ctx, token, d, outputs)
+
 	case NodeTypeGranola:
 		key := substituteTemplates(d.IntegrationToken, outputs)
 		if key == "" && IntegrationCredsLookup != nil {
