@@ -49,11 +49,11 @@ var apiKeyProviders = map[string]apiKeyProvider{
 		hint:      "app.sendgrid.com → Settings → API Keys",
 		verifyURL: "https://api.sendgrid.com/v3/user/profile",
 	},
-	"elevenlabs": {
-		name: "elevenlabs", label: "ElevenLabs",
-		hint:      "elevenlabs.io → Profile → API Keys",
-		verifyURL: "https://api.elevenlabs.io/v1/user",
-		header:    "xi-api-key",
+	"kit": {
+		name: "kit", label: "Kit",
+		hint:      "Kit → Settings → Developer → create a V4 API key (a v3 key will not work)",
+		verifyURL: "https://api.kit.com/v4/account",
+		header:    "X-Kit-Api-Key",
 	},
 	"granola": {
 		name: "granola", label: "Granola", keyPrefix: "grn_",

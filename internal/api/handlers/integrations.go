@@ -266,7 +266,7 @@ var allProviders = []string{
 	"googleslides", "googleforms", "googlemeet", "googlechat", "googletasks",
 	"googlekeep", "outlook", "slack", "notion", "linear",
 	"github", "gitlab", "jira", "confluence", "bitbucket",
-	"stripe", "shopify", "granola", "resend", "sendgrid",
+	"stripe", "shopify", "granola", "resend", "sendgrid", "kit",
 }
 
 func oauthRedirectURI(provider string) string {

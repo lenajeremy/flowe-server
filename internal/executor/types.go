@@ -40,6 +40,7 @@ const (
 	NodeTypeGranola          NodeType = "granola"
 	NodeTypeResend           NodeType = "resend"
 	NodeTypeSendGrid         NodeType = "sendgrid"
+	NodeTypeKit              NodeType = "kit"
 	NodeTypeData             NodeType = "data"
 )
 
@@ -502,6 +503,30 @@ type FlowNodeData struct {
 	SendGridEndDate      string `json:"sendgridEndDate,omitempty"`
 	SendGridAggregate    string `json:"sendgridAggregate,omitempty"` // day | week | month
 	SendGridLimit        int    `json:"sendgridLimit,omitempty"`
+
+	// kit (formerly ConvertKit)
+	KitEmail        string `json:"kitEmail,omitempty"`
+	KitFirstName    string `json:"kitFirstName,omitempty"`
+	KitState        string `json:"kitState,omitempty"`  // active | inactive | bounced | cancelled
+	KitFields       string `json:"kitFields,omitempty"` // JSON object of custom field values
+	KitSubscriberId string `json:"kitSubscriberId,omitempty"`
+	KitCreatedAfter string `json:"kitCreatedAfter,omitempty"` // RFC3339
+	KitTagId        string `json:"kitTagId,omitempty"`        // comma-separated when filtering a broadcast
+	KitFormId       string `json:"kitFormId,omitempty"`
+	KitSequenceId   string `json:"kitSequenceId,omitempty"`
+	KitBroadcastId  string `json:"kitBroadcastId,omitempty"`
+	KitFieldId      string `json:"kitFieldId,omitempty"`
+	KitPurchaseId   string `json:"kitPurchaseId,omitempty"`
+	KitPurchase     string `json:"kitPurchase,omitempty"` // JSON purchase object
+	KitWebhookId    string `json:"kitWebhookId,omitempty"`
+	KitUrl          string `json:"kitUrl,omitempty"`   // webhook target
+	KitEvent        string `json:"kitEvent,omitempty"` // webhook event name
+	KitName         string `json:"kitName,omitempty"`  // tag / sequence / custom-field label
+	KitSubject      string `json:"kitSubject,omitempty"`
+	KitContent      string `json:"kitContent,omitempty"`
+	KitDescription  string `json:"kitDescription,omitempty"`
+	KitSendAt       string `json:"kitSendAt,omitempty"` // RFC3339; omit to leave a broadcast as a draft
+	KitLimit        int    `json:"kitLimit,omitempty"`
 }
 
 type Position struct {
