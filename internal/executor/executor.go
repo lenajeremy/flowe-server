@@ -1122,6 +1122,16 @@ func runNodeInner(ctx context.Context, node WorkflowASTNode, outputs map[string]
 		}
 		return runCalendly(ctx, token, d, outputs)
 
+	case NodeTypeDropbox:
+		token := substituteTemplates(d.IntegrationToken, outputs)
+		if token == "" && IntegrationCredsLookup != nil {
+			token, _ = IntegrationCredsLookup(ownerID, "dropbox")
+		}
+		if token == "" {
+			return "", fmt.Errorf("Dropbox is not connected — use Connect Dropbox in the node settings")
+		}
+		return runDropbox(ctx, token, d, outputs)
+
 	case NodeTypeGranola:
 		key := substituteTemplates(d.IntegrationToken, outputs)
 		if key == "" && IntegrationCredsLookup != nil {

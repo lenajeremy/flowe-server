@@ -227,6 +227,20 @@ var oauthProviders = map[string]oauthProvider{
 			"prompt":      {"consent"},
 		},
 	},
+	// Dropbox issues short-lived tokens, so token_access_type=offline is what
+	// earns a refresh token; without it the connection dies in four hours.
+	"dropbox": {
+		name:         "dropbox",
+		authorizeURL: "https://www.dropbox.com/oauth2/authorize",
+		clientIDEnv:  "DROPBOX_CLIENT_ID",
+		secretEnv:    "DROPBOX_CLIENT_SECRET",
+		extraAuthQ: url.Values{
+			"token_access_type": {"offline"},
+			"scope": {"account_info.read files.metadata.read files.metadata.write " +
+				"files.content.read files.content.write sharing.read sharing.write " +
+				"file_requests.read file_requests.write"},
+		},
+	},
 	"typeform": {
 		name:         "typeform",
 		authorizeURL: "https://api.typeform.com/oauth/authorize",
@@ -300,7 +314,7 @@ var allProviders = []string{
 	"googleslides", "googleforms", "googlemeet", "googlechat", "googletasks",
 	"googlekeep", "outlook", "slack", "notion", "linear",
 	"github", "gitlab", "jira", "confluence", "bitbucket",
-	"stripe", "shopify", "granola", "resend", "sendgrid", "kit", "airtable", "clickup", "typeform", "calendly",
+	"stripe", "shopify", "granola", "resend", "sendgrid", "kit", "airtable", "clickup", "typeform", "calendly", "dropbox",
 }
 
 func oauthRedirectURI(provider string) string {
@@ -568,6 +582,8 @@ func (h *WorkflowHandler) CallbackIntegration(c *gin.Context) {
 		conn, err = exchangeAirtableCode(code, st.verifier)
 	case "clickup":
 		conn, err = exchangeClickUpCode(code)
+	case "dropbox":
+		conn, err = exchangeFormPostCode("dropbox", code, "https://api.dropboxapi.com/oauth2/token")
 	case "typeform":
 		conn, err = exchangeFormPostCode("typeform", code, "https://api.typeform.com/oauth/token")
 	case "calendly":
@@ -1073,6 +1089,7 @@ var refreshTokenEndpoints = map[string]refreshEndpoint{
 	"jira":           {tokenURL: atlassianTokenURL, clientIDEnv: "ATLASSIAN_CLIENT_ID", secretEnv: "ATLASSIAN_CLIENT_SECRET", jsonBody: true},
 	"confluence":     {tokenURL: atlassianTokenURL, clientIDEnv: "ATLASSIAN_CLIENT_ID", secretEnv: "ATLASSIAN_CLIENT_SECRET", jsonBody: true},
 	"airtable":       {tokenURL: airtableTokenURL, clientIDEnv: "AIRTABLE_CLIENT_ID", secretEnv: "AIRTABLE_CLIENT_SECRET", basicAuth: true},
+	"dropbox":        {tokenURL: "https://api.dropboxapi.com/oauth2/token", clientIDEnv: "DROPBOX_CLIENT_ID", secretEnv: "DROPBOX_CLIENT_SECRET"},
 	"typeform":       {tokenURL: "https://api.typeform.com/oauth/token", clientIDEnv: "TYPEFORM_CLIENT_ID", secretEnv: "TYPEFORM_CLIENT_SECRET"},
 	"calendly":       {tokenURL: "https://auth.calendly.com/oauth/token", clientIDEnv: "CALENDLY_CLIENT_ID", secretEnv: "CALENDLY_CLIENT_SECRET"},
 	"bitbucket":      {tokenURL: bitbucketTokenURL, clientIDEnv: "BITBUCKET_CLIENT_ID", secretEnv: "BITBUCKET_CLIENT_SECRET", basicAuth: true},

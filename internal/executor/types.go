@@ -45,6 +45,7 @@ const (
 	NodeTypeClickUp          NodeType = "clickup"
 	NodeTypeTypeform         NodeType = "typeform"
 	NodeTypeCalendly         NodeType = "calendly"
+	NodeTypeDropbox          NodeType = "dropbox"
 	NodeTypeData             NodeType = "data"
 )
 
@@ -642,6 +643,23 @@ type FlowNodeData struct {
 	CalendlyEvents       string `json:"calendlyEvents,omitempty"`   // comma-separated
 	CalendlyWebhookId    string `json:"calendlyWebhookId,omitempty"`
 	CalendlyLimit        int    `json:"calendlyLimit,omitempty"`
+
+	// dropbox
+	DropboxPath        string `json:"dropboxPath,omitempty"`      // absolute from the account root; "" is the root
+	DropboxToPath      string `json:"dropboxToPath,omitempty"`    // move/copy destination
+	DropboxContent     string `json:"dropboxContent,omitempty"`   // upload body (text)
+	DropboxOverwrite   string `json:"dropboxOverwrite,omitempty"` // "true" replaces instead of autorenaming
+	DropboxRecursive   string `json:"dropboxRecursive,omitempty"` // "true" to walk subfolders
+	DropboxCursor      string `json:"dropboxCursor,omitempty"`
+	DropboxQuery       string `json:"dropboxQuery,omitempty"`
+	DropboxRev         string `json:"dropboxRev,omitempty"`         // revision from list_revisions
+	DropboxUrl         string `json:"dropboxUrl,omitempty"`         // shared link URL
+	DropboxVisibility  string `json:"dropboxVisibility,omitempty"`  // public | team_only | password
+	DropboxEmail       string `json:"dropboxEmail,omitempty"`       // comma-separated share targets
+	DropboxAccessLevel string `json:"dropboxAccessLevel,omitempty"` // viewer | editor
+	DropboxMessage     string `json:"dropboxMessage,omitempty"`     // note sent with a share
+	DropboxTitle       string `json:"dropboxTitle,omitempty"`       // file request title
+	DropboxLimit       int    `json:"dropboxLimit,omitempty"`
 }
 
 type Position struct {
