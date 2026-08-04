@@ -31,6 +31,12 @@ const (
 	NodeTypeJira             NodeType = "jira"
 	NodeTypeConfluence       NodeType = "confluence"
 	NodeTypeBitbucket        NodeType = "bitbucket"
+	NodeTypeGoogleMeet       NodeType = "googlemeet"
+	NodeTypeGoogleSlides     NodeType = "googleslides"
+	NodeTypeGoogleForms      NodeType = "googleforms"
+	NodeTypeGoogleTasks      NodeType = "googletasks"
+	NodeTypeGoogleChat       NodeType = "googlechat"
+	NodeTypeGoogleKeep       NodeType = "googlekeep"
 	NodeTypeData             NodeType = "data"
 )
 
@@ -348,6 +354,83 @@ type FlowNodeData struct {
 	BitbucketIssueId       string `json:"bitbucketIssueId,omitempty"`
 	BitbucketKind          string `json:"bitbucketKind,omitempty"`     // issue kind: bug | enhancement | proposal | task
 	BitbucketPriority      string `json:"bitbucketPriority,omitempty"` // trivial | minor | major | critical | blocker
+
+	// googlemeet
+	MeetSpace            string `json:"meetSpace,omitempty"`            // spaces/{id} or a meeting code
+	MeetAccessType       string `json:"meetAccessType,omitempty"`       // OPEN | TRUSTED | RESTRICTED
+	MeetModeration       string `json:"meetModeration,omitempty"`       // ON | OFF
+	MeetConferenceRecord string `json:"meetConferenceRecord,omitempty"` // conferenceRecords/{id}
+	MeetTranscript       string `json:"meetTranscript,omitempty"`       // .../transcripts/{id}
+	MeetFilter           string `json:"meetFilter,omitempty"`           // list filter, e.g. space.name="spaces/abc"
+	MeetLimit            int    `json:"meetLimit,omitempty"`
+
+	// googleslides
+	SlidesPresentationId string `json:"slidesPresentationId,omitempty"`
+	SlidesTitle          string `json:"slidesTitle,omitempty"`
+	SlidesSlideId        string `json:"slidesSlideId,omitempty"`  // page objectId
+	SlidesLayout         string `json:"slidesLayout,omitempty"`   // TITLE_AND_BODY | TITLE_ONLY | BLANK | SECTION_HEADER
+	SlidesHeading        string `json:"slidesHeading,omitempty"`  // title placeholder text
+	SlidesBody           string `json:"slidesBody,omitempty"`     // body placeholder / text box text
+	SlidesFind           string `json:"slidesFind,omitempty"`     // replace_all_text
+	SlidesReplace        string `json:"slidesReplace,omitempty"`  // replace_all_text
+	SlidesImageUrl       string `json:"slidesImageUrl,omitempty"` // add_image (must be publicly reachable)
+	SlidesObjectId       string `json:"slidesObjectId,omitempty"` // delete_object target
+	SlidesNotes          string `json:"slidesNotes,omitempty"`    // speaker notes
+	SlidesTemplateId     string `json:"slidesTemplateId,omitempty"`
+	SlidesReplacements   string `json:"slidesReplacements,omitempty"` // JSON map {"{{name}}":"Jane"}
+	SlidesIndex          int    `json:"slidesIndex,omitempty"`        // insertion position
+
+	// googleforms
+	FormsFormId       string `json:"formsFormId,omitempty"`
+	FormsTitle        string `json:"formsTitle,omitempty"`
+	FormsDescription  string `json:"formsDescription,omitempty"`
+	FormsQuestion     string `json:"formsQuestion,omitempty"`
+	FormsQuestionType string `json:"formsQuestionType,omitempty"` // TEXT | PARAGRAPH | RADIO | CHECKBOX | DROPDOWN | SCALE | DATE | TIME
+	FormsOptions      string `json:"formsOptions,omitempty"`      // comma-separated choices
+	FormsRequired     string `json:"formsRequired,omitempty"`     // "true" | "false"
+	FormsItemId       string `json:"formsItemId,omitempty"`
+	FormsResponseId   string `json:"formsResponseId,omitempty"`
+	FormsIndex        int    `json:"formsIndex,omitempty"`
+	FormsIsQuiz       string `json:"formsIsQuiz,omitempty"`    // "true" | "false"
+	FormsAccepting    string `json:"formsAccepting,omitempty"` // "true" | "false" (accepting responses)
+	FormsLimit        int    `json:"formsLimit,omitempty"`
+
+	// googletasks
+	TasksListId          string `json:"tasksListId,omitempty"` // defaults to @default
+	TasksTaskId          string `json:"tasksTaskId,omitempty"`
+	TasksTitle           string `json:"tasksTitle,omitempty"`
+	TasksNotes           string `json:"tasksNotes,omitempty"`
+	TasksDue             string `json:"tasksDue,omitempty"`    // RFC3339; Tasks keeps the date and drops the time
+	TasksStatus          string `json:"tasksStatus,omitempty"` // needsAction | completed
+	TasksParent          string `json:"tasksParent,omitempty"` // subtask parent
+	TasksPrevious        string `json:"tasksPrevious,omitempty"`
+	TasksShowCompleted   string `json:"tasksShowCompleted,omitempty"` // "true" | "false"
+	TasksDueMin          string `json:"tasksDueMin,omitempty"`
+	TasksDueMax          string `json:"tasksDueMax,omitempty"`
+	TasksDestinationList string `json:"tasksDestinationList,omitempty"`
+	TasksLimit           int    `json:"tasksLimit,omitempty"`
+
+	// googlechat
+	ChatSpace       string `json:"chatSpace,omitempty"`     // spaces/{id}
+	ChatMessageId   string `json:"chatMessageId,omitempty"` // spaces/{s}/messages/{m}
+	ChatText        string `json:"chatText,omitempty"`
+	ChatThread      string `json:"chatThread,omitempty"`      // thread name or thread key
+	ChatDisplayName string `json:"chatDisplayName,omitempty"` // create/update space
+	ChatSpaceType   string `json:"chatSpaceType,omitempty"`   // SPACE | GROUP_CHAT
+	ChatMemberEmail string `json:"chatMemberEmail,omitempty"` // comma-separated for space setup
+	ChatMembership  string `json:"chatMembership,omitempty"`  // spaces/{s}/members/{m}
+	ChatEmoji       string `json:"chatEmoji,omitempty"`       // reaction, a literal emoji
+	ChatFilter      string `json:"chatFilter,omitempty"`
+	ChatLimit       int    `json:"chatLimit,omitempty"`
+
+	// googlekeep
+	KeepNoteName  string `json:"keepNoteName,omitempty"` // notes/{id}
+	KeepTitle     string `json:"keepTitle,omitempty"`
+	KeepText      string `json:"keepText,omitempty"`
+	KeepListItems string `json:"keepListItems,omitempty"` // one checklist item per line
+	KeepEmail     string `json:"keepEmail,omitempty"`     // comma-separated, for sharing
+	KeepFilter    string `json:"keepFilter,omitempty"`
+	KeepLimit     int    `json:"keepLimit,omitempty"`
 }
 
 type Position struct {

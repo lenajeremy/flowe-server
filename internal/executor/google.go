@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
+	"strings"
 )
 
 // googleCall performs an authenticated JSON request against any Google API
@@ -43,4 +45,21 @@ func googleCall(ctx context.Context, token, method, fullURL string, body any) (s
 		return "", fmt.Errorf("Google API returned %d: %s", resp.StatusCode, truncateStr(string(raw), 300))
 	}
 	return string(raw), nil
+}
+
+// jsonField pulls one top-level string field out of a JSON response. Used where
+// a follow-up call needs an id the previous call just minted.
+func jsonField(raw, field string) string {
+	var m map[string]any
+	if json.Unmarshal([]byte(raw), &m) != nil {
+		return ""
+	}
+	if v, ok := m[field].(string); ok {
+		return v
+	}
+	return ""
+}
+
+func atoiSafe(s string) (int, error) {
+	return strconv.Atoi(strings.TrimSpace(s))
 }

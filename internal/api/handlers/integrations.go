@@ -161,6 +161,72 @@ var oauthProviders = map[string]oauthProvider{
 			"user_scope": {"chat:write,im:write,im:read,im:history,mpim:read,mpim:history,search:read"},
 		},
 	},
+	"googlemeet": {
+		name:         "googlemeet",
+		authorizeURL: "https://accounts.google.com/o/oauth2/v2/auth",
+		clientIDEnv:  "GOOGLE_CLIENT_ID",
+		secretEnv:    "GOOGLE_CLIENT_SECRET",
+		extraAuthQ: url.Values{
+			"scope":       {"https://www.googleapis.com/auth/meetings.space.created https://www.googleapis.com/auth/meetings.space.readonly https://www.googleapis.com/auth/meetings.space.settings"},
+			"access_type": {"offline"},
+			"prompt":      {"consent"},
+		},
+	},
+	"googleslides": {
+		name:         "googleslides",
+		authorizeURL: "https://accounts.google.com/o/oauth2/v2/auth",
+		clientIDEnv:  "GOOGLE_CLIENT_ID",
+		secretEnv:    "GOOGLE_CLIENT_SECRET",
+		extraAuthQ: url.Values{
+			"scope":       {"https://www.googleapis.com/auth/presentations https://www.googleapis.com/auth/drive"},
+			"access_type": {"offline"},
+			"prompt":      {"consent"},
+		},
+	},
+	"googleforms": {
+		name:         "googleforms",
+		authorizeURL: "https://accounts.google.com/o/oauth2/v2/auth",
+		clientIDEnv:  "GOOGLE_CLIENT_ID",
+		secretEnv:    "GOOGLE_CLIENT_SECRET",
+		extraAuthQ: url.Values{
+			"scope":       {"https://www.googleapis.com/auth/forms.body https://www.googleapis.com/auth/forms.responses.readonly https://www.googleapis.com/auth/drive.file"},
+			"access_type": {"offline"},
+			"prompt":      {"consent"},
+		},
+	},
+	"googletasks": {
+		name:         "googletasks",
+		authorizeURL: "https://accounts.google.com/o/oauth2/v2/auth",
+		clientIDEnv:  "GOOGLE_CLIENT_ID",
+		secretEnv:    "GOOGLE_CLIENT_SECRET",
+		extraAuthQ: url.Values{
+			"scope":       {"https://www.googleapis.com/auth/tasks"},
+			"access_type": {"offline"},
+			"prompt":      {"consent"},
+		},
+	},
+	"googlechat": {
+		name:         "googlechat",
+		authorizeURL: "https://accounts.google.com/o/oauth2/v2/auth",
+		clientIDEnv:  "GOOGLE_CLIENT_ID",
+		secretEnv:    "GOOGLE_CLIENT_SECRET",
+		extraAuthQ: url.Values{
+			"scope":       {"https://www.googleapis.com/auth/chat.spaces https://www.googleapis.com/auth/chat.messages https://www.googleapis.com/auth/chat.memberships https://www.googleapis.com/auth/chat.delete"},
+			"access_type": {"offline"},
+			"prompt":      {"consent"},
+		},
+	},
+	"googlekeep": {
+		name:         "googlekeep",
+		authorizeURL: "https://accounts.google.com/o/oauth2/v2/auth",
+		clientIDEnv:  "GOOGLE_CLIENT_ID",
+		secretEnv:    "GOOGLE_CLIENT_SECRET",
+		extraAuthQ: url.Values{
+			"scope":       {"https://www.googleapis.com/auth/keep"},
+			"access_type": {"offline"},
+			"prompt":      {"consent"},
+		},
+	},
 	// Jira and Confluence share one Atlassian OAuth app, differing only in
 	// scope — see integrations_atlassian.go.
 	"jira": {
@@ -200,6 +266,7 @@ var allProviders = []string{
 	"googlecalendar", "googledrive", "googledocs", "googlesheets",
 	"outlook", "slack", "stripe", "shopify",
 	"jira", "confluence", "bitbucket",
+	"googlemeet", "googleslides", "googleforms", "googletasks", "googlechat", "googlekeep",
 }
 
 func oauthRedirectURI(provider string) string {
@@ -430,7 +497,8 @@ func (h *WorkflowHandler) CallbackIntegration(c *gin.Context) {
 		conn, err = exchangeStripeCode(code)
 	case "shopify":
 		conn, err = exchangeShopifyCode(code, shop)
-	case "googlecalendar", "googledrive", "googledocs", "googlesheets":
+	case "googlecalendar", "googledrive", "googledocs", "googlesheets",
+		"googlemeet", "googleslides", "googleforms", "googletasks", "googlechat", "googlekeep":
 		conn, err = exchangeGoogleServiceCode(provider, code)
 	case "jira", "confluence":
 		conn, err = exchangeAtlassianCode(provider, code)
@@ -526,6 +594,12 @@ func (h *WorkflowHandler) listProviderResources(userID, provider string) ([]inte
 		return confluenceResources(token, workspace)
 	case "bitbucket":
 		return bitbucketResources(token, workspace)
+	case "googletasks":
+		return googleTasksResources(token)
+	case "googlechat":
+		return googleChatResources(token)
+		// meet/slides/forms/keep expose no listable resource: Meet spaces have no
+		// index, and Slides/Forms live in Drive rather than their own API.
 		// googledocs / googlesheets expose no pickable resource list (drive.file
 		// scope only sees app-created files) — they fall through to empty.
 	}
@@ -913,6 +987,12 @@ var refreshTokenEndpoints = map[string]refreshEndpoint{
 	"googledrive":    {tokenURL: "https://oauth2.googleapis.com/token", clientIDEnv: "GOOGLE_CLIENT_ID", secretEnv: "GOOGLE_CLIENT_SECRET"},
 	"googledocs":     {tokenURL: "https://oauth2.googleapis.com/token", clientIDEnv: "GOOGLE_CLIENT_ID", secretEnv: "GOOGLE_CLIENT_SECRET"},
 	"googlesheets":   {tokenURL: "https://oauth2.googleapis.com/token", clientIDEnv: "GOOGLE_CLIENT_ID", secretEnv: "GOOGLE_CLIENT_SECRET"},
+	"googlemeet":     {tokenURL: "https://oauth2.googleapis.com/token", clientIDEnv: "GOOGLE_CLIENT_ID", secretEnv: "GOOGLE_CLIENT_SECRET"},
+	"googleslides":   {tokenURL: "https://oauth2.googleapis.com/token", clientIDEnv: "GOOGLE_CLIENT_ID", secretEnv: "GOOGLE_CLIENT_SECRET"},
+	"googleforms":    {tokenURL: "https://oauth2.googleapis.com/token", clientIDEnv: "GOOGLE_CLIENT_ID", secretEnv: "GOOGLE_CLIENT_SECRET"},
+	"googletasks":    {tokenURL: "https://oauth2.googleapis.com/token", clientIDEnv: "GOOGLE_CLIENT_ID", secretEnv: "GOOGLE_CLIENT_SECRET"},
+	"googlechat":     {tokenURL: "https://oauth2.googleapis.com/token", clientIDEnv: "GOOGLE_CLIENT_ID", secretEnv: "GOOGLE_CLIENT_SECRET"},
+	"googlekeep":     {tokenURL: "https://oauth2.googleapis.com/token", clientIDEnv: "GOOGLE_CLIENT_ID", secretEnv: "GOOGLE_CLIENT_SECRET"},
 	"outlook":        {tokenURL: "https://login.microsoftonline.com/common/oauth2/v2.0/token", clientIDEnv: "MICROSOFT_CLIENT_ID", secretEnv: "MICROSOFT_CLIENT_SECRET"},
 	"jira":           {tokenURL: atlassianTokenURL, clientIDEnv: "ATLASSIAN_CLIENT_ID", secretEnv: "ATLASSIAN_CLIENT_SECRET", jsonBody: true},
 	"confluence":     {tokenURL: atlassianTokenURL, clientIDEnv: "ATLASSIAN_CLIENT_ID", secretEnv: "ATLASSIAN_CLIENT_SECRET", jsonBody: true},

@@ -294,7 +294,7 @@ var toolListIntegrationResources = map[string]any{
 		"properties": map[string]any{
 			"provider": map[string]any{
 				"type":        "string",
-				"enum":        []string{"notion", "linear", "github", "gitlab", "gmail", "googlecalendar", "googledrive", "googledocs", "googlesheets", "outlook", "slack", "stripe", "shopify", "jira", "confluence", "bitbucket"},
+				"enum":        []string{"notion", "linear", "github", "gitlab", "gmail", "googlecalendar", "googledrive", "googledocs", "googlesheets", "outlook", "slack", "stripe", "shopify", "jira", "confluence", "bitbucket", "googlemeet", "googleslides", "googleforms", "googletasks", "googlechat", "googlekeep"},
 				"description": "Which provider to inspect. Omit to list all.",
 			},
 		},
@@ -594,6 +594,48 @@ func nodeCatalog() []map[string]any {
 			"handles":     map[string]any{"inputs": []string{"target (left)"}, "outputs": []string{"source (right)"}},
 		},
 		{
+			"type": "googlemeet", "label": "Google Meet", "category": "Integrations",
+			"description": "Google Meet API: create and configure meeting spaces (returns the join URL), read conference records, participants, recordings and transcripts — including the full transcript text for summarising a meeting.",
+			"dataFields":  map[string]any{"integrationOp": "'create_space'|'get_space'|'update_space'|'end_active_conference'|'list_conference_records'|'get_conference_record'|'list_participants'|'list_recordings'|'list_transcripts'|'get_transcript_text'|'list_transcript_entries'", "meetSpace": "string – spaces/{id} or a meeting code", "meetAccessType": "'OPEN'|'TRUSTED'|'RESTRICTED'", "meetModeration": "'ON'|'OFF'", "meetConferenceRecord": "string – conferenceRecords/{id} from list_conference_records", "meetTranscript": "string – transcript name from list_transcripts", "meetFilter": "string – list filter, e.g. space.name=\"spaces/abc\"", "meetLimit": "number (default 25)"},
+			"auth":        "OAuth connection used automatically — never set integrationToken. The meetings.space.created scope only reaches spaces this connection created, so create_space first; a space made by hand in the Meet UI is not visible.",
+			"handles":     map[string]any{"inputs": []string{"target (left)"}, "outputs": []string{"source (right)"}},
+		},
+		{
+			"type": "googleslides", "label": "Google Slides", "category": "Integrations",
+			"description": "Google Slides API: create presentations, add/duplicate/delete slides, fill title and body placeholders, add text boxes and images, speaker notes, find-and-replace across a deck, slide thumbnails, and build a deck from a template.",
+			"dataFields":  map[string]any{"integrationOp": "'create_presentation'|'get_presentation'|'list_slides'|'add_slide'|'duplicate_slide'|'delete_slide'|'delete_object'|'replace_all_text'|'add_text_box'|'add_image'|'update_speaker_notes'|'get_thumbnail'|'create_from_template'", "slidesPresentationId": "string", "slidesTitle": "string – deck title (templates ok)", "slidesSlideId": "string – page objectId from list_slides", "slidesLayout": "'TITLE_AND_BODY'|'TITLE_ONLY'|'SECTION_HEADER'|'BLANK' (default TITLE_AND_BODY)", "slidesHeading": "string – title placeholder text (templates ok)", "slidesBody": "string – body placeholder or text-box text (templates ok)", "slidesFind": "string – replace_all_text", "slidesReplace": "string – replace_all_text", "slidesImageUrl": "string – must be publicly reachable; Google fetches it", "slidesObjectId": "string – delete_object target", "slidesNotes": "string – speaker notes", "slidesTemplateId": "string – source deck for create_from_template", "slidesReplacements": "string – JSON map {\"{{name}}\":\"Jane\"}", "slidesIndex": "number – insertion position"},
+			"auth":        "OAuth connection used automatically — never set integrationToken.",
+			"handles":     map[string]any{"inputs": []string{"target (left)"}, "outputs": []string{"source (right)"}},
+		},
+		{
+			"type": "googleforms", "label": "Google Forms", "category": "Integrations",
+			"description": "Google Forms API: create forms, add questions of every answer type, edit form info and settings, turn quiz mode on, open or close responses, and read submitted responses.",
+			"dataFields":  map[string]any{"integrationOp": "'create_form'|'get_form'|'add_question'|'update_form_info'|'set_quiz_mode'|'delete_item'|'list_responses'|'get_response'|'set_publish_settings'", "formsFormId": "string", "formsTitle": "string (templates ok)", "formsDescription": "string – form description, or a question's helper text", "formsQuestion": "string – the question text (templates ok)", "formsQuestionType": "'TEXT'|'PARAGRAPH'|'RADIO'|'CHECKBOX'|'DROPDOWN'|'SCALE'|'DATE'|'TIME'", "formsOptions": "string – comma-separated choices; for SCALE the low,high bounds e.g. 1,5", "formsRequired": "'true'|'false'", "formsItemId": "string", "formsResponseId": "string", "formsIndex": "number – item position (0-based)", "formsIsQuiz": "'true'|'false'", "formsAccepting": "'true'|'false' – whether the form takes new responses", "formsLimit": "number (default 25)"},
+			"auth":        "OAuth connection used automatically — never set integrationToken. forms.create only accepts a title, so questions are added with add_question afterwards.",
+			"handles":     map[string]any{"inputs": []string{"target (left)"}, "outputs": []string{"source (right)"}},
+		},
+		{
+			"type": "googletasks", "label": "Google Tasks", "category": "Integrations",
+			"description": "Google Tasks API: task lists CRUD, tasks CRUD, complete a task, reorder or reparent tasks, move a task between lists, and clear completed tasks.",
+			"dataFields":  map[string]any{"integrationOp": "'list_task_lists'|'get_task_list'|'create_task_list'|'update_task_list'|'delete_task_list'|'list_tasks'|'get_task'|'create_task'|'update_task'|'complete_task'|'delete_task'|'move_task'|'clear_completed'", "tasksListId": "string – list id from list_task_lists; omit to use the primary list", "tasksTaskId": "string", "tasksTitle": "string (templates ok)", "tasksNotes": "string (templates ok)", "tasksDue": "string – RFC3339; Tasks keeps only the date", "tasksStatus": "'needsAction'|'completed'", "tasksParent": "string – parent task id, to make a subtask", "tasksPrevious": "string – sibling to position after", "tasksShowCompleted": "'true'|'false' (default false)", "tasksDueMin": "string – RFC3339 filter", "tasksDueMax": "string – RFC3339 filter", "tasksDestinationList": "string – move_task target list", "tasksLimit": "number (default 25)"},
+			"auth":        "OAuth connection used automatically — never set integrationToken.",
+			"handles":     map[string]any{"inputs": []string{"target (left)"}, "outputs": []string{"source (right)"}},
+		},
+		{
+			"type": "googlechat", "label": "Google Chat", "category": "Integrations",
+			"description": "Google Chat API: list/create/update/delete spaces, set a space up with members in one call, find a direct message, send/update/delete messages, reply in a thread, react, list messages, and manage membership.",
+			"dataFields":  map[string]any{"integrationOp": "'list_spaces'|'get_space'|'create_space'|'setup_space'|'update_space'|'delete_space'|'find_direct_message'|'send_message'|'reply_in_thread'|'get_message'|'update_message'|'delete_message'|'list_messages'|'add_reaction'|'list_members'|'add_member'|'remove_member'", "chatSpace": "string – spaces/{id} from list_integration_resources", "chatMessageId": "string – spaces/{s}/messages/{m}", "chatText": "string – message text (templates ok)", "chatThread": "string – thread name, or any key to group replies", "chatDisplayName": "string – space name", "chatSpaceType": "'SPACE'|'GROUP_CHAT' (default SPACE)", "chatMemberEmail": "string – user email; comma-separated for setup_space", "chatMembership": "string – spaces/{s}/members/{m} from list_members", "chatEmoji": "string – a literal emoji, not a :shortcode:", "chatFilter": "string – list filter", "chatLimit": "number (default 25)"},
+			"auth":        "OAuth connection used automatically — never set integrationToken. Google Chat needs a Workspace account (not personal @gmail.com) and a configured Chat app in the Cloud project; user credentials only reach spaces the user is a member of.",
+			"handles":     map[string]any{"inputs": []string{"target (left)"}, "outputs": []string{"source (right)"}},
+		},
+		{
+			"type": "googlekeep", "label": "Google Keep", "category": "Integrations",
+			"description": "Google Keep API: create text or checklist notes, read and list notes, delete notes, and share or unshare them.",
+			"dataFields":  map[string]any{"integrationOp": "'create_note'|'get_note'|'list_notes'|'delete_note'|'share_note'|'unshare_note'", "keepNoteName": "string – notes/{id}", "keepTitle": "string (templates ok)", "keepText": "string – body prose (templates ok)", "keepListItems": "string – one checklist item per line; use instead of keepText", "keepEmail": "string – comma-separated emails to share with", "keepFilter": "string – list filter", "keepLimit": "number (default 25)"},
+			"auth":        "OAuth connection used automatically — never set integrationToken. The Keep API is Google Workspace only (never personal @gmail.com) and a Workspace admin must enable it for the domain — warn the user before building on it.",
+			"handles":     map[string]any{"inputs": []string{"target (left)"}, "outputs": []string{"source (right)"}},
+		},
+		{
 			"type": "jira", "label": "Jira", "category": "Integrations",
 			"description": "Jira Cloud: search issues with JQL, create/read/update/delete issues, transition status, assign, comment, log work, attach files, link issues, browse projects and issue types, plus Agile boards and sprints.",
 			"dataFields":  map[string]any{"integrationOp": "'search_issues'|'get_issue'|'create_issue'|'update_issue'|'delete_issue'|'assign_issue'|'transition_issue'|'list_transitions'|'link_issues'|'add_comment'|'list_comments'|'add_worklog'|'list_worklogs'|'add_attachment'|'list_projects'|'get_project'|'list_issue_types'|'search_users'|'get_current_user'|'list_boards'|'list_sprints'|'get_sprint_issues'|'create_sprint'|'move_issues_to_sprint'", "jiraIssueKey": "string – e.g. ENG-1234 (comma-separated for move_issues_to_sprint)", "jiraProjectKey": "string – e.g. ENG (required for create_issue)", "jiraSummary": "string – issue title (templates ok)", "jiraDescription": "string – plain text, converted to Jira's rich format (templates ok)", "jiraIssueType": "'Task'|'Bug'|'Story'|'Epic'|'Sub-task' (default Task)", "jiraJql": "string – JQL, e.g. project = ENG AND status != Done ORDER BY created DESC", "jiraFields": "string – comma-separated fields to return from search_issues", "jiraAssignee": "string – accountId, email, or 'me'; empty on assign_issue unassigns", "jiraPriority": "'Highest'|'High'|'Medium'|'Low'|'Lowest'", "jiraLabels": "string – comma-separated; spaces become hyphens", "jiraParentKey": "string – parent issue for a sub-task or epic", "jiraDueDate": "string – YYYY-MM-DD", "jiraTransition": "string – target status name, e.g. 'In Progress' or 'Done'", "jiraComment": "string – comment text (also an optional note on transition_issue / add_worklog)", "jiraTimeSpent": "string – e.g. '3h 30m' (add_worklog)", "jiraStarted": "string – RFC3339 worklog start", "jiraLinkType": "'Blocks'|'Relates'|'Duplicate'|'Cloners'", "jiraLinkedIssue": "string – the other issue key for link_issues", "jiraQuery": "string – search_users query", "jiraBoardId": "string – from list_boards", "jiraSprintId": "string – from list_sprints, or 'backlog' to move issues out of a sprint", "jiraSprintName": "string – create_sprint", "jiraStartDate": "string – RFC3339 (create_sprint)", "jiraEndDate": "string – RFC3339 (create_sprint)", "jiraAttachName": "string – attachment file name", "jiraAttachBody": "string – attachment text content (templates ok)", "jiraLimit": "number (default 25)"},
@@ -729,7 +771,7 @@ Rules:
 - Space new nodes ~250px apart from existing ones.
 - After calling create_workflow or update_workflow, explain what you did and what the user needs to configure.
 
-Integrations (notion, linear, github, gitlab, gmail, stripe, shopify, jira, confluence, bitbucket):
+Integrations (notion, linear, github, gitlab, gmail, stripe, shopify, jira, confluence, bitbucket, plus the Google suite):
 - Auth is handled by OAuth connections — NEVER set integrationToken and never ask the user for API keys.
 - Before placing or editing an integration node, call list_integration_resources and use the REAL resource IDs (notionDatabaseId, notionPageId, linearTeamId, linearProjectId, githubRepo, gitlabProjectId, stripePriceId) from the response. Mention the resource by name when you explain the workflow.
 - If the provider is not connected, still build the node but leave the resource ID empty and tell the user to click Connect in the node's settings panel, then ask you to fill in the target resource.

@@ -71,9 +71,62 @@ func TestAtlassianProvidersShareOneApp(t *testing.T) {
 	}
 }
 
+// The six new Google services share the sign-in app but must each carry their
+// own scope, and every one needs offline access or the connection dies in an hour.
+func TestGoogleServiceScopes(t *testing.T) {
+	want := map[string]string{
+		"googlemeet":   "meetings.space.created",
+		"googleslides": "presentations",
+		"googleforms":  "forms.body",
+		"googletasks":  "auth/tasks",
+		"googlechat":   "chat.spaces",
+		"googlekeep":   "auth/keep",
+	}
+	seen := map[string]string{}
+	for provider, marker := range want {
+		prov, ok := oauthProviders[provider]
+		if !ok {
+			t.Errorf("%s is not registered", provider)
+			continue
+		}
+		if prov.clientIDEnv != "GOOGLE_CLIENT_ID" {
+			t.Errorf("%s should reuse the Google sign-in app, got %q", provider, prov.clientIDEnv)
+		}
+		scope := prov.extraAuthQ.Get("scope")
+		if !strings.Contains(scope, marker) {
+			t.Errorf("%s is missing its own API scope (%s): %q", provider, marker, scope)
+		}
+		// Google only returns a refresh token when asked offline, with consent.
+		if prov.extraAuthQ.Get("access_type") != "offline" {
+			t.Errorf("%s must request offline access or it cannot refresh", provider)
+		}
+		if prov.extraAuthQ.Get("prompt") != "consent" {
+			t.Errorf("%s must force the consent screen to receive a refresh token", provider)
+		}
+		if other, dup := seen[scope]; dup {
+			t.Errorf("%s and %s request identical scopes — one of them is wrong", provider, other)
+		}
+		seen[scope] = provider
+	}
+}
+
+// Google Chat and Keep are Workspace-only, which arrives as a 403. The executor
+// annotates that so the user isn't left guessing; assert the wiring exists.
+func TestWorkspaceOnlyProvidersAreRegistered(t *testing.T) {
+	for _, p := range []string{"googlechat", "googlekeep"} {
+		if _, ok := oauthProviders[p]; !ok {
+			t.Errorf("%s is not registered", p)
+		}
+		if _, ok := refreshTokenEndpoints[p]; !ok {
+			t.Errorf("%s cannot refresh", p)
+		}
+	}
+}
+
 // Every provider the UI can list must be registered, or /connect 404s.
 func TestNewProvidersAreListedAndRegistered(t *testing.T) {
-	for _, p := range []string{"jira", "confluence", "bitbucket"} {
+	for _, p := range []string{"jira", "confluence", "bitbucket",
+		"googlemeet", "googleslides", "googleforms", "googletasks", "googlechat", "googlekeep"} {
 		if _, ok := oauthProviders[p]; !ok {
 			t.Errorf("%s missing from oauthProviders", p)
 		}

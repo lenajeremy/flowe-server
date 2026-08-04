@@ -404,3 +404,58 @@ func firstNonEmptyStr(vals ...string) string {
 	}
 	return ""
 }
+
+// googleTasksResources lists the user's task lists, whose ids go in tasksListId.
+func googleTasksResources(token string) ([]integrationResource, error) {
+	raw, err := googleGet(token, "https://tasks.googleapis.com/tasks/v1/users/@me/lists?maxResults=100")
+	if err != nil {
+		return nil, err
+	}
+	var out struct {
+		Items []struct {
+			ID    string `json:"id"`
+			Title string `json:"title"`
+		} `json:"items"`
+	}
+	if json.Unmarshal(raw, &out) != nil {
+		return nil, fmt.Errorf("parse google task lists")
+	}
+	res := make([]integrationResource, 0, len(out.Items))
+	for _, l := range out.Items {
+		res = append(res, integrationResource{ID: l.ID, Name: l.Title, Type: "tasklist"})
+	}
+	return res, nil
+}
+
+// googleChatResources lists the spaces the user belongs to. Named spaces only —
+// a DM has no display name worth picking from a list.
+func googleChatResources(token string) ([]integrationResource, error) {
+	raw, err := googleGet(token, "https://chat.googleapis.com/v1/spaces?pageSize=100")
+	if err != nil {
+		return nil, err
+	}
+	var out struct {
+		Spaces []struct {
+			Name        string `json:"name"`
+			DisplayName string `json:"displayName"`
+			SpaceType   string `json:"spaceType"`
+		} `json:"spaces"`
+	}
+	if json.Unmarshal(raw, &out) != nil {
+		return nil, fmt.Errorf("parse google chat spaces")
+	}
+	res := make([]integrationResource, 0, len(out.Spaces))
+	for _, s := range out.Spaces {
+		if s.DisplayName == "" {
+			continue
+		}
+		res = append(res, integrationResource{ID: s.Name, Name: s.DisplayName, Type: "space"})
+	}
+	return res, nil
+}
+
+func googleGet(token, url string) ([]byte, error) {
+	req, _ := http.NewRequest(http.MethodGet, url, nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	return doOAuthRequest(req)
+}

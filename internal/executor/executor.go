@@ -992,6 +992,66 @@ func runNodeInner(ctx context.Context, node WorkflowASTNode, outputs map[string]
 		}
 		return runShopify(ctx, token, shop, d, outputs)
 
+	case NodeTypeGoogleMeet:
+		token := substituteTemplates(d.IntegrationToken, outputs)
+		if token == "" && IntegrationCredsLookup != nil {
+			token, _ = IntegrationCredsLookup(ownerID, "googlemeet")
+		}
+		if token == "" {
+			return "", fmt.Errorf("Google Meet is not connected — use Connect Google Meet in the node settings")
+		}
+		return runGoogleMeet(ctx, token, d, outputs)
+
+	case NodeTypeGoogleSlides:
+		token := substituteTemplates(d.IntegrationToken, outputs)
+		if token == "" && IntegrationCredsLookup != nil {
+			token, _ = IntegrationCredsLookup(ownerID, "googleslides")
+		}
+		if token == "" {
+			return "", fmt.Errorf("Google Slides is not connected — use Connect Google Slides in the node settings")
+		}
+		return runGoogleSlides(ctx, token, d, outputs)
+
+	case NodeTypeGoogleForms:
+		token := substituteTemplates(d.IntegrationToken, outputs)
+		if token == "" && IntegrationCredsLookup != nil {
+			token, _ = IntegrationCredsLookup(ownerID, "googleforms")
+		}
+		if token == "" {
+			return "", fmt.Errorf("Google Forms is not connected — use Connect Google Forms in the node settings")
+		}
+		return runGoogleForms(ctx, token, d, outputs)
+
+	case NodeTypeGoogleTasks:
+		token := substituteTemplates(d.IntegrationToken, outputs)
+		if token == "" && IntegrationCredsLookup != nil {
+			token, _ = IntegrationCredsLookup(ownerID, "googletasks")
+		}
+		if token == "" {
+			return "", fmt.Errorf("Google Tasks is not connected — use Connect Google Tasks in the node settings")
+		}
+		return runGoogleTasks(ctx, token, d, outputs)
+
+	case NodeTypeGoogleChat:
+		token := substituteTemplates(d.IntegrationToken, outputs)
+		if token == "" && IntegrationCredsLookup != nil {
+			token, _ = IntegrationCredsLookup(ownerID, "googlechat")
+		}
+		if token == "" {
+			return "", fmt.Errorf("Google Chat is not connected — use Connect Google Chat in the node settings")
+		}
+		return runGoogleChat(ctx, token, d, outputs)
+
+	case NodeTypeGoogleKeep:
+		token := substituteTemplates(d.IntegrationToken, outputs)
+		if token == "" && IntegrationCredsLookup != nil {
+			token, _ = IntegrationCredsLookup(ownerID, "googlekeep")
+		}
+		if token == "" {
+			return "", fmt.Errorf("Google Keep is not connected — use Connect Google Keep in the node settings")
+		}
+		return runGoogleKeep(ctx, token, d, outputs)
+
 	case NodeTypeJira:
 		token := substituteTemplates(d.IntegrationToken, outputs)
 		cloudID := ""
