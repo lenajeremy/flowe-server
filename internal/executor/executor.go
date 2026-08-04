@@ -1052,6 +1052,16 @@ func runNodeInner(ctx context.Context, node WorkflowASTNode, outputs map[string]
 		}
 		return runGoogleKeep(ctx, token, d, outputs)
 
+	case NodeTypeGranola:
+		key := substituteTemplates(d.IntegrationToken, outputs)
+		if key == "" && IntegrationCredsLookup != nil {
+			key, _ = IntegrationCredsLookup(ownerID, "granola")
+		}
+		if key == "" {
+			return "", fmt.Errorf("Granola is not connected — add your Granola API key in the node settings")
+		}
+		return runGranola(ctx, key, d, outputs)
+
 	case NodeTypeJira:
 		token := substituteTemplates(d.IntegrationToken, outputs)
 		cloudID := ""

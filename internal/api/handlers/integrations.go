@@ -266,7 +266,7 @@ var allProviders = []string{
 	"googleslides", "googleforms", "googlemeet", "googlechat", "googletasks",
 	"googlekeep", "outlook", "slack", "notion", "linear",
 	"github", "gitlab", "jira", "confluence", "bitbucket",
-	"stripe", "shopify",
+	"stripe", "shopify", "granola",
 }
 
 func oauthRedirectURI(provider string) string {
@@ -359,13 +359,24 @@ func (h *WorkflowHandler) ListIntegrations(c *gin.Context) {
 
 	out := []gin.H{}
 	for _, p := range allProviders {
-		prov := oauthProviders[p]
 		conn, connected := byProvider[p]
+		// An API-key provider is always available: the user supplies the
+		// credential, so there is nothing for the server to have configured.
+		keyProv, isKeyAuth := apiKeyProviders[p]
+		available := isKeyAuth
+		if !isKeyAuth {
+			prov := oauthProviders[p]
+			available = os.Getenv(prov.clientIDEnv) != "" && os.Getenv(prov.secretEnv) != ""
+		}
 		entry := gin.H{
 			"provider":  p,
 			"connected": connected,
-			"available": os.Getenv(prov.clientIDEnv) != "" && os.Getenv(prov.secretEnv) != "",
+			"available": available,
 			"workflows": usage[p],
+		}
+		if isKeyAuth {
+			entry["auth_style"] = "api_key"
+			entry["key_hint"] = keyProv.hint
 		}
 		if connected {
 			entry["workspace_name"] = conn.WorkspaceName
@@ -535,7 +546,7 @@ func (h *WorkflowHandler) CallbackIntegration(c *gin.Context) {
 // DisconnectIntegration removes the current user's connection for a provider.
 func (h *WorkflowHandler) DisconnectIntegration(c *gin.Context) {
 	provider := c.Param("provider")
-	if _, ok := oauthProviders[provider]; !ok {
+	if !knownProvider(provider) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "unknown provider"})
 		return
 	}
@@ -610,7 +621,7 @@ func (h *WorkflowHandler) listProviderResources(userID, provider string) ([]inte
 // pages, repos, projects, labels, prices, products, …) for the resource picker.
 func (h *WorkflowHandler) IntegrationResources(c *gin.Context) {
 	provider := c.Param("provider")
-	if _, ok := oauthProviders[provider]; !ok {
+	if !knownProvider(provider) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "unknown provider"})
 		return
 	}

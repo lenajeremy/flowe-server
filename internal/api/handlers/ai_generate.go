@@ -294,7 +294,7 @@ var toolListIntegrationResources = map[string]any{
 		"properties": map[string]any{
 			"provider": map[string]any{
 				"type":        "string",
-				"enum":        []string{"gmail", "googlecalendar", "googledrive", "googledocs", "googlesheets", "googleslides", "googleforms", "googlemeet", "googlechat", "googletasks", "googlekeep", "outlook", "slack", "notion", "linear", "github", "gitlab", "jira", "confluence", "bitbucket", "stripe", "shopify"},
+				"enum":        []string{"gmail", "googlecalendar", "googledrive", "googledocs", "googlesheets", "googleslides", "googleforms", "googlemeet", "googlechat", "googletasks", "googlekeep", "outlook", "slack", "notion", "linear", "github", "gitlab", "jira", "confluence", "bitbucket", "stripe", "shopify", "granola"},
 				"description": "Which provider to inspect. Omit to list all.",
 			},
 		},
@@ -682,6 +682,13 @@ func nodeCatalog() []map[string]any {
 			"description": "Bitbucket Cloud: repositories, pull requests (create/merge/decline/approve/comment/diff), branches, commits, read and commit files, the issue tracker, and Pipelines.",
 			"dataFields":  map[string]any{"integrationOp": "'list_repositories'|'get_repository'|'create_repository'|'list_pull_requests'|'get_pull_request'|'create_pull_request'|'merge_pull_request'|'decline_pull_request'|'approve_pull_request'|'comment_on_pull_request'|'list_pr_comments'|'list_pr_commits'|'get_pr_diff'|'list_branches'|'create_branch'|'delete_branch'|'list_commits'|'get_commit'|'get_file'|'commit_file'|'list_issues'|'get_issue'|'create_issue'|'comment_on_issue'|'list_pipelines'|'trigger_pipeline'|'list_workspaces'|'get_current_user'", "bitbucketWorkspace": "string – workspace slug; omit to use the connected workspace", "bitbucketRepo": "string – repository slug (required for repository operations)", "bitbucketPrId": "string – pull request id", "bitbucketTitle": "string – PR or issue title (templates ok)", "bitbucketBody": "string – PR description, comment text, or issue body (templates ok)", "bitbucketSource": "string – PR source branch", "bitbucketDest": "string – PR destination branch (defaults to the repo's main branch)", "bitbucketBranch": "string – branch to create/delete, commit to, or run a pipeline on", "bitbucketRef": "string – branch, tag, or commit hash to read from (default main)", "bitbucketPath": "string – file path, e.g. docs/readme.md", "bitbucketContent": "string – file content for commit_file (templates ok)", "bitbucketMessage": "string – commit or merge message", "bitbucketMergeStrategy": "'merge_commit'|'squash'|'fast_forward'", "bitbucketState": "PR state 'OPEN'|'MERGED'|'DECLINED'|'SUPERSEDED', or issue state 'new'|'open'|'resolved'|'closed'", "bitbucketQuery": "string – repository list filter (Bitbucket query syntax)", "bitbucketPrivate": "'true'|'false' – create_repository (default true)", "bitbucketIssueId": "string – issue tracker id", "bitbucketKind": "'bug'|'enhancement'|'proposal'|'task'", "bitbucketPriority": "'trivial'|'minor'|'major'|'critical'|'blocker'", "bitbucketLimit": "number (default 25)"},
 			"auth":        "OAuth connection used automatically — never set integrationToken. Bitbucket scopes are fixed on the OAuth consumer, so a 403 means the consumer lacks that permission.",
+			"handles":     map[string]any{"inputs": []string{"target (left)"}, "outputs": []string{"source (right)"}},
+		},
+		{
+			"type": "granola", "label": "Granola", "category": "Integrations",
+			"description": "Granola meeting notes: list notes, read a note's AI summary, and pull the full transcript as readable text for summarising or extracting action items.",
+			"dataFields":  map[string]any{"integrationOp": "'list_notes'|'get_note'|'get_transcript'", "granolaNoteId": "string – note id from list_notes", "granolaCreatedAfter": "string – RFC3339; use it to scope a digest to notes since the last run", "granolaCursor": "string – pagination cursor from a previous list_notes", "granolaLimit": "number"},
+			"auth":        "API key, stored per user — never set integrationToken. Granola API access needs a Business or Enterprise workspace plan. Read-only: there is no way to create or edit notes.",
 			"handles":     map[string]any{"inputs": []string{"target (left)"}, "outputs": []string{"source (right)"}},
 		},
 		{

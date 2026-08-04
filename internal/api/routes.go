@@ -141,6 +141,7 @@ func InitServer(port int, db *database.DBClient, rdb *redis.Client) {
 		api.GET("/integrations", wh.ListIntegrations)
 		api.GET("/integrations/:provider/connect", wh.ConnectIntegration)
 		api.GET("/integrations/:provider/resources", wh.IntegrationResources)
+		api.PUT("/integrations/:provider/key", wh.SetIntegrationKey)
 		api.DELETE("/integrations/:provider", wh.DisconnectIntegration)
 	}
 

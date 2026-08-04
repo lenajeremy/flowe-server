@@ -37,6 +37,7 @@ const (
 	NodeTypeGoogleTasks      NodeType = "googletasks"
 	NodeTypeGoogleChat       NodeType = "googlechat"
 	NodeTypeGoogleKeep       NodeType = "googlekeep"
+	NodeTypeGranola          NodeType = "granola"
 	NodeTypeData             NodeType = "data"
 )
 
@@ -431,6 +432,12 @@ type FlowNodeData struct {
 	KeepEmail     string `json:"keepEmail,omitempty"`     // comma-separated, for sharing
 	KeepFilter    string `json:"keepFilter,omitempty"`
 	KeepLimit     int    `json:"keepLimit,omitempty"`
+
+	// granola
+	GranolaNoteId       string `json:"granolaNoteId,omitempty"`
+	GranolaCreatedAfter string `json:"granolaCreatedAfter,omitempty"` // RFC3339; scopes a digest to "since last run"
+	GranolaCursor       string `json:"granolaCursor,omitempty"`
+	GranolaLimit        int    `json:"granolaLimit,omitempty"`
 }
 
 type Position struct {
