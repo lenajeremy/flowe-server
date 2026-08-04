@@ -286,13 +286,27 @@ var oauthProviders = map[string]oauthProvider{
 				"webhooks:read webhooks:write accounts:read"},
 		},
 	},
-	// Calendly's booking endpoints need a paid plan; the grant itself does not
-	// say so, and a 403 at run time is the first sign.
+	// Calendly's booking endpoints need a paid plan; the grant itself does not say
+	// so, and a 403 at run time is the first sign.
+	//
+	// Scopes are requested here even though Calendly's own OAuth walkthrough omits
+	// them from its example URL — the scope reference does define them, and a write
+	// scope implies its matching read, which is why the read halves of
+	// scheduled_events, organizations and webhooks are absent rather than missing.
+	//
+	// Only one redirect URI is allowed per Calendly app, so each deployment
+	// environment needs its own app and its own CALENDLY_CLIENT_ID.
 	"calendly": {
 		name:         "calendly",
 		authorizeURL: "https://auth.calendly.com/oauth/authorize",
 		clientIDEnv:  "CALENDLY_CLIENT_ID",
 		secretEnv:    "CALENDLY_CLIENT_SECRET",
+		extraAuthQ: url.Values{
+			"scope": {"users:read event_types:read availability:read " +
+				"scheduled_events:write scheduling_links:write " +
+				"organizations:write routing_forms:read webhooks:write " +
+				"data_compliance:write"},
+		},
 	},
 	// ClickUp authorizes on the app domain and takes no scope — see
 	// integrations_clickup.go.
