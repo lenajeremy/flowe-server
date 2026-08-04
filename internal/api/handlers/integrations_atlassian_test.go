@@ -234,3 +234,41 @@ func TestOnlyPKCEProvidersGetAChallenge(t *testing.T) {
 		}
 	}
 }
+
+// A provider that expires its tokens needs both a refresh endpoint AND whatever
+// scope earns it a refresh token. Having one without the other looks fine until
+// the connection silently dies days later.
+func TestExpiringProvidersCanActuallyRenew(t *testing.T) {
+	// provider → the scope substring that earns a refresh token, if one is needed.
+	needsOfflineScope := map[string]string{
+		"jira":       "offline_access",
+		"confluence": "offline_access",
+		"typeform":   "offline",
+		"dropbox":    "", // uses token_access_type=offline instead of a scope
+	}
+	for provider, marker := range needsOfflineScope {
+		prov, ok := oauthProviders[provider]
+		if !ok {
+			t.Errorf("%s is not registered", provider)
+			continue
+		}
+		if _, ok := refreshTokenEndpoints[provider]; !ok {
+			t.Errorf("%s expires its tokens but has no refresh endpoint", provider)
+		}
+		if marker != "" && !strings.Contains(prov.extraAuthQ.Get("scope"), marker) {
+			t.Errorf("%s must request %q or it never receives a refresh token: %q",
+				provider, marker, prov.extraAuthQ.Get("scope"))
+		}
+	}
+	// Dropbox earns its refresh token through a parameter rather than a scope.
+	if oauthProviders["dropbox"].extraAuthQ.Get("token_access_type") != "offline" {
+		t.Error("dropbox must request offline access or its short-lived token cannot be renewed")
+	}
+	// The reverse: a provider with no expiry must not claim a refresh endpoint,
+	// which would only ever fail.
+	for _, p := range []string{"clickup", "netlify"} {
+		if _, ok := refreshTokenEndpoints[p]; ok {
+			t.Errorf("%s issues no refresh token, so a refresh endpoint is misleading", p)
+		}
+	}
+}

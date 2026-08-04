@@ -271,13 +271,19 @@ var oauthProviders = map[string]oauthProvider{
 				"file_requests.read file_requests.write"},
 		},
 	},
+	// Typeform access tokens expire after a week, and it only returns a refresh
+	// token when the "offline" scope is asked for — without it the connection dies
+	// after seven days with nothing to renew from. Its refresh tokens also rotate,
+	// which the shared refresh path already persists.
 	"typeform": {
 		name:         "typeform",
 		authorizeURL: "https://api.typeform.com/oauth/authorize",
 		clientIDEnv:  "TYPEFORM_CLIENT_ID",
 		secretEnv:    "TYPEFORM_CLIENT_SECRET",
 		extraAuthQ: url.Values{
-			"scope": {"forms:read forms:write responses:read responses:write workspaces:read workspaces:write themes:read images:read webhooks:read webhooks:write accounts:read"},
+			"scope": {"offline forms:read forms:write responses:read responses:write " +
+				"workspaces:read workspaces:write themes:read images:read " +
+				"webhooks:read webhooks:write accounts:read"},
 		},
 	},
 	// Calendly's booking endpoints need a paid plan; the grant itself does not
