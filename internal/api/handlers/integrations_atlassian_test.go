@@ -1,6 +1,8 @@
 package handlers
 
 import (
+	"crypto/sha256"
+	"encoding/base64"
 	"strings"
 	"testing"
 )
@@ -178,4 +180,57 @@ func contains(list []string, want string) bool {
 		}
 	}
 	return false
+}
+
+// PKCE is not optional for Airtable: an authorize request without a challenge is
+// rejected, and a verifier that does not survive to the token exchange fails it.
+func TestPKCEChallengeIsS256OfTheVerifier(t *testing.T) {
+	v := newPKCEVerifier()
+	if len(v) < 43 {
+		t.Fatalf("RFC 7636 requires a verifier of at least 43 characters, got %d", len(v))
+	}
+	// The verifier must be URL-safe, since it travels as a query/form value.
+	if strings.ContainsAny(v, "+/=") {
+		t.Errorf("verifier is not base64url-encoded: %q", v)
+	}
+	sum := sha256.Sum256([]byte(v))
+	want := base64.RawURLEncoding.EncodeToString(sum[:])
+	if got := pkceChallenge(v); got != want {
+		t.Errorf("challenge is not the S256 of the verifier:\n got %q\nwant %q", got, want)
+	}
+	// Two verifiers must never collide, or one flow could redeem another's code.
+	if newPKCEVerifier() == v {
+		t.Error("two verifiers came back identical")
+	}
+}
+
+func TestOAuthStateCarriesTheVerifierAndIsSingleUse(t *testing.T) {
+	state := newOAuthStateFull("user-1", "https://example.com", "", "verifier-abc")
+	got, ok := consumeOAuthState(state)
+	if !ok {
+		t.Fatal("state did not validate")
+	}
+	if got.verifier != "verifier-abc" {
+		t.Errorf("verifier lost in transit: %q", got.verifier)
+	}
+	if got.userID != "user-1" || got.origin != "https://example.com" {
+		t.Errorf("state lost its other fields: %+v", got)
+	}
+	// Replaying a state must fail, or a leaked code could be redeemed twice.
+	if _, ok := consumeOAuthState(state); ok {
+		t.Error("state was accepted a second time")
+	}
+}
+
+func TestOnlyPKCEProvidersGetAChallenge(t *testing.T) {
+	if !pkceProviders["airtable"] {
+		t.Error("airtable must use PKCE — Airtable rejects the flow without it")
+	}
+	// Sending an unexpected code_challenge to a provider that does not support it
+	// can fail the authorize request, so the set stays deliberately narrow.
+	for _, p := range []string{"github", "jira", "googlemeet", "bitbucket"} {
+		if pkceProviders[p] {
+			t.Errorf("%s is not known to support PKCE; adding it needs verification first", p)
+		}
+	}
 }

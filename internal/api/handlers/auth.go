@@ -326,7 +326,8 @@ func oauthRedirectBase() string {
 // GET /api/auth/google/callback
 func (h *WorkflowHandler) AuthGoogleCallback(c *gin.Context) {
 	ctx := c.Request.Context()
-	_, openerOrig, _, stateOK := consumeOAuthState(c.Query("state"))
+	st, stateOK := consumeOAuthState(c.Query("state"))
+	openerOrig := st.origin
 	if !stateOK {
 		slog.WarnContext(ctx, "auth: google callback failed", "reason", "invalid_or_expired_state")
 		telemetry.AuthEvent(ctx, "oauth_google", "error")

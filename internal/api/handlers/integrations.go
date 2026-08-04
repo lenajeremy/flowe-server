@@ -227,6 +227,15 @@ var oauthProviders = map[string]oauthProvider{
 			"prompt":      {"consent"},
 		},
 	},
+	// Airtable requires PKCE and Basic auth on the token endpoint — see
+	// integrations_airtable.go.
+	"airtable": {
+		name:         "airtable",
+		authorizeURL: airtableAuthorizeURL,
+		clientIDEnv:  "AIRTABLE_CLIENT_ID",
+		secretEnv:    "AIRTABLE_CLIENT_SECRET",
+		extraAuthQ:   airtableAuthorizeQuery(),
+	},
 	// Jira and Confluence share one Atlassian OAuth app, differing only in
 	// scope — see integrations_atlassian.go.
 	"jira": {
@@ -266,7 +275,7 @@ var allProviders = []string{
 	"googleslides", "googleforms", "googlemeet", "googlechat", "googletasks",
 	"googlekeep", "outlook", "slack", "notion", "linear",
 	"github", "gitlab", "jira", "confluence", "bitbucket",
-	"stripe", "shopify", "granola", "resend", "sendgrid", "kit",
+	"stripe", "shopify", "granola", "resend", "sendgrid", "kit", "airtable",
 }
 
 func oauthRedirectURI(provider string) string {
@@ -287,10 +296,15 @@ func currentUserID(c *gin.Context) string {
 // ── CSRF state (in-memory, single instance) ───────────────────
 
 type oauthStateEntry struct {
-	userID  string
-	origin  string // opener origin for the popup's postMessage target
-	shop    string // shopify shop domain (empty for other providers)
-	expires time.Time
+	userID string
+	origin string // opener origin for the popup's postMessage target
+	shop   string // shopify shop domain (empty for other providers)
+	// verifier is the PKCE code verifier for providers that require it. It is
+	// generated with the state and never leaves the server: only its SHA-256
+	// challenge goes to the provider, and the verifier is replayed at token
+	// exchange to prove the same client started the flow.
+	verifier string
+	expires  time.Time
 }
 
 var (
@@ -299,10 +313,14 @@ var (
 )
 
 func newOAuthState(userID, origin string) string {
-	return newOAuthStateShop(userID, origin, "")
+	return newOAuthStateFull(userID, origin, "", "")
 }
 
 func newOAuthStateShop(userID, origin, shop string) string {
+	return newOAuthStateFull(userID, origin, shop, "")
+}
+
+func newOAuthStateFull(userID, origin, shop, verifier string) string {
 	b := make([]byte, 16)
 	_, _ = rand.Read(b)
 	s := hex.EncodeToString(b)
@@ -313,21 +331,24 @@ func newOAuthStateShop(userID, origin, shop string) string {
 			delete(oauthStates, k)
 		}
 	}
-	oauthStates[s] = oauthStateEntry{userID: userID, origin: origin, shop: shop, expires: time.Now().Add(10 * time.Minute)}
+	oauthStates[s] = oauthStateEntry{
+		userID: userID, origin: origin, shop: shop, verifier: verifier,
+		expires: time.Now().Add(10 * time.Minute),
+	}
 	return s
 }
 
-// consumeOAuthState validates the state and returns the user, opener origin,
-// and shop domain (shopify only) that started the flow.
-func consumeOAuthState(s string) (userID, origin, shop string, ok bool) {
+// consumeOAuthState validates the state and returns the entry that started the
+// flow. The state is single-use: it is deleted whether or not it was still valid.
+func consumeOAuthState(s string) (oauthStateEntry, bool) {
 	oauthStatesMu.Lock()
 	defer oauthStatesMu.Unlock()
 	e, found := oauthStates[s]
 	delete(oauthStates, s)
 	if !found || time.Now().After(e.expires) {
-		return "", "", "", false
+		return oauthStateEntry{}, false
 	}
-	return e.userID, e.origin, e.shop, true
+	return e, true
 }
 
 // openerOrigin extracts the validated ?origin= param the frontend appends
@@ -448,7 +469,13 @@ func (h *WorkflowHandler) ConnectIntegration(c *gin.Context) {
 	q.Set("client_id", clientID)
 	q.Set("redirect_uri", oauthRedirectURI(prov.name))
 	q.Set("response_type", "code")
-	q.Set("state", newOAuthState(currentUserID(c), openerOrigin(c)))
+	verifier := ""
+	if pkceProviders[prov.name] {
+		verifier = newPKCEVerifier()
+		q.Set("code_challenge", pkceChallenge(verifier))
+		q.Set("code_challenge_method", "S256")
+	}
+	q.Set("state", newOAuthStateFull(currentUserID(c), openerOrigin(c), "", verifier))
 	for k, vs := range prov.extraAuthQ {
 		for _, v := range vs {
 			q.Set(k, v)
@@ -468,7 +495,8 @@ func (h *WorkflowHandler) CallbackIntegration(c *gin.Context) {
 		return
 	}
 	ctx := c.Request.Context()
-	userID, openerOrig, shop, stateOK := consumeOAuthState(c.Query("state"))
+	st, stateOK := consumeOAuthState(c.Query("state"))
+	userID, openerOrig, shop := st.userID, st.origin, st.shop
 	if errParam := c.Query("error"); errParam != "" {
 		slog.WarnContext(ctx, "integration connect failed", "provider", provider, "reason", truncate(errParam, 200))
 		telemetry.AuthEvent(ctx, "integration_oauth", "error")
@@ -511,6 +539,8 @@ func (h *WorkflowHandler) CallbackIntegration(c *gin.Context) {
 	case "googlecalendar", "googledrive", "googledocs", "googlesheets",
 		"googlemeet", "googleslides", "googleforms", "googletasks", "googlechat", "googlekeep":
 		conn, err = exchangeGoogleServiceCode(provider, code)
+	case "airtable":
+		conn, err = exchangeAirtableCode(code, st.verifier)
 	case "jira", "confluence":
 		conn, err = exchangeAtlassianCode(provider, code)
 	case "bitbucket":
@@ -605,6 +635,8 @@ func (h *WorkflowHandler) listProviderResources(userID, provider string) ([]inte
 		return confluenceResources(token, workspace)
 	case "bitbucket":
 		return bitbucketResources(token, workspace)
+	case "airtable":
+		return airtableResources(token)
 	case "googletasks":
 		return googleTasksResources(token)
 	case "googlechat":
@@ -1007,6 +1039,7 @@ var refreshTokenEndpoints = map[string]refreshEndpoint{
 	"outlook":        {tokenURL: "https://login.microsoftonline.com/common/oauth2/v2.0/token", clientIDEnv: "MICROSOFT_CLIENT_ID", secretEnv: "MICROSOFT_CLIENT_SECRET"},
 	"jira":           {tokenURL: atlassianTokenURL, clientIDEnv: "ATLASSIAN_CLIENT_ID", secretEnv: "ATLASSIAN_CLIENT_SECRET", jsonBody: true},
 	"confluence":     {tokenURL: atlassianTokenURL, clientIDEnv: "ATLASSIAN_CLIENT_ID", secretEnv: "ATLASSIAN_CLIENT_SECRET", jsonBody: true},
+	"airtable":       {tokenURL: airtableTokenURL, clientIDEnv: "AIRTABLE_CLIENT_ID", secretEnv: "AIRTABLE_CLIENT_SECRET", basicAuth: true},
 	"bitbucket":      {tokenURL: bitbucketTokenURL, clientIDEnv: "BITBUCKET_CLIENT_ID", secretEnv: "BITBUCKET_CLIENT_SECRET", basicAuth: true},
 }
 

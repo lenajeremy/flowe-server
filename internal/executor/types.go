@@ -41,6 +41,7 @@ const (
 	NodeTypeResend           NodeType = "resend"
 	NodeTypeSendGrid         NodeType = "sendgrid"
 	NodeTypeKit              NodeType = "kit"
+	NodeTypeAirtable         NodeType = "airtable"
 	NodeTypeData             NodeType = "data"
 )
 
@@ -527,6 +528,36 @@ type FlowNodeData struct {
 	KitDescription  string `json:"kitDescription,omitempty"`
 	KitSendAt       string `json:"kitSendAt,omitempty"` // RFC3339; omit to leave a broadcast as a draft
 	KitLimit        int    `json:"kitLimit,omitempty"`
+
+	// airtable
+	AirtableBaseId        string `json:"airtableBaseId,omitempty"`
+	AirtableTable         string `json:"airtableTable,omitempty"`    // name or table id
+	AirtableTableId       string `json:"airtableTableId,omitempty"`  // schema ops need the id, not the name
+	AirtableRecordId      string `json:"airtableRecordId,omitempty"` // comma-separated for delete_records
+	AirtableFields        string `json:"airtableFields,omitempty"`   // JSON object for a single record
+	AirtableRecords       string `json:"airtableRecords,omitempty"`  // JSON array, max 10 per request
+	AirtableTypecast      string `json:"airtableTypecast,omitempty"` // "false" to disable coercion
+	AirtableFormula       string `json:"airtableFormula,omitempty"`  // filterByFormula
+	AirtableView          string `json:"airtableView,omitempty"`
+	AirtableFieldNames    string `json:"airtableFieldNames,omitempty"` // comma-separated columns to return
+	AirtableSortField     string `json:"airtableSortField,omitempty"`
+	AirtableSortDirection string `json:"airtableSortDirection,omitempty"` // asc | desc
+	AirtableOffset        string `json:"airtableOffset,omitempty"`        // pagination
+	AirtableMergeOn       string `json:"airtableMergeOn,omitempty"`       // upsert key field(s)
+	AirtableComment       string `json:"airtableComment,omitempty"`
+	AirtableCommentId     string `json:"airtableCommentId,omitempty"`
+	AirtableName          string `json:"airtableName,omitempty"` // base / table / field name
+	AirtableDescription   string `json:"airtableDescription,omitempty"`
+	AirtableWorkspaceId   string `json:"airtableWorkspaceId,omitempty"`
+	AirtableTables        string `json:"airtableTables,omitempty"`      // JSON array for create_base
+	AirtableTableFields   string `json:"airtableTableFields,omitempty"` // JSON array for create_table
+	AirtableFieldType     string `json:"airtableFieldType,omitempty"`
+	AirtableFieldOptions  string `json:"airtableFieldOptions,omitempty"` // JSON object
+	AirtableFieldId       string `json:"airtableFieldId,omitempty"`
+	AirtableUrl           string `json:"airtableUrl,omitempty"` // webhook notification URL
+	AirtableWebhookId     string `json:"airtableWebhookId,omitempty"`
+	AirtableCursor        string `json:"airtableCursor,omitempty"`
+	AirtableLimit         int    `json:"airtableLimit,omitempty"`
 }
 
 type Position struct {
