@@ -227,6 +227,14 @@ var oauthProviders = map[string]oauthProvider{
 			"prompt":      {"consent"},
 		},
 	},
+	// ClickUp authorizes on the app domain and takes no scope — see
+	// integrations_clickup.go.
+	"clickup": {
+		name:         "clickup",
+		authorizeURL: clickupAuthorizeURL,
+		clientIDEnv:  "CLICKUP_CLIENT_ID",
+		secretEnv:    "CLICKUP_CLIENT_SECRET",
+	},
 	// Airtable requires PKCE and Basic auth on the token endpoint — see
 	// integrations_airtable.go.
 	"airtable": {
@@ -275,7 +283,7 @@ var allProviders = []string{
 	"googleslides", "googleforms", "googlemeet", "googlechat", "googletasks",
 	"googlekeep", "outlook", "slack", "notion", "linear",
 	"github", "gitlab", "jira", "confluence", "bitbucket",
-	"stripe", "shopify", "granola", "resend", "sendgrid", "kit", "airtable",
+	"stripe", "shopify", "granola", "resend", "sendgrid", "kit", "airtable", "clickup",
 }
 
 func oauthRedirectURI(provider string) string {
@@ -541,6 +549,8 @@ func (h *WorkflowHandler) CallbackIntegration(c *gin.Context) {
 		conn, err = exchangeGoogleServiceCode(provider, code)
 	case "airtable":
 		conn, err = exchangeAirtableCode(code, st.verifier)
+	case "clickup":
+		conn, err = exchangeClickUpCode(code)
 	case "jira", "confluence":
 		conn, err = exchangeAtlassianCode(provider, code)
 	case "bitbucket":
@@ -637,6 +647,8 @@ func (h *WorkflowHandler) listProviderResources(userID, provider string) ([]inte
 		return bitbucketResources(token, workspace)
 	case "airtable":
 		return airtableResources(token)
+	case "clickup":
+		return clickupResources(token)
 	case "googletasks":
 		return googleTasksResources(token)
 	case "googlechat":

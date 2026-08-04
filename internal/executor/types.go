@@ -42,6 +42,7 @@ const (
 	NodeTypeSendGrid         NodeType = "sendgrid"
 	NodeTypeKit              NodeType = "kit"
 	NodeTypeAirtable         NodeType = "airtable"
+	NodeTypeClickUp          NodeType = "clickup"
 	NodeTypeData             NodeType = "data"
 )
 
@@ -558,6 +559,44 @@ type FlowNodeData struct {
 	AirtableWebhookId     string `json:"airtableWebhookId,omitempty"`
 	AirtableCursor        string `json:"airtableCursor,omitempty"`
 	AirtableLimit         int    `json:"airtableLimit,omitempty"`
+
+	// clickup
+	ClickUpWorkspaceId     string `json:"clickupWorkspaceId,omitempty"` // "team" in ClickUp's API
+	ClickUpSpaceId         string `json:"clickupSpaceId,omitempty"`
+	ClickUpFolderId        string `json:"clickupFolderId,omitempty"`
+	ClickUpListId          string `json:"clickupListId,omitempty"` // comma-separated for search_tasks
+	ClickUpTaskId          string `json:"clickupTaskId,omitempty"`
+	ClickUpCustomTaskIds   string `json:"clickupCustomTaskIds,omitempty"` // "true" when the id is a custom one
+	ClickUpName            string `json:"clickupName,omitempty"`
+	ClickUpDescription     string `json:"clickupDescription,omitempty"`
+	ClickUpStatus          string `json:"clickupStatus,omitempty"`
+	ClickUpStatuses        string `json:"clickupStatuses,omitempty"`     // comma-separated filter
+	ClickUpPriority        string `json:"clickupPriority,omitempty"`     // 1 urgent … 4 low
+	ClickUpDueDate         string `json:"clickupDueDate,omitempty"`      // unix ms
+	ClickUpTimeEstimate    string `json:"clickupTimeEstimate,omitempty"` // ms
+	ClickUpAssignees       string `json:"clickupAssignees,omitempty"`    // comma-separated numeric user IDs
+	ClickUpParent          string `json:"clickupParent,omitempty"`       // parent task, making a subtask
+	ClickUpTagName         string `json:"clickupTagName,omitempty"`
+	ClickUpSubtasks        string `json:"clickupSubtasks,omitempty"`      // "true" to include subtasks
+	ClickUpIncludeClosed   string `json:"clickupIncludeClosed,omitempty"` // "true"
+	ClickUpOrderBy         string `json:"clickupOrderBy,omitempty"`
+	ClickUpComment         string `json:"clickupComment,omitempty"`
+	ClickUpCommentId       string `json:"clickupCommentId,omitempty"`
+	ClickUpChecklistId     string `json:"clickupChecklistId,omitempty"`
+	ClickUpChecklistItemId string `json:"clickupChecklistItemId,omitempty"`
+	ClickUpResolved        string `json:"clickupResolved,omitempty"` // "true" | "false"
+	ClickUpFieldId         string `json:"clickupFieldId,omitempty"`
+	ClickUpFieldValue      string `json:"clickupFieldValue,omitempty"`
+	ClickUpDependsOn       string `json:"clickupDependsOn,omitempty"`
+	ClickUpDependencyOf    string `json:"clickupDependencyOf,omitempty"`
+	ClickUpLinksTo         string `json:"clickupLinksTo,omitempty"`
+	ClickUpDuration        string `json:"clickupDuration,omitempty"`  // ms
+	ClickUpStartDate       string `json:"clickupStartDate,omitempty"` // unix ms
+	ClickUpEndDate         string `json:"clickupEndDate,omitempty"`
+	ClickUpUrl             string `json:"clickupUrl,omitempty"`    // webhook endpoint
+	ClickUpEvents          string `json:"clickupEvents,omitempty"` // comma-separated
+	ClickUpWebhookId       string `json:"clickupWebhookId,omitempty"`
+	ClickUpLimit           int    `json:"clickupLimit,omitempty"`
 }
 
 type Position struct {

@@ -1092,6 +1092,16 @@ func runNodeInner(ctx context.Context, node WorkflowASTNode, outputs map[string]
 		}
 		return runAirtable(ctx, token, d, outputs)
 
+	case NodeTypeClickUp:
+		token := substituteTemplates(d.IntegrationToken, outputs)
+		if token == "" && IntegrationCredsLookup != nil {
+			token, _ = IntegrationCredsLookup(ownerID, "clickup")
+		}
+		if token == "" {
+			return "", fmt.Errorf("ClickUp is not connected — use Connect ClickUp in the node settings")
+		}
+		return runClickUp(ctx, token, d, outputs)
+
 	case NodeTypeGranola:
 		key := substituteTemplates(d.IntegrationToken, outputs)
 		if key == "" && IntegrationCredsLookup != nil {
