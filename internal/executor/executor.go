@@ -1132,6 +1132,16 @@ func runNodeInner(ctx context.Context, node WorkflowASTNode, outputs map[string]
 		}
 		return runDropbox(ctx, token, d, outputs)
 
+	case NodeTypeNetlify:
+		token := substituteTemplates(d.IntegrationToken, outputs)
+		if token == "" && IntegrationCredsLookup != nil {
+			token, _ = IntegrationCredsLookup(ownerID, "netlify")
+		}
+		if token == "" {
+			return "", fmt.Errorf("Netlify is not connected — use Connect Netlify in the node settings")
+		}
+		return runNetlify(ctx, token, d, outputs)
+
 	case NodeTypeGranola:
 		key := substituteTemplates(d.IntegrationToken, outputs)
 		if key == "" && IntegrationCredsLookup != nil {

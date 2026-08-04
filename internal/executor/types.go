@@ -46,6 +46,7 @@ const (
 	NodeTypeTypeform         NodeType = "typeform"
 	NodeTypeCalendly         NodeType = "calendly"
 	NodeTypeDropbox          NodeType = "dropbox"
+	NodeTypeNetlify          NodeType = "netlify"
 	NodeTypeData             NodeType = "data"
 )
 
@@ -660,6 +661,57 @@ type FlowNodeData struct {
 	DropboxMessage     string `json:"dropboxMessage,omitempty"`     // note sent with a share
 	DropboxTitle       string `json:"dropboxTitle,omitempty"`       // file request title
 	DropboxLimit       int    `json:"dropboxLimit,omitempty"`
+
+	// netlify
+	NetlifySiteId              string `json:"netlifySiteId,omitempty"`
+	NetlifyAccountId           string `json:"netlifyAccountId,omitempty"`   // team ID; env var writes need it
+	NetlifyAccountSlug         string `json:"netlifyAccountSlug,omitempty"` // team URL name; NOT the ID
+	NetlifyDeployId            string `json:"netlifyDeployId,omitempty"`
+	NetlifyBuildId             string `json:"netlifyBuildId,omitempty"`
+	NetlifyFormId              string `json:"netlifyFormId,omitempty"`
+	NetlifySubmissionId        string `json:"netlifySubmissionId,omitempty"`
+	NetlifyZoneId              string `json:"netlifyZoneId,omitempty"`
+	NetlifyRecordId            string `json:"netlifyRecordId,omitempty"`
+	NetlifyHookId              string `json:"netlifyHookId,omitempty"`
+	NetlifyBuildHookId         string `json:"netlifyBuildHookId,omitempty"`
+	NetlifyKeyId               string `json:"netlifyKeyId,omitempty"`
+	NetlifyName                string `json:"netlifyName,omitempty"`
+	NetlifyTitle               string `json:"netlifyTitle,omitempty"`
+	NetlifyCustomDomain        string `json:"netlifyCustomDomain,omitempty"`
+	NetlifySiteConfig          string `json:"netlifySiteConfig,omitempty"`   // raw JSON site body
+	NetlifyRepo                string `json:"netlifyRepo,omitempty"`         // raw JSON repo settings
+	NetlifyConfigureDns        string `json:"netlifyConfigureDns,omitempty"` // "true" | "false"
+	NetlifyBranch              string `json:"netlifyBranch,omitempty"`
+	NetlifyClearCache          string `json:"netlifyClearCache,omitempty"`  // "true" | "false"
+	NetlifyDraft               string `json:"netlifyDraft,omitempty"`       // "true" | "false"
+	NetlifyDeployFiles         string `json:"netlifyDeployFiles,omitempty"` // JSON path → SHA1 manifest
+	NetlifyReason              string `json:"netlifyReason,omitempty"`      // required by disable_site
+	NetlifyEnvKey              string `json:"netlifyEnvKey,omitempty"`
+	NetlifyEnvValue            string `json:"netlifyEnvValue,omitempty"`
+	NetlifyEnvValueId          string `json:"netlifyEnvValueId,omitempty"`
+	NetlifyEnvContext          string `json:"netlifyEnvContext,omitempty"`          // all|dev|dev-server|branch-deploy|deploy-preview|production|branch
+	NetlifyEnvContextParameter string `json:"netlifyEnvContextParameter,omitempty"` // branch name when context=branch
+	NetlifyEnvScopes           string `json:"netlifyEnvScopes,omitempty"`           // CSV: builds,functions,runtime,post-processing
+	NetlifyEnvIsSecret         string `json:"netlifyEnvIsSecret,omitempty"`         // "true" | "false"
+	NetlifyEnvVarsJson         string `json:"netlifyEnvVarsJson,omitempty"`         // raw JSON array of variables
+	NetlifyRecordType          string `json:"netlifyRecordType,omitempty"`
+	NetlifyHostname            string `json:"netlifyHostname,omitempty"`
+	NetlifyRecordValue         string `json:"netlifyRecordValue,omitempty"`
+	NetlifyTtl                 string `json:"netlifyTtl,omitempty"`
+	NetlifyPriority            string `json:"netlifyPriority,omitempty"`  // MX
+	NetlifyWeight              string `json:"netlifyWeight,omitempty"`    // SRV
+	NetlifyPort                string `json:"netlifyPort,omitempty"`      // SRV
+	NetlifyFlag                string `json:"netlifyFlag,omitempty"`      // CAA
+	NetlifyTag                 string `json:"netlifyTag,omitempty"`       // CAA
+	NetlifyHookType            string `json:"netlifyHookType,omitempty"`  // defaults to "url"
+	NetlifyHookEvent           string `json:"netlifyHookEvent,omitempty"` // deploy_created, submission_created, …
+	NetlifyHookData            string `json:"netlifyHookData,omitempty"`  // raw JSON data object
+	NetlifyUrl                 string `json:"netlifyUrl,omitempty"`       // convenience for a url hook
+	NetlifyFilter              string `json:"netlifyFilter,omitempty"`    // all|owner|guest
+	NetlifyQuery               string `json:"netlifyQuery,omitempty"`
+	NetlifyLogType             string `json:"netlifyLogType,omitempty"`
+	NetlifyPage                int    `json:"netlifyPage,omitempty"`    // 1-based
+	NetlifyPerPage             int    `json:"netlifyPerPage,omitempty"` // capped at 100
 }
 
 type Position struct {

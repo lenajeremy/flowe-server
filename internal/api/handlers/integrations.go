@@ -227,6 +227,16 @@ var oauthProviders = map[string]oauthProvider{
 			"prompt":      {"consent"},
 		},
 	},
+	// Netlify has no scope system and issues no refresh token: an OAuth token
+	// lasts until it is revoked, so there is no refreshTokenEndpoints entry.
+	// Its documented flow is implicit; the code-exchange token URL below is not in
+	// Netlify's OpenAPI spec, so treat a failure here as the first thing to check.
+	"netlify": {
+		name:         "netlify",
+		authorizeURL: "https://app.netlify.com/authorize",
+		clientIDEnv:  "NETLIFY_CLIENT_ID",
+		secretEnv:    "NETLIFY_CLIENT_SECRET",
+	},
 	// Dropbox issues short-lived tokens, so token_access_type=offline is what
 	// earns a refresh token; without it the connection dies in four hours.
 	"dropbox": {
@@ -314,7 +324,7 @@ var allProviders = []string{
 	"googleslides", "googleforms", "googlemeet", "googlechat", "googletasks",
 	"googlekeep", "outlook", "slack", "notion", "linear",
 	"github", "gitlab", "jira", "confluence", "bitbucket",
-	"stripe", "shopify", "granola", "resend", "sendgrid", "kit", "airtable", "clickup", "typeform", "calendly", "dropbox",
+	"stripe", "shopify", "granola", "resend", "sendgrid", "kit", "airtable", "clickup", "typeform", "calendly", "dropbox", "netlify",
 }
 
 func oauthRedirectURI(provider string) string {
@@ -584,6 +594,8 @@ func (h *WorkflowHandler) CallbackIntegration(c *gin.Context) {
 		conn, err = exchangeClickUpCode(code)
 	case "dropbox":
 		conn, err = exchangeFormPostCode("dropbox", code, "https://api.dropboxapi.com/oauth2/token")
+	case "netlify":
+		conn, err = exchangeFormPostCode("netlify", code, "https://api.netlify.com/oauth/token")
 	case "typeform":
 		conn, err = exchangeFormPostCode("typeform", code, "https://api.typeform.com/oauth/token")
 	case "calendly":
