@@ -227,6 +227,17 @@ var oauthProviders = map[string]oauthProvider{
 			"prompt":      {"consent"},
 		},
 	},
+	// Supabase Connect: PKCE is required and the token endpoint wants the client
+	// credentials as Basic auth. Scopes below are taken from the per-endpoint
+	// x-oauth-scope values in Supabase's own OpenAPI document, covering exactly the
+	// operations this node ships — a 403 here means a scope, not a permission.
+	"supabase": {
+		name:         "supabase",
+		authorizeURL: "https://api.supabase.com/v1/oauth/authorize",
+		clientIDEnv:  "SUPABASE_CLIENT_ID",
+		secretEnv:    "SUPABASE_CLIENT_SECRET",
+		extraAuthQ:   url.Values{"scope": {"analytics:read auth:read auth:write database:read database:write domains:read domains:write edge_functions:read edge_functions:write environment:read environment:write organizations:read projects:read projects:write rest:read rest:write secrets:read secrets:write storage:read"}},
+	},
 	// Netlify has no scope system and issues no refresh token: an OAuth token
 	// lasts until it is revoked, so there is no refreshTokenEndpoints entry.
 	// Its documented flow is implicit; the code-exchange token URL below is not in
@@ -324,7 +335,7 @@ var allProviders = []string{
 	"googleslides", "googleforms", "googlemeet", "googlechat", "googletasks",
 	"googlekeep", "outlook", "slack", "notion", "linear",
 	"github", "gitlab", "jira", "confluence", "bitbucket",
-	"stripe", "shopify", "granola", "resend", "sendgrid", "kit", "airtable", "clickup", "typeform", "calendly", "dropbox", "netlify",
+	"stripe", "shopify", "granola", "resend", "sendgrid", "kit", "airtable", "clickup", "typeform", "calendly", "dropbox", "netlify", "supabase",
 }
 
 func oauthRedirectURI(provider string) string {
@@ -596,6 +607,8 @@ func (h *WorkflowHandler) CallbackIntegration(c *gin.Context) {
 		conn, err = exchangeFormPostCode("dropbox", code, "https://api.dropboxapi.com/oauth2/token")
 	case "netlify":
 		conn, err = exchangeFormPostCode("netlify", code, "https://api.netlify.com/oauth/token")
+	case "supabase":
+		conn, err = exchangeSupabaseCode(code, st.verifier)
 	case "typeform":
 		conn, err = exchangeFormPostCode("typeform", code, "https://api.typeform.com/oauth/token")
 	case "calendly":
@@ -696,6 +709,8 @@ func (h *WorkflowHandler) listProviderResources(userID, provider string) ([]inte
 		return bitbucketResources(token, workspace)
 	case "airtable":
 		return airtableResources(token)
+	case "supabase":
+		return supabaseResources(token)
 	case "clickup":
 		return clickupResources(token)
 	case "googletasks":
@@ -1101,6 +1116,7 @@ var refreshTokenEndpoints = map[string]refreshEndpoint{
 	"jira":           {tokenURL: atlassianTokenURL, clientIDEnv: "ATLASSIAN_CLIENT_ID", secretEnv: "ATLASSIAN_CLIENT_SECRET", jsonBody: true},
 	"confluence":     {tokenURL: atlassianTokenURL, clientIDEnv: "ATLASSIAN_CLIENT_ID", secretEnv: "ATLASSIAN_CLIENT_SECRET", jsonBody: true},
 	"airtable":       {tokenURL: airtableTokenURL, clientIDEnv: "AIRTABLE_CLIENT_ID", secretEnv: "AIRTABLE_CLIENT_SECRET", basicAuth: true},
+	"supabase":       {tokenURL: supabaseTokenURL, clientIDEnv: "SUPABASE_CLIENT_ID", secretEnv: "SUPABASE_CLIENT_SECRET", basicAuth: true},
 	"dropbox":        {tokenURL: "https://api.dropboxapi.com/oauth2/token", clientIDEnv: "DROPBOX_CLIENT_ID", secretEnv: "DROPBOX_CLIENT_SECRET"},
 	"typeform":       {tokenURL: "https://api.typeform.com/oauth/token", clientIDEnv: "TYPEFORM_CLIENT_ID", secretEnv: "TYPEFORM_CLIENT_SECRET"},
 	"calendly":       {tokenURL: "https://auth.calendly.com/oauth/token", clientIDEnv: "CALENDLY_CLIENT_ID", secretEnv: "CALENDLY_CLIENT_SECRET"},

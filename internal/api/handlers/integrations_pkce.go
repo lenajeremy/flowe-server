@@ -18,6 +18,7 @@ import (
 // pkceProviders require code_challenge on authorize and code_verifier on exchange.
 var pkceProviders = map[string]bool{
 	"airtable": true,
+	"supabase": true,
 }
 
 // newPKCEVerifier returns a high-entropy verifier in the unreserved-character

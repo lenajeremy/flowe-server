@@ -47,6 +47,7 @@ const (
 	NodeTypeCalendly         NodeType = "calendly"
 	NodeTypeDropbox          NodeType = "dropbox"
 	NodeTypeNetlify          NodeType = "netlify"
+	NodeTypeSupabase         NodeType = "supabase"
 	NodeTypeData             NodeType = "data"
 )
 
@@ -712,6 +713,54 @@ type FlowNodeData struct {
 	NetlifyLogType             string `json:"netlifyLogType,omitempty"`
 	NetlifyPage                int    `json:"netlifyPage,omitempty"`    // 1-based
 	NetlifyPerPage             int    `json:"netlifyPerPage,omitempty"` // capped at 100
+
+	// supabase
+	SupabaseAllowWrite          string `json:"supabaseAllowWrite,omitempty"` // "true" is required before run_sql will execute
+	SupabaseAllowedCidrs        string `json:"supabaseAllowedCidrs,omitempty"`
+	SupabaseAllowedCidrsV6      string `json:"supabaseAllowedCidrsV6,omitempty"`
+	SupabaseApiKeyId            string `json:"supabaseApiKeyId,omitempty"`
+	SupabaseApiKeyType          string `json:"supabaseApiKeyType,omitempty"`
+	SupabaseAuthConfig          string `json:"supabaseAuthConfig,omitempty"`
+	SupabaseBranchName          string `json:"supabaseBranchName,omitempty"`
+	SupabaseBranchRef           string `json:"supabaseBranchRef,omitempty"`
+	SupabaseConfirmDelete       string `json:"supabaseConfirmDelete,omitempty"`
+	SupabaseCursor              string `json:"supabaseCursor,omitempty"`
+	SupabaseDbPass              string `json:"supabaseDbPass,omitempty"` // database password for a new project
+	SupabaseEntrypointPath      string `json:"supabaseEntrypointPath,omitempty"`
+	SupabaseForce               string `json:"supabaseForce,omitempty"`
+	SupabaseFunctionBody        string `json:"supabaseFunctionBody,omitempty"`
+	SupabaseFunctionSlug        string `json:"supabaseFunctionSlug,omitempty"`
+	SupabaseGitBranch           string `json:"supabaseGitBranch,omitempty"`
+	SupabaseHostname            string `json:"supabaseHostname,omitempty"`
+	SupabaseImportMapPath       string `json:"supabaseImportMapPath,omitempty"`
+	SupabaseIncludedSchemas     string `json:"supabaseIncludedSchemas,omitempty"`
+	SupabaseInstanceSize        string `json:"supabaseInstanceSize,omitempty"`
+	SupabaseIpAddresses         string `json:"supabaseIpAddresses,omitempty"`
+	SupabaseLimit               int    `json:"supabaseLimit,omitempty"`
+	SupabaseMigrationName       string `json:"supabaseMigrationName,omitempty"`
+	SupabaseMigrationVersion    string `json:"supabaseMigrationVersion,omitempty"`
+	SupabaseName                string `json:"supabaseName,omitempty"`
+	SupabaseOrgSlug             string `json:"supabaseOrgSlug,omitempty"`
+	SupabasePersistent          string `json:"supabasePersistent,omitempty"`
+	SupabasePostgrestMaxRows    int    `json:"supabasePostgrestMaxRows,omitempty"`
+	SupabasePostgrestSchema     string `json:"supabasePostgrestSchema,omitempty"`
+	SupabasePostgrestSearchPath string `json:"supabasePostgrestSearchPath,omitempty"`
+	SupabaseProjectRef          string `json:"supabaseProjectRef,omitempty"` // the 20-character project ref, NOT the project UUID
+	SupabaseRecoveryTimeUnix    string `json:"supabaseRecoveryTimeUnix,omitempty"`
+	SupabaseRegion              string `json:"supabaseRegion,omitempty"`
+	SupabaseRevealKeys          string `json:"supabaseRevealKeys,omitempty"`
+	SupabaseRollbackSql         string `json:"supabaseRollbackSql,omitempty"`
+	SupabaseSecretNames         string `json:"supabaseSecretNames,omitempty"`
+	SupabaseSecrets             string `json:"supabaseSecrets,omitempty"` // JSON object or array of name/value pairs
+	SupabaseSiteUrl             string `json:"supabaseSiteUrl,omitempty"`
+	SupabaseSnippetId           string `json:"supabaseSnippetId,omitempty"`
+	SupabaseSortBy              string `json:"supabaseSortBy,omitempty"`
+	SupabaseSortOrder           string `json:"supabaseSortOrder,omitempty"`
+	SupabaseSql                 string `json:"supabaseSql,omitempty"`       // raw SQL; prefer parameters over string interpolation
+	SupabaseSqlParams           string `json:"supabaseSqlParams,omitempty"` // JSON array bound to $1, $2 … in the statement
+	SupabaseUriAllowList        string `json:"supabaseUriAllowList,omitempty"`
+	SupabaseVerifyJwt           string `json:"supabaseVerifyJwt,omitempty"`
+	SupabaseWithData            string `json:"supabaseWithData,omitempty"`
 }
 
 type Position struct {
