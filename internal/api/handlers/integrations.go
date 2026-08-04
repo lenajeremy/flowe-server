@@ -227,6 +227,32 @@ var oauthProviders = map[string]oauthProvider{
 			"prompt":      {"consent"},
 		},
 	},
+	// HubSpot access tokens last 30 minutes and its refresh tokens do not expire.
+	// Every scope ticked on the app's Auth settings is treated as REQUIRED and must
+	// appear here, or HubSpot shows an error instead of a consent screen — so this
+	// list has to match the app's configuration exactly.
+	"hubspot": {
+		name:         "hubspot",
+		authorizeURL: "https://app.hubspot.com/oauth/authorize",
+		clientIDEnv:  "HUBSPOT_CLIENT_ID",
+		secretEnv:    "HUBSPOT_CLIENT_SECRET",
+		extraAuthQ: url.Values{
+			"scope": {"oauth crm.objects.contacts.read crm.objects.contacts.write " +
+				"crm.objects.companies.read crm.objects.companies.write " +
+				"crm.objects.deals.read crm.objects.deals.write " +
+				"crm.objects.owners.read crm.schemas.contacts.read crm.schemas.companies.read " +
+				"crm.schemas.deals.read crm.lists.read crm.lists.write tickets"},
+		},
+	},
+	// Front access tokens last 60 minutes. Its refresh token is valid for six
+	// months and is only replaced in the final 24 hours, so rotation is rare but
+	// still has to be persisted — which the shared refresh path does.
+	"front": {
+		name:         "front",
+		authorizeURL: "https://app.frontapp.com/oauth/authorize",
+		clientIDEnv:  "FRONT_CLIENT_ID",
+		secretEnv:    "FRONT_CLIENT_SECRET",
+	},
 	// Search Console's webmasters scope covers both reading reports and adding or
 	// removing properties and sitemaps; there is no narrower write scope.
 	"googlesearchconsole": {
@@ -393,7 +419,7 @@ var allProviders = []string{
 	"googlekeep", "outlook", "slack", "notion", "linear",
 	"github", "gitlab", "jira", "confluence", "bitbucket",
 	"stripe", "shopify", "granola", "resend", "sendgrid", "kit", "airtable", "clickup", "typeform", "calendly", "dropbox", "netlify", "supabase", "gumroad",
-	"googlesearchconsole", "googlecontacts",
+	"googlesearchconsole", "googlecontacts", "hubspot", "front",
 }
 
 func oauthRedirectURI(provider string) string {
@@ -670,6 +696,11 @@ func (h *WorkflowHandler) CallbackIntegration(c *gin.Context) {
 		conn, err = exchangeSupabaseCode(code, st.verifier)
 	case "gumroad":
 		conn, err = exchangeFormPostCode("gumroad", code, "https://api.gumroad.com/oauth/token")
+	case "hubspot":
+		conn, err = exchangeFormPostCode("hubspot", code, "https://api.hubapi.com/oauth/v1/token")
+	case "front":
+		// Front wants the client credentials as Basic auth on its OAuth endpoints.
+		conn, err = exchangeBasicAuthCode("front", code, "https://app.frontapp.com/oauth/token")
 	case "typeform":
 		conn, err = exchangeFormPostCode("typeform", code, "https://api.typeform.com/oauth/token")
 	case "calendly":

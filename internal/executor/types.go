@@ -51,6 +51,8 @@ const (
 	NodeTypeGumroad             NodeType = "gumroad"
 	NodeTypeGoogleSearchConsole NodeType = "googlesearchconsole"
 	NodeTypeGoogleContacts      NodeType = "googlecontacts"
+	NodeTypeHubspot             NodeType = "hubspot"
+	NodeTypeFront               NodeType = "front"
 	NodeTypeData                NodeType = "data"
 )
 
@@ -828,6 +830,55 @@ type FlowNodeData struct {
 	ContactsAddMembers    string `json:"contactsAddMembers,omitempty"` // comma-separated resource names
 	ContactsRemoveMembers string `json:"contactsRemoveMembers,omitempty"`
 	ContactsLimit         int    `json:"contactsLimit,omitempty"`
+
+	// hubspot
+	HubspotAfter          string `json:"hubspotAfter,omitempty"`
+	HubspotArchived       string `json:"hubspotArchived,omitempty"`
+	HubspotAssociations   string `json:"hubspotAssociations,omitempty"` // JSON array of associations to create alongside the record
+	HubspotBatchInputs    string `json:"hubspotBatchInputs,omitempty"`  // JSON array, max 100 per request
+	HubspotFieldType      string `json:"hubspotFieldType,omitempty"`
+	HubspotFilters        string `json:"hubspotFilters,omitempty"` // JSON array of filter groups for search_objects
+	HubspotGroupName      string `json:"hubspotGroupName,omitempty"`
+	HubspotIdProperty     string `json:"hubspotIdProperty,omitempty"` // look a record up by a unique property such as email instead of its id
+	HubspotLabel          string `json:"hubspotLabel,omitempty"`
+	HubspotLimit          int    `json:"hubspotLimit,omitempty"`
+	HubspotListId         string `json:"hubspotListId,omitempty"`
+	HubspotObjectId       string `json:"hubspotObjectId,omitempty"`
+	HubspotObjectType     string `json:"hubspotObjectType,omitempty"` // contacts | companies | deals | tickets | notes | tasks | calls | emails | meetings, or a custom type id
+	HubspotProperties     string `json:"hubspotProperties,omitempty"` // comma-separated property names to return; v3 omits anything not asked for
+	HubspotPropertyName   string `json:"hubspotPropertyName,omitempty"`
+	HubspotPropertyType   string `json:"hubspotPropertyType,omitempty"`
+	HubspotPropertyValues string `json:"hubspotPropertyValues,omitempty"` // JSON object keyed by HubSpot's internal names, e.g. firstname not First Name
+	HubspotQuery          string `json:"hubspotQuery,omitempty"`
+	HubspotSortDirection  string `json:"hubspotSortDirection,omitempty"`
+	HubspotSortProperty   string `json:"hubspotSortProperty,omitempty"`
+	HubspotToObjectId     string `json:"hubspotToObjectId,omitempty"`
+	HubspotToObjectType   string `json:"hubspotToObjectType,omitempty"`
+
+	// front
+	FrontAssigneeId     string `json:"frontAssigneeId,omitempty"`
+	FrontAuthorId       string `json:"frontAuthorId,omitempty"` // teammate id the message or comment is sent as
+	FrontBcc            string `json:"frontBcc,omitempty"`
+	FrontBody           string `json:"frontBody,omitempty"`
+	FrontCc             string `json:"frontCc,omitempty"`
+	FrontChannelId      string `json:"frontChannelId,omitempty"` // cha_… — required to start a new conversation
+	FrontContactId      string `json:"frontContactId,omitempty"`
+	FrontConversationId string `json:"frontConversationId,omitempty"` // cnv_…
+	FrontDescription    string `json:"frontDescription,omitempty"`
+	FrontHandle         string `json:"frontHandle,omitempty"`       // an address on a channel, e.g. an email address
+	FrontHandleSource   string `json:"frontHandleSource,omitempty"` // email | phone | twitter | intercom | custom
+	FrontInboxId        string `json:"frontInboxId,omitempty"`
+	FrontLimit          int    `json:"frontLimit,omitempty"`
+	FrontLinkId         string `json:"frontLinkId,omitempty"`
+	FrontName           string `json:"frontName,omitempty"`
+	FrontPageToken      string `json:"frontPageToken,omitempty"`
+	FrontQuery          string `json:"frontQuery,omitempty"`  // search terms, or event types for list_events
+	FrontStatus         string `json:"frontStatus,omitempty"` // archived | open | deleted | spam
+	FrontSubject        string `json:"frontSubject,omitempty"`
+	FrontTagId          string `json:"frontTagId,omitempty"` // comma-separated tag ids
+	FrontTeammateId     string `json:"frontTeammateId,omitempty"`
+	FrontTo             string `json:"frontTo,omitempty"`
+	FrontUrl            string `json:"frontUrl,omitempty"`
 }
 
 type Position struct {

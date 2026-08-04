@@ -531,3 +531,44 @@ func searchConsoleResources(token string) ([]integrationResource, error) {
 	}
 	return res, nil
 }
+
+// exchangeBasicAuthCode is exchangeFormPostCode for providers that want the
+// client credentials as HTTP Basic auth rather than in the body. Front is one;
+// sending them in the body there is rejected.
+func exchangeBasicAuthCode(provider, code, tokenURL string) (*models.IntegrationConnection, error) {
+	envPrefix := strings.ToUpper(provider)
+	form := url.Values{}
+	form.Set("grant_type", "authorization_code")
+	form.Set("code", code)
+	form.Set("redirect_uri", oauthRedirectURI(provider))
+
+	req, _ := http.NewRequest(http.MethodPost, tokenURL, strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Accept", "application/json")
+	req.SetBasicAuth(os.Getenv(envPrefix+"_CLIENT_ID"), os.Getenv(envPrefix+"_CLIENT_SECRET"))
+
+	raw, err := doOAuthRequest(req)
+	if err != nil {
+		return nil, err
+	}
+	var tok struct {
+		AccessToken  string `json:"access_token"`
+		RefreshToken string `json:"refresh_token"`
+		ExpiresIn    int64  `json:"expires_in"`
+		Scope        string `json:"scope"`
+	}
+	if err := json.Unmarshal(raw, &tok); err != nil || tok.AccessToken == "" {
+		return nil, fmt.Errorf("%s token exchange returned no access token", provider)
+	}
+	conn := &models.IntegrationConnection{
+		Provider:     provider,
+		AccessToken:  tok.AccessToken,
+		RefreshToken: tok.RefreshToken,
+		Scope:        tok.Scope,
+	}
+	if tok.ExpiresIn > 0 {
+		exp := time.Now().Add(time.Duration(tok.ExpiresIn) * time.Second)
+		conn.ExpiresAt = &exp
+	}
+	return conn, nil
+}

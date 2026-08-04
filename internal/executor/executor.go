@@ -1182,6 +1182,26 @@ func runNodeInner(ctx context.Context, node WorkflowASTNode, outputs map[string]
 		}
 		return runGoogleContacts(ctx, token, d, outputs)
 
+	case NodeTypeHubspot:
+		token := substituteTemplates(d.IntegrationToken, outputs)
+		if token == "" && IntegrationCredsLookup != nil {
+			token, _ = IntegrationCredsLookup(ownerID, "hubspot")
+		}
+		if token == "" {
+			return "", fmt.Errorf("HubSpot is not connected — use Connect HubSpot in the node settings")
+		}
+		return runHubSpot(ctx, token, d, outputs)
+
+	case NodeTypeFront:
+		token := substituteTemplates(d.IntegrationToken, outputs)
+		if token == "" && IntegrationCredsLookup != nil {
+			token, _ = IntegrationCredsLookup(ownerID, "front")
+		}
+		if token == "" {
+			return "", fmt.Errorf("Front is not connected — use Connect Front in the node settings")
+		}
+		return runFront(ctx, token, d, outputs)
+
 	case NodeTypeGranola:
 		key := substituteTemplates(d.IntegrationToken, outputs)
 		if key == "" && IntegrationCredsLookup != nil {
