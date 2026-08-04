@@ -38,6 +38,7 @@ const (
 	NodeTypeGoogleChat       NodeType = "googlechat"
 	NodeTypeGoogleKeep       NodeType = "googlekeep"
 	NodeTypeGranola          NodeType = "granola"
+	NodeTypeResend           NodeType = "resend"
 	NodeTypeData             NodeType = "data"
 )
 
@@ -438,6 +439,39 @@ type FlowNodeData struct {
 	GranolaCreatedAfter string `json:"granolaCreatedAfter,omitempty"` // RFC3339; scopes a digest to "since last run"
 	GranolaCursor       string `json:"granolaCursor,omitempty"`
 	GranolaLimit        int    `json:"granolaLimit,omitempty"`
+
+	// resend
+	ResendFrom         string `json:"resendFrom,omitempty"` // must be on a domain verified in Resend
+	ResendTo           string `json:"resendTo,omitempty"`   // comma-separated, max 50
+	ResendCc           string `json:"resendCc,omitempty"`
+	ResendBcc          string `json:"resendBcc,omitempty"`
+	ResendReplyTo      string `json:"resendReplyTo,omitempty"`
+	ResendSubject      string `json:"resendSubject,omitempty"`
+	ResendHtml         string `json:"resendHtml,omitempty"`
+	ResendText         string `json:"resendText,omitempty"`
+	ResendScheduledAt  string `json:"resendScheduledAt,omitempty"` // ISO 8601 or natural language
+	ResendHeaders      string `json:"resendHeaders,omitempty"`     // JSON object
+	ResendTags         string `json:"resendTags,omitempty"`        // JSON object, converted to name/value pairs
+	ResendBatch        string `json:"resendBatch,omitempty"`       // JSON array of email objects
+	ResendEmailId      string `json:"resendEmailId,omitempty"`
+	ResendDomain       string `json:"resendDomain,omitempty"`
+	ResendDomainId     string `json:"resendDomainId,omitempty"`
+	ResendRegion       string `json:"resendRegion,omitempty"`
+	ResendEmail        string `json:"resendEmail,omitempty"` // contact / suppression address
+	ResendContactId    string `json:"resendContactId,omitempty"`
+	ResendFirstName    string `json:"resendFirstName,omitempty"`
+	ResendLastName     string `json:"resendLastName,omitempty"`
+	ResendUnsubscribed string `json:"resendUnsubscribed,omitempty"` // "true" | "false"
+	ResendProperties   string `json:"resendProperties,omitempty"`   // JSON object
+	ResendSegmentId    string `json:"resendSegmentId,omitempty"`    // comma-separated when set on a contact
+	ResendName         string `json:"resendName,omitempty"`         // segment / broadcast / template name
+	ResendBroadcastId  string `json:"resendBroadcastId,omitempty"`
+	ResendTemplateId   string `json:"resendTemplateId,omitempty"`
+	ResendTemplateVars string `json:"resendTemplateVars,omitempty"` // JSON object
+	ResendUrl          string `json:"resendUrl,omitempty"`          // webhook endpoint
+	ResendEvents       string `json:"resendEvents,omitempty"`       // comma-separated webhook events
+	ResendWebhookId    string `json:"resendWebhookId,omitempty"`
+	ResendLimit        int    `json:"resendLimit,omitempty"`
 }
 
 type Position struct {

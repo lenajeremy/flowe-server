@@ -1052,6 +1052,16 @@ func runNodeInner(ctx context.Context, node WorkflowASTNode, outputs map[string]
 		}
 		return runGoogleKeep(ctx, token, d, outputs)
 
+	case NodeTypeResend:
+		key := substituteTemplates(d.IntegrationToken, outputs)
+		if key == "" && IntegrationCredsLookup != nil {
+			key, _ = IntegrationCredsLookup(ownerID, "resend")
+		}
+		if key == "" {
+			return "", fmt.Errorf("Resend is not connected — add your Resend API key in the node settings")
+		}
+		return runResend(ctx, key, d, outputs)
+
 	case NodeTypeGranola:
 		key := substituteTemplates(d.IntegrationToken, outputs)
 		if key == "" && IntegrationCredsLookup != nil {
