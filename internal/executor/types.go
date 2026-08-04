@@ -4,52 +4,54 @@ package executor
 type NodeType string
 
 const (
-	NodeTypeTextInput        NodeType = "textInput"
-	NodeTypeImageInput       NodeType = "imageInput"
-	NodeTypeLLM              NodeType = "llm"
-	NodeTypeBranch           NodeType = "branch"
-	NodeTypeLoop             NodeType = "loop"
-	NodeTypeTextOutput       NodeType = "textOutput"
-	NodeTypeHTTPRequest      NodeType = "httpRequest"
-	NodeTypeEmailSend        NodeType = "emailSend"
-	NodeTypeHumanApproval    NodeType = "humanApproval"
-	NodeTypeWebhookTrigger   NodeType = "webhookTrigger"
-	NodeTypeScheduledTrigger NodeType = "scheduledTrigger"
-	NodeTypeNotion           NodeType = "notion"
-	NodeTypeLinear           NodeType = "linear"
-	NodeTypeGithub           NodeType = "github"
-	NodeTypeGitlab           NodeType = "gitlab"
-	NodeTypeGmail            NodeType = "gmail"
-	NodeTypeStripe           NodeType = "stripe"
-	NodeTypeShopify          NodeType = "shopify"
-	NodeTypeGoogleCalendar   NodeType = "googlecalendar"
-	NodeTypeOutlook          NodeType = "outlook"
-	NodeTypeSlack            NodeType = "slack"
-	NodeTypeGoogleDrive      NodeType = "googledrive"
-	NodeTypeGoogleDocs       NodeType = "googledocs"
-	NodeTypeGoogleSheets     NodeType = "googlesheets"
-	NodeTypeJira             NodeType = "jira"
-	NodeTypeConfluence       NodeType = "confluence"
-	NodeTypeBitbucket        NodeType = "bitbucket"
-	NodeTypeGoogleMeet       NodeType = "googlemeet"
-	NodeTypeGoogleSlides     NodeType = "googleslides"
-	NodeTypeGoogleForms      NodeType = "googleforms"
-	NodeTypeGoogleTasks      NodeType = "googletasks"
-	NodeTypeGoogleChat       NodeType = "googlechat"
-	NodeTypeGoogleKeep       NodeType = "googlekeep"
-	NodeTypeGranola          NodeType = "granola"
-	NodeTypeResend           NodeType = "resend"
-	NodeTypeSendGrid         NodeType = "sendgrid"
-	NodeTypeKit              NodeType = "kit"
-	NodeTypeAirtable         NodeType = "airtable"
-	NodeTypeClickUp          NodeType = "clickup"
-	NodeTypeTypeform         NodeType = "typeform"
-	NodeTypeCalendly         NodeType = "calendly"
-	NodeTypeDropbox          NodeType = "dropbox"
-	NodeTypeNetlify          NodeType = "netlify"
-	NodeTypeSupabase         NodeType = "supabase"
-	NodeTypeGumroad          NodeType = "gumroad"
-	NodeTypeData             NodeType = "data"
+	NodeTypeTextInput           NodeType = "textInput"
+	NodeTypeImageInput          NodeType = "imageInput"
+	NodeTypeLLM                 NodeType = "llm"
+	NodeTypeBranch              NodeType = "branch"
+	NodeTypeLoop                NodeType = "loop"
+	NodeTypeTextOutput          NodeType = "textOutput"
+	NodeTypeHTTPRequest         NodeType = "httpRequest"
+	NodeTypeEmailSend           NodeType = "emailSend"
+	NodeTypeHumanApproval       NodeType = "humanApproval"
+	NodeTypeWebhookTrigger      NodeType = "webhookTrigger"
+	NodeTypeScheduledTrigger    NodeType = "scheduledTrigger"
+	NodeTypeNotion              NodeType = "notion"
+	NodeTypeLinear              NodeType = "linear"
+	NodeTypeGithub              NodeType = "github"
+	NodeTypeGitlab              NodeType = "gitlab"
+	NodeTypeGmail               NodeType = "gmail"
+	NodeTypeStripe              NodeType = "stripe"
+	NodeTypeShopify             NodeType = "shopify"
+	NodeTypeGoogleCalendar      NodeType = "googlecalendar"
+	NodeTypeOutlook             NodeType = "outlook"
+	NodeTypeSlack               NodeType = "slack"
+	NodeTypeGoogleDrive         NodeType = "googledrive"
+	NodeTypeGoogleDocs          NodeType = "googledocs"
+	NodeTypeGoogleSheets        NodeType = "googlesheets"
+	NodeTypeJira                NodeType = "jira"
+	NodeTypeConfluence          NodeType = "confluence"
+	NodeTypeBitbucket           NodeType = "bitbucket"
+	NodeTypeGoogleMeet          NodeType = "googlemeet"
+	NodeTypeGoogleSlides        NodeType = "googleslides"
+	NodeTypeGoogleForms         NodeType = "googleforms"
+	NodeTypeGoogleTasks         NodeType = "googletasks"
+	NodeTypeGoogleChat          NodeType = "googlechat"
+	NodeTypeGoogleKeep          NodeType = "googlekeep"
+	NodeTypeGranola             NodeType = "granola"
+	NodeTypeResend              NodeType = "resend"
+	NodeTypeSendGrid            NodeType = "sendgrid"
+	NodeTypeKit                 NodeType = "kit"
+	NodeTypeAirtable            NodeType = "airtable"
+	NodeTypeClickUp             NodeType = "clickup"
+	NodeTypeTypeform            NodeType = "typeform"
+	NodeTypeCalendly            NodeType = "calendly"
+	NodeTypeDropbox             NodeType = "dropbox"
+	NodeTypeNetlify             NodeType = "netlify"
+	NodeTypeSupabase            NodeType = "supabase"
+	NodeTypeGumroad             NodeType = "gumroad"
+	NodeTypeGoogleSearchConsole NodeType = "googlesearchconsole"
+	NodeTypeGoogleContacts      NodeType = "googlecontacts"
+	NodeTypeData                NodeType = "data"
 )
 
 type FlowNodeData struct {
@@ -791,6 +793,41 @@ type FlowNodeData struct {
 	GumroadTrackingUrl     string `json:"gumroadTrackingUrl,omitempty"`
 	GumroadUrl             string `json:"gumroadUrl,omitempty"`
 	GumroadWebhookId       string `json:"gumroadWebhookId,omitempty"`
+
+	// googlesearchconsole
+	GscSiteUrl          string `json:"gscSiteUrl,omitempty"`   // https://example.com/ or sc-domain:example.com
+	GscFeedPath         string `json:"gscFeedPath,omitempty"`  // full sitemap URL
+	GscStartDate        string `json:"gscStartDate,omitempty"` // YYYY-MM-DD, Pacific time
+	GscEndDate          string `json:"gscEndDate,omitempty"`
+	GscDimensions       string `json:"gscDimensions,omitempty"`       // query, page, country, device, date
+	GscSearchType       string `json:"gscSearchType,omitempty"`       // web | image | video | news | discover
+	GscDataState        string `json:"gscDataState,omitempty"`        // final (default) | all
+	GscFilterExpression string `json:"gscFilterExpression,omitempty"` // one "dimension operator value" per line
+	GscRowLimit         int    `json:"gscRowLimit,omitempty"`
+	GscStartRow         int    `json:"gscStartRow,omitempty"`
+	GscInspectionUrl    string `json:"gscInspectionUrl,omitempty"`
+	GscLanguageCode     string `json:"gscLanguageCode,omitempty"`
+
+	// googlecontacts
+	ContactsResourceName  string `json:"contactsResourceName,omitempty"` // people/c123; comma-separated for batch delete
+	ContactsFields        string `json:"contactsFields,omitempty"`       // personFields mask; a sensible default applies
+	ContactsQuery         string `json:"contactsQuery,omitempty"`
+	ContactsPageToken     string `json:"contactsPageToken,omitempty"`
+	ContactsSortOrder     string `json:"contactsSortOrder,omitempty"`
+	ContactsGivenName     string `json:"contactsGivenName,omitempty"`
+	ContactsFamilyName    string `json:"contactsFamilyName,omitempty"`
+	ContactsEmail         string `json:"contactsEmail,omitempty"` // comma-separated
+	ContactsPhone         string `json:"contactsPhone,omitempty"` // comma-separated
+	ContactsOrganization  string `json:"contactsOrganization,omitempty"`
+	ContactsJobTitle      string `json:"contactsJobTitle,omitempty"`
+	ContactsAddress       string `json:"contactsAddress,omitempty"`
+	ContactsNotes         string `json:"contactsNotes,omitempty"`
+	ContactsRawPerson     string `json:"contactsRawPerson,omitempty"` // extra People-API fields as JSON
+	ContactsGroupId       string `json:"contactsGroupId,omitempty"`
+	ContactsGroupName     string `json:"contactsGroupName,omitempty"`
+	ContactsAddMembers    string `json:"contactsAddMembers,omitempty"` // comma-separated resource names
+	ContactsRemoveMembers string `json:"contactsRemoveMembers,omitempty"`
+	ContactsLimit         int    `json:"contactsLimit,omitempty"`
 }
 
 type Position struct {

@@ -227,6 +227,32 @@ var oauthProviders = map[string]oauthProvider{
 			"prompt":      {"consent"},
 		},
 	},
+	// Search Console's webmasters scope covers both reading reports and adding or
+	// removing properties and sitemaps; there is no narrower write scope.
+	"googlesearchconsole": {
+		name:         "googlesearchconsole",
+		authorizeURL: "https://accounts.google.com/o/oauth2/v2/auth",
+		clientIDEnv:  "GOOGLE_CLIENT_ID",
+		secretEnv:    "GOOGLE_CLIENT_SECRET",
+		extraAuthQ: url.Values{
+			"scope":       {"https://www.googleapis.com/auth/webmasters"},
+			"access_type": {"offline"},
+			"prompt":      {"consent"},
+		},
+	},
+	// contacts covers read and write; contacts.other.readonly is what exposes the
+	// "other contacts" people have corresponded with but never saved.
+	"googlecontacts": {
+		name:         "googlecontacts",
+		authorizeURL: "https://accounts.google.com/o/oauth2/v2/auth",
+		clientIDEnv:  "GOOGLE_CLIENT_ID",
+		secretEnv:    "GOOGLE_CLIENT_SECRET",
+		extraAuthQ: url.Values{
+			"scope":       {"https://www.googleapis.com/auth/contacts https://www.googleapis.com/auth/contacts.other.readonly"},
+			"access_type": {"offline"},
+			"prompt":      {"consent"},
+		},
+	},
 	// Gumroad's OAuth scopes are coarse: edit_products covers the whole catalogue
 	// and view_sales the whole ledger. There is nothing narrower to ask for.
 	"gumroad": {
@@ -367,6 +393,7 @@ var allProviders = []string{
 	"googlekeep", "outlook", "slack", "notion", "linear",
 	"github", "gitlab", "jira", "confluence", "bitbucket",
 	"stripe", "shopify", "granola", "resend", "sendgrid", "kit", "airtable", "clickup", "typeform", "calendly", "dropbox", "netlify", "supabase", "gumroad",
+	"googlesearchconsole", "googlecontacts",
 }
 
 func oauthRedirectURI(provider string) string {
@@ -628,7 +655,8 @@ func (h *WorkflowHandler) CallbackIntegration(c *gin.Context) {
 	case "shopify":
 		conn, err = exchangeShopifyCode(code, shop)
 	case "googlecalendar", "googledrive", "googledocs", "googlesheets",
-		"googlemeet", "googleslides", "googleforms", "googletasks", "googlechat", "googlekeep":
+		"googlemeet", "googleslides", "googleforms", "googletasks", "googlechat", "googlekeep",
+		"googlesearchconsole", "googlecontacts":
 		conn, err = exchangeGoogleServiceCode(provider, code)
 	case "airtable":
 		conn, err = exchangeAirtableCode(code, st.verifier)
@@ -744,6 +772,8 @@ func (h *WorkflowHandler) listProviderResources(userID, provider string) ([]inte
 		return airtableResources(token)
 	case "supabase":
 		return supabaseResources(token)
+	case "googlesearchconsole":
+		return searchConsoleResources(token)
 	case "clickup":
 		return clickupResources(token)
 	case "googletasks":
@@ -1132,28 +1162,30 @@ type refreshEndpoint struct {
 }
 
 var refreshTokenEndpoints = map[string]refreshEndpoint{
-	"github":         {tokenURL: "https://github.com/login/oauth/access_token", clientIDEnv: "GITHUB_CLIENT_ID", secretEnv: "GITHUB_CLIENT_SECRET"},
-	"gmail":          {tokenURL: "https://oauth2.googleapis.com/token", clientIDEnv: "GOOGLE_CLIENT_ID", secretEnv: "GOOGLE_CLIENT_SECRET"},
-	"gitlab":         {tokenURL: "https://gitlab.com/oauth/token", clientIDEnv: "GITLAB_CLIENT_ID", secretEnv: "GITLAB_CLIENT_SECRET"},
-	"googlecalendar": {tokenURL: "https://oauth2.googleapis.com/token", clientIDEnv: "GOOGLE_CLIENT_ID", secretEnv: "GOOGLE_CLIENT_SECRET"},
-	"googledrive":    {tokenURL: "https://oauth2.googleapis.com/token", clientIDEnv: "GOOGLE_CLIENT_ID", secretEnv: "GOOGLE_CLIENT_SECRET"},
-	"googledocs":     {tokenURL: "https://oauth2.googleapis.com/token", clientIDEnv: "GOOGLE_CLIENT_ID", secretEnv: "GOOGLE_CLIENT_SECRET"},
-	"googlesheets":   {tokenURL: "https://oauth2.googleapis.com/token", clientIDEnv: "GOOGLE_CLIENT_ID", secretEnv: "GOOGLE_CLIENT_SECRET"},
-	"googlemeet":     {tokenURL: "https://oauth2.googleapis.com/token", clientIDEnv: "GOOGLE_CLIENT_ID", secretEnv: "GOOGLE_CLIENT_SECRET"},
-	"googleslides":   {tokenURL: "https://oauth2.googleapis.com/token", clientIDEnv: "GOOGLE_CLIENT_ID", secretEnv: "GOOGLE_CLIENT_SECRET"},
-	"googleforms":    {tokenURL: "https://oauth2.googleapis.com/token", clientIDEnv: "GOOGLE_CLIENT_ID", secretEnv: "GOOGLE_CLIENT_SECRET"},
-	"googletasks":    {tokenURL: "https://oauth2.googleapis.com/token", clientIDEnv: "GOOGLE_CLIENT_ID", secretEnv: "GOOGLE_CLIENT_SECRET"},
-	"googlechat":     {tokenURL: "https://oauth2.googleapis.com/token", clientIDEnv: "GOOGLE_CLIENT_ID", secretEnv: "GOOGLE_CLIENT_SECRET"},
-	"googlekeep":     {tokenURL: "https://oauth2.googleapis.com/token", clientIDEnv: "GOOGLE_CLIENT_ID", secretEnv: "GOOGLE_CLIENT_SECRET"},
-	"outlook":        {tokenURL: "https://login.microsoftonline.com/common/oauth2/v2.0/token", clientIDEnv: "MICROSOFT_CLIENT_ID", secretEnv: "MICROSOFT_CLIENT_SECRET"},
-	"jira":           {tokenURL: atlassianTokenURL, clientIDEnv: "ATLASSIAN_CLIENT_ID", secretEnv: "ATLASSIAN_CLIENT_SECRET", jsonBody: true},
-	"confluence":     {tokenURL: atlassianTokenURL, clientIDEnv: "ATLASSIAN_CLIENT_ID", secretEnv: "ATLASSIAN_CLIENT_SECRET", jsonBody: true},
-	"airtable":       {tokenURL: airtableTokenURL, clientIDEnv: "AIRTABLE_CLIENT_ID", secretEnv: "AIRTABLE_CLIENT_SECRET", basicAuth: true},
-	"supabase":       {tokenURL: supabaseTokenURL, clientIDEnv: "SUPABASE_CLIENT_ID", secretEnv: "SUPABASE_CLIENT_SECRET", basicAuth: true},
-	"dropbox":        {tokenURL: "https://api.dropboxapi.com/oauth2/token", clientIDEnv: "DROPBOX_CLIENT_ID", secretEnv: "DROPBOX_CLIENT_SECRET"},
-	"typeform":       {tokenURL: "https://api.typeform.com/oauth/token", clientIDEnv: "TYPEFORM_CLIENT_ID", secretEnv: "TYPEFORM_CLIENT_SECRET"},
-	"calendly":       {tokenURL: "https://auth.calendly.com/oauth/token", clientIDEnv: "CALENDLY_CLIENT_ID", secretEnv: "CALENDLY_CLIENT_SECRET"},
-	"bitbucket":      {tokenURL: bitbucketTokenURL, clientIDEnv: "BITBUCKET_CLIENT_ID", secretEnv: "BITBUCKET_CLIENT_SECRET", basicAuth: true},
+	"github":              {tokenURL: "https://github.com/login/oauth/access_token", clientIDEnv: "GITHUB_CLIENT_ID", secretEnv: "GITHUB_CLIENT_SECRET"},
+	"gmail":               {tokenURL: "https://oauth2.googleapis.com/token", clientIDEnv: "GOOGLE_CLIENT_ID", secretEnv: "GOOGLE_CLIENT_SECRET"},
+	"gitlab":              {tokenURL: "https://gitlab.com/oauth/token", clientIDEnv: "GITLAB_CLIENT_ID", secretEnv: "GITLAB_CLIENT_SECRET"},
+	"googlecalendar":      {tokenURL: "https://oauth2.googleapis.com/token", clientIDEnv: "GOOGLE_CLIENT_ID", secretEnv: "GOOGLE_CLIENT_SECRET"},
+	"googledrive":         {tokenURL: "https://oauth2.googleapis.com/token", clientIDEnv: "GOOGLE_CLIENT_ID", secretEnv: "GOOGLE_CLIENT_SECRET"},
+	"googledocs":          {tokenURL: "https://oauth2.googleapis.com/token", clientIDEnv: "GOOGLE_CLIENT_ID", secretEnv: "GOOGLE_CLIENT_SECRET"},
+	"googlesheets":        {tokenURL: "https://oauth2.googleapis.com/token", clientIDEnv: "GOOGLE_CLIENT_ID", secretEnv: "GOOGLE_CLIENT_SECRET"},
+	"googlemeet":          {tokenURL: "https://oauth2.googleapis.com/token", clientIDEnv: "GOOGLE_CLIENT_ID", secretEnv: "GOOGLE_CLIENT_SECRET"},
+	"googleslides":        {tokenURL: "https://oauth2.googleapis.com/token", clientIDEnv: "GOOGLE_CLIENT_ID", secretEnv: "GOOGLE_CLIENT_SECRET"},
+	"googleforms":         {tokenURL: "https://oauth2.googleapis.com/token", clientIDEnv: "GOOGLE_CLIENT_ID", secretEnv: "GOOGLE_CLIENT_SECRET"},
+	"googletasks":         {tokenURL: "https://oauth2.googleapis.com/token", clientIDEnv: "GOOGLE_CLIENT_ID", secretEnv: "GOOGLE_CLIENT_SECRET"},
+	"googlechat":          {tokenURL: "https://oauth2.googleapis.com/token", clientIDEnv: "GOOGLE_CLIENT_ID", secretEnv: "GOOGLE_CLIENT_SECRET"},
+	"googlekeep":          {tokenURL: "https://oauth2.googleapis.com/token", clientIDEnv: "GOOGLE_CLIENT_ID", secretEnv: "GOOGLE_CLIENT_SECRET"},
+	"googlesearchconsole": {tokenURL: "https://oauth2.googleapis.com/token", clientIDEnv: "GOOGLE_CLIENT_ID", secretEnv: "GOOGLE_CLIENT_SECRET"},
+	"googlecontacts":      {tokenURL: "https://oauth2.googleapis.com/token", clientIDEnv: "GOOGLE_CLIENT_ID", secretEnv: "GOOGLE_CLIENT_SECRET"},
+	"outlook":             {tokenURL: "https://login.microsoftonline.com/common/oauth2/v2.0/token", clientIDEnv: "MICROSOFT_CLIENT_ID", secretEnv: "MICROSOFT_CLIENT_SECRET"},
+	"jira":                {tokenURL: atlassianTokenURL, clientIDEnv: "ATLASSIAN_CLIENT_ID", secretEnv: "ATLASSIAN_CLIENT_SECRET", jsonBody: true},
+	"confluence":          {tokenURL: atlassianTokenURL, clientIDEnv: "ATLASSIAN_CLIENT_ID", secretEnv: "ATLASSIAN_CLIENT_SECRET", jsonBody: true},
+	"airtable":            {tokenURL: airtableTokenURL, clientIDEnv: "AIRTABLE_CLIENT_ID", secretEnv: "AIRTABLE_CLIENT_SECRET", basicAuth: true},
+	"supabase":            {tokenURL: supabaseTokenURL, clientIDEnv: "SUPABASE_CLIENT_ID", secretEnv: "SUPABASE_CLIENT_SECRET", basicAuth: true},
+	"dropbox":             {tokenURL: "https://api.dropboxapi.com/oauth2/token", clientIDEnv: "DROPBOX_CLIENT_ID", secretEnv: "DROPBOX_CLIENT_SECRET"},
+	"typeform":            {tokenURL: "https://api.typeform.com/oauth/token", clientIDEnv: "TYPEFORM_CLIENT_ID", secretEnv: "TYPEFORM_CLIENT_SECRET"},
+	"calendly":            {tokenURL: "https://auth.calendly.com/oauth/token", clientIDEnv: "CALENDLY_CLIENT_ID", secretEnv: "CALENDLY_CLIENT_SECRET"},
+	"bitbucket":           {tokenURL: bitbucketTokenURL, clientIDEnv: "BITBUCKET_CLIENT_ID", secretEnv: "BITBUCKET_CLIENT_SECRET", basicAuth: true},
 }
 
 // refreshedToken is one provider's answer to a refresh-token grant.

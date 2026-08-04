@@ -502,3 +502,32 @@ func exchangeFormPostCode(provider, code, tokenURL string) (*models.IntegrationC
 	}
 	return conn, nil
 }
+
+// searchConsoleResources lists the verified properties a connection can reach.
+// The identifier is the property URL itself, which is what gscSiteUrl wants.
+func searchConsoleResources(token string) ([]integrationResource, error) {
+	raw, err := googleGet(token, "https://www.googleapis.com/webmasters/v3/sites")
+	if err != nil {
+		return nil, err
+	}
+	var out struct {
+		SiteEntry []struct {
+			SiteURL         string `json:"siteUrl"`
+			PermissionLevel string `json:"permissionLevel"`
+		} `json:"siteEntry"`
+	}
+	if json.Unmarshal(raw, &out) != nil {
+		return nil, fmt.Errorf("parse search console properties")
+	}
+	res := make([]integrationResource, 0, len(out.SiteEntry))
+	for _, s := range out.SiteEntry {
+		// An unverified property returns no data, so say so in the label rather
+		// than letting it look like an empty report later.
+		name := s.SiteURL
+		if s.PermissionLevel == "siteUnverifiedUser" {
+			name += " (unverified)"
+		}
+		res = append(res, integrationResource{ID: s.SiteURL, Name: name, Type: "property"})
+	}
+	return res, nil
+}

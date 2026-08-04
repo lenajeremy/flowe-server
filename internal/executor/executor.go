@@ -1162,6 +1162,26 @@ func runNodeInner(ctx context.Context, node WorkflowASTNode, outputs map[string]
 		}
 		return runGumroad(ctx, token, d, outputs)
 
+	case NodeTypeGoogleSearchConsole:
+		token := substituteTemplates(d.IntegrationToken, outputs)
+		if token == "" && IntegrationCredsLookup != nil {
+			token, _ = IntegrationCredsLookup(ownerID, "googlesearchconsole")
+		}
+		if token == "" {
+			return "", fmt.Errorf("Google Search Console is not connected — use Connect Google Search Console in the node settings")
+		}
+		return runGoogleSearchConsole(ctx, token, d, outputs)
+
+	case NodeTypeGoogleContacts:
+		token := substituteTemplates(d.IntegrationToken, outputs)
+		if token == "" && IntegrationCredsLookup != nil {
+			token, _ = IntegrationCredsLookup(ownerID, "googlecontacts")
+		}
+		if token == "" {
+			return "", fmt.Errorf("Google Contacts is not connected — use Connect Google Contacts in the node settings")
+		}
+		return runGoogleContacts(ctx, token, d, outputs)
+
 	case NodeTypeGranola:
 		key := substituteTemplates(d.IntegrationToken, outputs)
 		if key == "" && IntegrationCredsLookup != nil {
