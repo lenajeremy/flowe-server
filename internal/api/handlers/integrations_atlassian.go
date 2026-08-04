@@ -34,17 +34,36 @@ const (
 	atlassianResourcesURL = "https://api.atlassian.com/oauth/token/accessible-resources"
 )
 
-// atlassianScopes are classic scopes, which Atlassian recommends over granular
-// ones. offline_access is what earns a refresh token; without it the connection
-// dies in an hour.
+// atlassianScopes lists exactly what the shipped operations need.
+//
+// Jira spans two APIs with two different scope models, which is not obvious and
+// is easy to get wrong:
+//
+//   - The platform API (/rest/api/3) uses CLASSIC scopes. read:jira-work,
+//     write:jira-work and read:jira-user cover all 19 platform operations here.
+//   - The Jira Software API (/rest/agile/1.0), which serves boards and sprints,
+//     does not support classic scopes at all — Atlassian's own reference says to
+//     use granular ones. So the five Agile operations need the three granular
+//     *-software scopes, and the app must have the Jira Software API added
+//     alongside the Jira API in the developer console.
+//
+// Nothing broader is requested. Notably absent: manage:jira-project and
+// manage:jira-configuration (no operation administers a project),
+// write:board-scope:jira-software (boards are only read), and
+// read:issue-details:jira (a granular platform scope that read:jira-work already
+// covers, and mixing granular and classic scopes for the same API is asking for
+// trouble).
+//
+// offline_access is what earns a refresh token; without it a connection dies in
+// about an hour.
 var atlassianScopes = map[string][]string{
 	"jira": {
 		"offline_access",
-		"read:jira-work", "write:jira-work", "read:jira-user", "manage:jira-project",
-		// Agile (boards and sprints) lives behind its own scope.
-		"read:board-scope:jira-software", "write:board-scope:jira-software",
+		// Platform API — classic.
+		"read:jira-work", "write:jira-work", "read:jira-user",
+		// Jira Software API — granular only; classic scopes do not work here.
+		"read:board-scope:jira-software",
 		"read:sprint:jira-software", "write:sprint:jira-software",
-		"read:issue-details:jira",
 	},
 	"confluence": {
 		"offline_access",
