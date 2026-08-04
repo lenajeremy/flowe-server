@@ -262,11 +262,11 @@ var oauthProviders = map[string]oauthProvider{
 
 // allProviders is the stable iteration order for status/resource listings.
 var allProviders = []string{
-	"notion", "linear", "github", "gitlab", "gmail",
-	"googlecalendar", "googledrive", "googledocs", "googlesheets",
-	"outlook", "slack", "stripe", "shopify",
-	"jira", "confluence", "bitbucket",
-	"googlemeet", "googleslides", "googleforms", "googletasks", "googlechat", "googlekeep",
+	"gmail", "googlecalendar", "googledrive", "googledocs", "googlesheets",
+	"googleslides", "googleforms", "googlemeet", "googlechat", "googletasks",
+	"googlekeep", "outlook", "slack", "notion", "linear",
+	"github", "gitlab", "jira", "confluence", "bitbucket",
+	"stripe", "shopify",
 }
 
 func oauthRedirectURI(provider string) string {
