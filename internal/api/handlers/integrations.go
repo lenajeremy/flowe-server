@@ -227,6 +227,23 @@ var oauthProviders = map[string]oauthProvider{
 			"prompt":      {"consent"},
 		},
 	},
+	"typeform": {
+		name:         "typeform",
+		authorizeURL: "https://api.typeform.com/oauth/authorize",
+		clientIDEnv:  "TYPEFORM_CLIENT_ID",
+		secretEnv:    "TYPEFORM_CLIENT_SECRET",
+		extraAuthQ: url.Values{
+			"scope": {"forms:read forms:write responses:read responses:write workspaces:read workspaces:write themes:read images:read webhooks:read webhooks:write accounts:read"},
+		},
+	},
+	// Calendly's booking endpoints need a paid plan; the grant itself does not
+	// say so, and a 403 at run time is the first sign.
+	"calendly": {
+		name:         "calendly",
+		authorizeURL: "https://auth.calendly.com/oauth/authorize",
+		clientIDEnv:  "CALENDLY_CLIENT_ID",
+		secretEnv:    "CALENDLY_CLIENT_SECRET",
+	},
 	// ClickUp authorizes on the app domain and takes no scope — see
 	// integrations_clickup.go.
 	"clickup": {
@@ -283,7 +300,7 @@ var allProviders = []string{
 	"googleslides", "googleforms", "googlemeet", "googlechat", "googletasks",
 	"googlekeep", "outlook", "slack", "notion", "linear",
 	"github", "gitlab", "jira", "confluence", "bitbucket",
-	"stripe", "shopify", "granola", "resend", "sendgrid", "kit", "airtable", "clickup",
+	"stripe", "shopify", "granola", "resend", "sendgrid", "kit", "airtable", "clickup", "typeform", "calendly",
 }
 
 func oauthRedirectURI(provider string) string {
@@ -551,6 +568,10 @@ func (h *WorkflowHandler) CallbackIntegration(c *gin.Context) {
 		conn, err = exchangeAirtableCode(code, st.verifier)
 	case "clickup":
 		conn, err = exchangeClickUpCode(code)
+	case "typeform":
+		conn, err = exchangeFormPostCode("typeform", code, "https://api.typeform.com/oauth/token")
+	case "calendly":
+		conn, err = exchangeFormPostCode("calendly", code, "https://auth.calendly.com/oauth/token")
 	case "jira", "confluence":
 		conn, err = exchangeAtlassianCode(provider, code)
 	case "bitbucket":
@@ -1052,6 +1073,8 @@ var refreshTokenEndpoints = map[string]refreshEndpoint{
 	"jira":           {tokenURL: atlassianTokenURL, clientIDEnv: "ATLASSIAN_CLIENT_ID", secretEnv: "ATLASSIAN_CLIENT_SECRET", jsonBody: true},
 	"confluence":     {tokenURL: atlassianTokenURL, clientIDEnv: "ATLASSIAN_CLIENT_ID", secretEnv: "ATLASSIAN_CLIENT_SECRET", jsonBody: true},
 	"airtable":       {tokenURL: airtableTokenURL, clientIDEnv: "AIRTABLE_CLIENT_ID", secretEnv: "AIRTABLE_CLIENT_SECRET", basicAuth: true},
+	"typeform":       {tokenURL: "https://api.typeform.com/oauth/token", clientIDEnv: "TYPEFORM_CLIENT_ID", secretEnv: "TYPEFORM_CLIENT_SECRET"},
+	"calendly":       {tokenURL: "https://auth.calendly.com/oauth/token", clientIDEnv: "CALENDLY_CLIENT_ID", secretEnv: "CALENDLY_CLIENT_SECRET"},
 	"bitbucket":      {tokenURL: bitbucketTokenURL, clientIDEnv: "BITBUCKET_CLIENT_ID", secretEnv: "BITBUCKET_CLIENT_SECRET", basicAuth: true},
 }
 

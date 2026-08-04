@@ -43,6 +43,8 @@ const (
 	NodeTypeKit              NodeType = "kit"
 	NodeTypeAirtable         NodeType = "airtable"
 	NodeTypeClickUp          NodeType = "clickup"
+	NodeTypeTypeform         NodeType = "typeform"
+	NodeTypeCalendly         NodeType = "calendly"
 	NodeTypeData             NodeType = "data"
 )
 
@@ -597,6 +599,49 @@ type FlowNodeData struct {
 	ClickUpEvents          string `json:"clickupEvents,omitempty"` // comma-separated
 	ClickUpWebhookId       string `json:"clickupWebhookId,omitempty"`
 	ClickUpLimit           int    `json:"clickupLimit,omitempty"`
+
+	// typeform
+	TypeformFormId      string `json:"typeformFormId,omitempty"`
+	TypeformTitle       string `json:"typeformTitle,omitempty"`
+	TypeformDefinition  string `json:"typeformDefinition,omitempty"` // full JSON form definition
+	TypeformWorkspaceId string `json:"typeformWorkspaceId,omitempty"`
+	TypeformThemeId     string `json:"typeformThemeId,omitempty"`
+	TypeformSearch      string `json:"typeformSearch,omitempty"`
+	TypeformSince       string `json:"typeformSince,omitempty"` // RFC3339
+	TypeformUntil       string `json:"typeformUntil,omitempty"`
+	TypeformAfter       string `json:"typeformAfter,omitempty"`       // response token cursor
+	TypeformCompleted   string `json:"typeformCompleted,omitempty"`   // "true" | "false"
+	TypeformQuery       string `json:"typeformQuery,omitempty"`       // free-text search across answers
+	TypeformResponseIds string `json:"typeformResponseIds,omitempty"` // comma-separated tokens
+	TypeformUrl         string `json:"typeformUrl,omitempty"`         // webhook URL
+	TypeformTag         string `json:"typeformTag,omitempty"`         // webhook tag; PUT is create-or-update
+	TypeformSecret      string `json:"typeformSecret,omitempty"`      // webhook signing secret
+	TypeformLimit       int    `json:"typeformLimit,omitempty"`
+
+	// calendly
+	CalendlyUser         string `json:"calendlyUser,omitempty"` // user URI; defaults to the connected account
+	CalendlyOrganization string `json:"calendlyOrganization,omitempty"`
+	CalendlyScope        string `json:"calendlyScope,omitempty"`     // user | organization
+	CalendlyEventType    string `json:"calendlyEventType,omitempty"` // event type URI
+	CalendlyEvent        string `json:"calendlyEvent,omitempty"`     // scheduled event URI
+	CalendlyInvitee      string `json:"calendlyInvitee,omitempty"`
+	CalendlyNoShow       string `json:"calendlyNoShow,omitempty"`
+	CalendlyMembership   string `json:"calendlyMembership,omitempty"`
+	CalendlyRoutingForm  string `json:"calendlyRoutingForm,omitempty"`
+	CalendlyStatus       string `json:"calendlyStatus,omitempty"`    // active | canceled
+	CalendlyStartTime    string `json:"calendlyStartTime,omitempty"` // RFC3339
+	CalendlyEndTime      string `json:"calendlyEndTime,omitempty"`
+	CalendlyEmail        string `json:"calendlyEmail,omitempty"`
+	CalendlyReason       string `json:"calendlyReason,omitempty"` // cancellation reason
+	CalendlyInviteeName  string `json:"calendlyInviteeName,omitempty"`
+	CalendlyInviteeEmail string `json:"calendlyInviteeEmail,omitempty"`
+	CalendlyTimezone     string `json:"calendlyTimezone,omitempty"` // IANA, e.g. Europe/Dublin
+	CalendlyGuests       string `json:"calendlyGuests,omitempty"`   // comma-separated emails
+	CalendlyAnswers      string `json:"calendlyAnswers,omitempty"`  // JSON array of question/answer objects
+	CalendlyUrl          string `json:"calendlyUrl,omitempty"`      // webhook callback
+	CalendlyEvents       string `json:"calendlyEvents,omitempty"`   // comma-separated
+	CalendlyWebhookId    string `json:"calendlyWebhookId,omitempty"`
+	CalendlyLimit        int    `json:"calendlyLimit,omitempty"`
 }
 
 type Position struct {

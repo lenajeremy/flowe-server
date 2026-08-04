@@ -1102,6 +1102,26 @@ func runNodeInner(ctx context.Context, node WorkflowASTNode, outputs map[string]
 		}
 		return runClickUp(ctx, token, d, outputs)
 
+	case NodeTypeTypeform:
+		token := substituteTemplates(d.IntegrationToken, outputs)
+		if token == "" && IntegrationCredsLookup != nil {
+			token, _ = IntegrationCredsLookup(ownerID, "typeform")
+		}
+		if token == "" {
+			return "", fmt.Errorf("Typeform is not connected — use Connect Typeform in the node settings")
+		}
+		return runTypeform(ctx, token, d, outputs)
+
+	case NodeTypeCalendly:
+		token := substituteTemplates(d.IntegrationToken, outputs)
+		if token == "" && IntegrationCredsLookup != nil {
+			token, _ = IntegrationCredsLookup(ownerID, "calendly")
+		}
+		if token == "" {
+			return "", fmt.Errorf("Calendly is not connected — use Connect Calendly in the node settings")
+		}
+		return runCalendly(ctx, token, d, outputs)
+
 	case NodeTypeGranola:
 		key := substituteTemplates(d.IntegrationToken, outputs)
 		if key == "" && IntegrationCredsLookup != nil {

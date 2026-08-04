@@ -459,3 +459,46 @@ func googleGet(token, url string) ([]byte, error) {
 	req.Header.Set("Authorization", "Bearer "+token)
 	return doOAuthRequest(req)
 }
+
+// exchangeFormPostCode covers providers whose token exchange is the textbook
+// form-encoded POST with the client credentials in the body, and whose response
+// is the standard access/refresh/expires_in triple. Typeform and Calendly both
+// fit, so neither needs its own exchange function.
+func exchangeFormPostCode(provider, code, tokenURL string) (*models.IntegrationConnection, error) {
+	envPrefix := strings.ToUpper(provider)
+	form := url.Values{}
+	form.Set("grant_type", "authorization_code")
+	form.Set("code", code)
+	form.Set("redirect_uri", oauthRedirectURI(provider))
+	form.Set("client_id", os.Getenv(envPrefix+"_CLIENT_ID"))
+	form.Set("client_secret", os.Getenv(envPrefix+"_CLIENT_SECRET"))
+
+	req, _ := http.NewRequest(http.MethodPost, tokenURL, strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Accept", "application/json")
+
+	raw, err := doOAuthRequest(req)
+	if err != nil {
+		return nil, err
+	}
+	var tok struct {
+		AccessToken  string `json:"access_token"`
+		RefreshToken string `json:"refresh_token"`
+		ExpiresIn    int64  `json:"expires_in"`
+		Scope        string `json:"scope"`
+	}
+	if err := json.Unmarshal(raw, &tok); err != nil || tok.AccessToken == "" {
+		return nil, fmt.Errorf("%s token exchange returned no access token", provider)
+	}
+	conn := &models.IntegrationConnection{
+		Provider:     provider,
+		AccessToken:  tok.AccessToken,
+		RefreshToken: tok.RefreshToken,
+		Scope:        tok.Scope,
+	}
+	if tok.ExpiresIn > 0 {
+		exp := time.Now().Add(time.Duration(tok.ExpiresIn) * time.Second)
+		conn.ExpiresAt = &exp
+	}
+	return conn, nil
+}
