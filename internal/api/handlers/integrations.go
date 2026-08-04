@@ -281,9 +281,11 @@ var oauthProviders = map[string]oauthProvider{
 		clientIDEnv:  "TYPEFORM_CLIENT_ID",
 		secretEnv:    "TYPEFORM_CLIENT_SECRET",
 		extraAuthQ: url.Values{
+			// themes:write is here for delete_theme; Typeform's scopes are not
+			// hierarchical, so a write scope does not imply its read counterpart.
 			"scope": {"offline forms:read forms:write responses:read responses:write " +
-				"workspaces:read workspaces:write themes:read images:read " +
-				"webhooks:read webhooks:write accounts:read"},
+				"workspaces:read workspaces:write themes:read themes:write " +
+				"images:read webhooks:read webhooks:write accounts:read"},
 		},
 	},
 	// Calendly's booking endpoints need a paid plan; the grant itself does not say
