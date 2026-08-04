@@ -28,6 +28,9 @@ const (
 	NodeTypeGoogleDrive      NodeType = "googledrive"
 	NodeTypeGoogleDocs       NodeType = "googledocs"
 	NodeTypeGoogleSheets     NodeType = "googlesheets"
+	NodeTypeJira             NodeType = "jira"
+	NodeTypeConfluence       NodeType = "confluence"
+	NodeTypeBitbucket        NodeType = "bitbucket"
 	NodeTypeData             NodeType = "data"
 )
 
@@ -280,6 +283,71 @@ type FlowNodeData struct {
 	GSheetsRows          string `json:"gsheetsRows,omitempty"`       // JSON array-of-arrays (append_rows)
 	GSheetsStartRow      int    `json:"gsheetsStartRow,omitempty"`   // delete_rows (1-based, inclusive)
 	GSheetsEndRow        int    `json:"gsheetsEndRow,omitempty"`     // delete_rows (inclusive)
+
+	// jira
+	JiraIssueKey    string `json:"jiraIssueKey,omitempty"`   // e.g. ENG-1234
+	JiraProjectKey  string `json:"jiraProjectKey,omitempty"` // e.g. ENG
+	JiraSummary     string `json:"jiraSummary,omitempty"`
+	JiraDescription string `json:"jiraDescription,omitempty"` // plain text, converted to ADF
+	JiraIssueType   string `json:"jiraIssueType,omitempty"`   // Task | Bug | Story | Epic | Sub-task
+	JiraJql         string `json:"jiraJql,omitempty"`
+	JiraLimit       int    `json:"jiraLimit,omitempty"`
+	JiraFields      string `json:"jiraFields,omitempty"`     // comma-separated field list for searches
+	JiraAssignee    string `json:"jiraAssignee,omitempty"`   // accountId, email, or "me"
+	JiraPriority    string `json:"jiraPriority,omitempty"`   // Highest | High | Medium | Low | Lowest
+	JiraLabels      string `json:"jiraLabels,omitempty"`     // comma-separated
+	JiraParentKey   string `json:"jiraParentKey,omitempty"`  // sub-task / epic parent
+	JiraDueDate     string `json:"jiraDueDate,omitempty"`    // YYYY-MM-DD
+	JiraTransition  string `json:"jiraTransition,omitempty"` // target status or transition name
+	JiraComment     string `json:"jiraComment,omitempty"`
+	JiraTimeSpent   string `json:"jiraTimeSpent,omitempty"`   // add_worklog, e.g. "3h 30m"
+	JiraStarted     string `json:"jiraStarted,omitempty"`     // add_worklog start (RFC3339)
+	JiraLinkType    string `json:"jiraLinkType,omitempty"`    // Blocks | Relates | Duplicate | Cloners
+	JiraLinkedIssue string `json:"jiraLinkedIssue,omitempty"` // link_issues target key
+	JiraQuery       string `json:"jiraQuery,omitempty"`       // search_users
+	JiraBoardId     string `json:"jiraBoardId,omitempty"`
+	JiraSprintId    string `json:"jiraSprintId,omitempty"`
+	JiraSprintName  string `json:"jiraSprintName,omitempty"`
+	JiraStartDate   string `json:"jiraStartDate,omitempty"`  // create_sprint (RFC3339)
+	JiraEndDate     string `json:"jiraEndDate,omitempty"`    // create_sprint (RFC3339)
+	JiraAttachName  string `json:"jiraAttachName,omitempty"` // add_attachment file name
+	JiraAttachBody  string `json:"jiraAttachBody,omitempty"` // add_attachment text content
+
+	// confluence
+	ConfluenceSpaceKey   string `json:"confluenceSpaceKey,omitempty"` // e.g. ENG
+	ConfluencePageId     string `json:"confluencePageId,omitempty"`
+	ConfluenceTitle      string `json:"confluenceTitle,omitempty"`
+	ConfluenceBody       string `json:"confluenceBody,omitempty"` // storage XHTML, or plain text
+	ConfluenceParentId   string `json:"confluenceParentId,omitempty"`
+	ConfluenceCql        string `json:"confluenceCql,omitempty"` // search_pages
+	ConfluenceLimit      int    `json:"confluenceLimit,omitempty"`
+	ConfluenceComment    string `json:"confluenceComment,omitempty"`
+	ConfluenceLabel      string `json:"confluenceLabel,omitempty"`  // comma-separated
+	ConfluenceStatus     string `json:"confluenceStatus,omitempty"` // current | draft (create/update)
+	ConfluenceAttachName string `json:"confluenceAttachName,omitempty"`
+	ConfluenceAttachBody string `json:"confluenceAttachBody,omitempty"`
+
+	// bitbucket
+	BitbucketWorkspace     string `json:"bitbucketWorkspace,omitempty"` // slug; defaults to the connected one
+	BitbucketRepo          string `json:"bitbucketRepo,omitempty"`      // repo slug
+	BitbucketPrId          string `json:"bitbucketPrId,omitempty"`
+	BitbucketTitle         string `json:"bitbucketTitle,omitempty"`
+	BitbucketBody          string `json:"bitbucketBody,omitempty"`          // description / comment / issue body
+	BitbucketSource        string `json:"bitbucketSource,omitempty"`        // PR source branch
+	BitbucketDest          string `json:"bitbucketDest,omitempty"`          // PR destination branch
+	BitbucketBranch        string `json:"bitbucketBranch,omitempty"`        // create/delete branch, commit target
+	BitbucketRef           string `json:"bitbucketRef,omitempty"`           // branch/tag/commit to read from
+	BitbucketPath          string `json:"bitbucketPath,omitempty"`          // file path
+	BitbucketContent       string `json:"bitbucketContent,omitempty"`       // commit_file body
+	BitbucketMessage       string `json:"bitbucketMessage,omitempty"`       // commit message
+	BitbucketMergeStrategy string `json:"bitbucketMergeStrategy,omitempty"` // merge_commit | squash | fast_forward
+	BitbucketState         string `json:"bitbucketState,omitempty"`         // PR/issue state filter
+	BitbucketLimit         int    `json:"bitbucketLimit,omitempty"`
+	BitbucketQuery         string `json:"bitbucketQuery,omitempty"`   // list filter (q=)
+	BitbucketPrivate       string `json:"bitbucketPrivate,omitempty"` // create_repository: "true" | "false"
+	BitbucketIssueId       string `json:"bitbucketIssueId,omitempty"`
+	BitbucketKind          string `json:"bitbucketKind,omitempty"`     // issue kind: bug | enhancement | proposal | task
+	BitbucketPriority      string `json:"bitbucketPriority,omitempty"` // trivial | minor | major | critical | blocker
 }
 
 type Position struct {

@@ -992,6 +992,51 @@ func runNodeInner(ctx context.Context, node WorkflowASTNode, outputs map[string]
 		}
 		return runShopify(ctx, token, shop, d, outputs)
 
+	case NodeTypeJira:
+		token := substituteTemplates(d.IntegrationToken, outputs)
+		cloudID := ""
+		if IntegrationCredsLookup != nil {
+			var t string
+			t, cloudID = IntegrationCredsLookup(ownerID, "jira")
+			if token == "" {
+				token = t
+			}
+		}
+		if token == "" {
+			return "", fmt.Errorf("Jira is not connected — use Connect Jira in the node settings")
+		}
+		return runJira(ctx, token, cloudID, d, outputs)
+
+	case NodeTypeConfluence:
+		token := substituteTemplates(d.IntegrationToken, outputs)
+		cloudID := ""
+		if IntegrationCredsLookup != nil {
+			var t string
+			t, cloudID = IntegrationCredsLookup(ownerID, "confluence")
+			if token == "" {
+				token = t
+			}
+		}
+		if token == "" {
+			return "", fmt.Errorf("Confluence is not connected — use Connect Confluence in the node settings")
+		}
+		return runConfluence(ctx, token, cloudID, d, outputs)
+
+	case NodeTypeBitbucket:
+		token := substituteTemplates(d.IntegrationToken, outputs)
+		workspace := ""
+		if IntegrationCredsLookup != nil {
+			var t string
+			t, workspace = IntegrationCredsLookup(ownerID, "bitbucket")
+			if token == "" {
+				token = t
+			}
+		}
+		if token == "" {
+			return "", fmt.Errorf("Bitbucket is not connected — use Connect Bitbucket in the node settings")
+		}
+		return runBitbucket(ctx, token, workspace, d, outputs)
+
 	case NodeTypeGoogleCalendar:
 		token := substituteTemplates(d.IntegrationToken, outputs)
 		if token == "" && IntegrationCredsLookup != nil {

@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html"
 	"io"
@@ -160,6 +161,30 @@ var oauthProviders = map[string]oauthProvider{
 			"user_scope": {"chat:write,im:write,im:read,im:history,mpim:read,mpim:history,search:read"},
 		},
 	},
+	// Jira and Confluence share one Atlassian OAuth app, differing only in
+	// scope — see integrations_atlassian.go.
+	"jira": {
+		name:         "jira",
+		authorizeURL: atlassianAuthorizeURL,
+		clientIDEnv:  "ATLASSIAN_CLIENT_ID",
+		secretEnv:    "ATLASSIAN_CLIENT_SECRET",
+		extraAuthQ:   atlassianAuthorizeQuery("jira"),
+	},
+	"confluence": {
+		name:         "confluence",
+		authorizeURL: atlassianAuthorizeURL,
+		clientIDEnv:  "ATLASSIAN_CLIENT_ID",
+		secretEnv:    "ATLASSIAN_CLIENT_SECRET",
+		extraAuthQ:   atlassianAuthorizeQuery("confluence"),
+	},
+	// Bitbucket has its own OAuth server, not Atlassian's, and does not accept a
+	// scope parameter — scopes are fixed on the consumer in Bitbucket settings.
+	"bitbucket": {
+		name:         "bitbucket",
+		authorizeURL: "https://bitbucket.org/site/oauth2/authorize",
+		clientIDEnv:  "BITBUCKET_CLIENT_ID",
+		secretEnv:    "BITBUCKET_CLIENT_SECRET",
+	},
 	// Shopify's authorize URL is per-shop, so ConnectIntegration/Callback
 	// handle it specially; this entry exists for availability + resource routing.
 	"shopify": {
@@ -174,6 +199,7 @@ var allProviders = []string{
 	"notion", "linear", "github", "gitlab", "gmail",
 	"googlecalendar", "googledrive", "googledocs", "googlesheets",
 	"outlook", "slack", "stripe", "shopify",
+	"jira", "confluence", "bitbucket",
 }
 
 func oauthRedirectURI(provider string) string {
@@ -406,6 +432,10 @@ func (h *WorkflowHandler) CallbackIntegration(c *gin.Context) {
 		conn, err = exchangeShopifyCode(code, shop)
 	case "googlecalendar", "googledrive", "googledocs", "googlesheets":
 		conn, err = exchangeGoogleServiceCode(provider, code)
+	case "jira", "confluence":
+		conn, err = exchangeAtlassianCode(provider, code)
+	case "bitbucket":
+		conn, err = exchangeBitbucketCode(code)
 	case "outlook":
 		conn, err = exchangeOutlookCode(code)
 	case "slack":
@@ -454,13 +484,18 @@ type integrationResource struct {
 	Type string `json:"type"`
 }
 
+// errNotConnected separates "you haven't connected this yet" from a genuine
+// upstream failure, so the picker can stay quiet instead of raising an error
+// toast for a provider the user simply hasn't set up.
+var errNotConnected = errors.New("is not connected")
+
 // listProviderResources resolves fresh credentials and returns the concrete
 // resources a connected provider exposes. Every fetch goes through
 // FreshAccessToken so expiring tokens (gmail, gitlab) refresh transparently.
 func (h *WorkflowHandler) listProviderResources(userID, provider string) ([]integrationResource, error) {
 	token, workspace := FreshAccessToken(h.db.DB, userID, provider)
 	if token == "" {
-		return nil, fmt.Errorf("%s is not connected", provider)
+		return nil, fmt.Errorf("%s: %w", provider, errNotConnected)
 	}
 	switch provider {
 	case "notion":
@@ -485,6 +520,12 @@ func (h *WorkflowHandler) listProviderResources(userID, provider string) ([]inte
 		return outlookResources(token)
 	case "slack":
 		return slackResources(token, UserGrantToken(h.db.DB, userID, "slack"))
+	case "jira":
+		return jiraResources(token, workspace)
+	case "confluence":
+		return confluenceResources(token, workspace)
+	case "bitbucket":
+		return bitbucketResources(token, workspace)
 		// googledocs / googlesheets expose no pickable resource list (drive.file
 		// scope only sees app-created files) — they fall through to empty.
 	}
@@ -500,6 +541,12 @@ func (h *WorkflowHandler) IntegrationResources(c *gin.Context) {
 		return
 	}
 	resources, err := h.listProviderResources(currentUserID(c), provider)
+	if errors.Is(err, errNotConnected) {
+		// 404, not 502 — the resource picker treats this as its quiet
+		// "connect this first" state rather than a failure.
+		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+		return
+	}
 	if err != nil {
 		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
 		return
@@ -847,15 +894,29 @@ func UserGrantToken(db *gorm.DB, userID, provider string) string {
 // GitHub App user tokens live 8 hours and their refresh token (~6 months)
 // rotates on every use. Classic OAuth Apps never reach here — they return no
 // refresh token, so ExpiresAt stays nil and the token is used as-is.
-var refreshTokenEndpoints = map[string]struct{ tokenURL, clientIDEnv, secretEnv string }{
-	"github":         {"https://github.com/login/oauth/access_token", "GITHUB_CLIENT_ID", "GITHUB_CLIENT_SECRET"},
-	"gmail":          {"https://oauth2.googleapis.com/token", "GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET"},
-	"gitlab":         {"https://gitlab.com/oauth/token", "GITLAB_CLIENT_ID", "GITLAB_CLIENT_SECRET"},
-	"googlecalendar": {"https://oauth2.googleapis.com/token", "GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET"},
-	"googledrive":    {"https://oauth2.googleapis.com/token", "GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET"},
-	"googledocs":     {"https://oauth2.googleapis.com/token", "GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET"},
-	"googlesheets":   {"https://oauth2.googleapis.com/token", "GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET"},
-	"outlook":        {"https://login.microsoftonline.com/common/oauth2/v2.0/token", "MICROSOFT_CLIENT_ID", "MICROSOFT_CLIENT_SECRET"},
+// jsonBody sends the grant as a JSON object rather than a form (Atlassian).
+// basicAuth puts the client credentials in an Authorization header rather than
+// the body (Bitbucket rejects them in the body).
+type refreshEndpoint struct {
+	tokenURL    string
+	clientIDEnv string
+	secretEnv   string
+	jsonBody    bool
+	basicAuth   bool
+}
+
+var refreshTokenEndpoints = map[string]refreshEndpoint{
+	"github":         {tokenURL: "https://github.com/login/oauth/access_token", clientIDEnv: "GITHUB_CLIENT_ID", secretEnv: "GITHUB_CLIENT_SECRET"},
+	"gmail":          {tokenURL: "https://oauth2.googleapis.com/token", clientIDEnv: "GOOGLE_CLIENT_ID", secretEnv: "GOOGLE_CLIENT_SECRET"},
+	"gitlab":         {tokenURL: "https://gitlab.com/oauth/token", clientIDEnv: "GITLAB_CLIENT_ID", secretEnv: "GITLAB_CLIENT_SECRET"},
+	"googlecalendar": {tokenURL: "https://oauth2.googleapis.com/token", clientIDEnv: "GOOGLE_CLIENT_ID", secretEnv: "GOOGLE_CLIENT_SECRET"},
+	"googledrive":    {tokenURL: "https://oauth2.googleapis.com/token", clientIDEnv: "GOOGLE_CLIENT_ID", secretEnv: "GOOGLE_CLIENT_SECRET"},
+	"googledocs":     {tokenURL: "https://oauth2.googleapis.com/token", clientIDEnv: "GOOGLE_CLIENT_ID", secretEnv: "GOOGLE_CLIENT_SECRET"},
+	"googlesheets":   {tokenURL: "https://oauth2.googleapis.com/token", clientIDEnv: "GOOGLE_CLIENT_ID", secretEnv: "GOOGLE_CLIENT_SECRET"},
+	"outlook":        {tokenURL: "https://login.microsoftonline.com/common/oauth2/v2.0/token", clientIDEnv: "MICROSOFT_CLIENT_ID", secretEnv: "MICROSOFT_CLIENT_SECRET"},
+	"jira":           {tokenURL: atlassianTokenURL, clientIDEnv: "ATLASSIAN_CLIENT_ID", secretEnv: "ATLASSIAN_CLIENT_SECRET", jsonBody: true},
+	"confluence":     {tokenURL: atlassianTokenURL, clientIDEnv: "ATLASSIAN_CLIENT_ID", secretEnv: "ATLASSIAN_CLIENT_SECRET", jsonBody: true},
+	"bitbucket":      {tokenURL: bitbucketTokenURL, clientIDEnv: "BITBUCKET_CLIENT_ID", secretEnv: "BITBUCKET_CLIENT_SECRET", basicAuth: true},
 }
 
 // refreshedToken is one provider's answer to a refresh-token grant.
@@ -875,14 +936,32 @@ func exchangeRefreshToken(conn *models.IntegrationConnection) (tok refreshedToke
 		return tok, false, nil
 	}
 
-	form := url.Values{}
-	form.Set("grant_type", "refresh_token")
-	form.Set("refresh_token", conn.RefreshToken)
-	form.Set("client_id", os.Getenv(ep.clientIDEnv))
-	form.Set("client_secret", os.Getenv(ep.secretEnv))
+	clientID, secret := os.Getenv(ep.clientIDEnv), os.Getenv(ep.secretEnv)
 
-	req, _ := http.NewRequest(http.MethodPost, ep.tokenURL, strings.NewReader(form.Encode()))
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	var req *http.Request
+	if ep.jsonBody {
+		body, _ := json.Marshal(map[string]string{
+			"grant_type":    "refresh_token",
+			"refresh_token": conn.RefreshToken,
+			"client_id":     clientID,
+			"client_secret": secret,
+		})
+		req, _ = http.NewRequest(http.MethodPost, ep.tokenURL, strings.NewReader(string(body)))
+		req.Header.Set("Content-Type", "application/json")
+	} else {
+		form := url.Values{}
+		form.Set("grant_type", "refresh_token")
+		form.Set("refresh_token", conn.RefreshToken)
+		if !ep.basicAuth {
+			form.Set("client_id", clientID)
+			form.Set("client_secret", secret)
+		}
+		req, _ = http.NewRequest(http.MethodPost, ep.tokenURL, strings.NewReader(form.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	}
+	if ep.basicAuth {
+		req.SetBasicAuth(clientID, secret)
+	}
 	// GitHub answers form-encoded unless JSON is requested explicitly, and it
 	// reports refresh failures with a 200 — so ask for JSON and check the body.
 	req.Header.Set("Accept", "application/json")
@@ -917,7 +996,7 @@ func refreshConnection(db *gorm.DB, conn *models.IntegrationConnection) (*models
 		conn.ExpiresAt = &exp
 		updates["expires_at"] = exp
 	}
-	// github and gitlab rotate the refresh token on use; google does not.
+	// github, gitlab and atlassian rotate the refresh token on use; google does not.
 	if tok.RefreshToken != "" {
 		conn.RefreshToken = tok.RefreshToken
 		updates["refresh_token"] = cryptobox.Encrypt(tok.RefreshToken)
