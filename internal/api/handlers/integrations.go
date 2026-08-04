@@ -259,6 +259,11 @@ func (h *WorkflowHandler) ListIntegrations(c *gin.Context) {
 		byProvider[conn.Provider] = conn
 	}
 
+	// How many of the user's workflows reference each provider. The connections
+	// screen shows this so "disconnect" can say what it will break rather than
+	// leaving the user to guess.
+	usage := h.providerWorkflowCounts(currentUserID(c))
+
 	out := []gin.H{}
 	for _, p := range allProviders {
 		prov := oauthProviders[p]
@@ -267,13 +272,38 @@ func (h *WorkflowHandler) ListIntegrations(c *gin.Context) {
 			"provider":  p,
 			"connected": connected,
 			"available": os.Getenv(prov.clientIDEnv) != "" && os.Getenv(prov.secretEnv) != "",
+			"workflows": usage[p],
 		}
 		if connected {
 			entry["workspace_name"] = conn.WorkspaceName
+			entry["connected_at"] = conn.CreatedAt
+			entry["updated_at"] = conn.UpdatedAt
+			// Presence of an expiry, and whether it has passed. The token may still
+			// refresh — this is for display, not for gating a call.
+			if conn.ExpiresAt != nil {
+				entry["expires_at"] = conn.ExpiresAt
+				entry["expired"] = conn.ExpiresAt.Before(time.Now())
+			}
 		}
 		out = append(out, entry)
 	}
 	c.JSON(http.StatusOK, out)
+}
+
+// providerWorkflowCounts counts, per provider, how many of the user's workflows
+// contain at least one node of that provider's type. Node type is the provider
+// key, so a jsonb containment test finds them without loading every graph.
+func (h *WorkflowHandler) providerWorkflowCounts(userID string) map[string]int {
+	counts := map[string]int{}
+	for _, p := range allProviders {
+		var n int64
+		h.db.DB.Model(&models.Workflow{}).
+			Where("user_id = ? AND deleted_at IS NULL", userID).
+			Where(`nodes @> ?`, fmt.Sprintf(`[{"data":{"nodeType":%q}}]`, p)).
+			Count(&n)
+		counts[p] = int(n)
+	}
+	return counts
 }
 
 // ConnectIntegration redirects the browser to the provider's consent page.
