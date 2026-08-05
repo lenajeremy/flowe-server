@@ -263,8 +263,9 @@ func (h *WorkflowHandler) SetSchedule(c *gin.Context) {
 	// form with a frequency picker — silently saving something they did not choose
 	// would be discovered later, as a workflow that "isn't running".
 	plan := h.planFor(c)
-	if ok, msg := billing.AllowsFrequency(plan, body.Frequency, body.IntervalSeconds); !ok {
-		c.JSON(http.StatusPaymentRequired, gin.H{"error": msg, "limit": "schedule_interval"})
+	if err := billing.CheckFrequency(plan, body.Frequency, body.IntervalSeconds); err != nil {
+		c.JSON(http.StatusPaymentRequired, gin.H{
+			"error": err.Error(), "limit": billing.KindOf(err)})
 		return
 	}
 
@@ -354,6 +355,25 @@ func (h *WorkflowHandler) setScheduleForAI(c *gin.Context, workflowID string, in
 			return `{"error":"frequency=interval needs interval_minutes of at least 1"}`
 		}
 		intervalSeconds = int(*body.IntervalMinutes * 60)
+	}
+
+	// The same plan limit the form enforces. This tool was previously unguarded, so
+	// the builder could set a cadence the UI refuses — the worst kind of gap,
+	// because it works until somebody opens the node and tries to change it.
+	//
+	// The refusal carries the fastest cadence that IS allowed, so the builder can
+	// offer that instead of only reporting a failure.
+	plan := h.planFor(c)
+	if err := billing.CheckFrequency(plan, body.Frequency, intervalSeconds); err != nil {
+		out, _ := json.Marshal(map[string]any{
+			"error":           err.Error(),
+			"limit":           billing.KindOf(err),
+			"slowest_allowed": billing.SlowestAllowed(plan),
+			"hint": "Tell the user this plan's limit, set the fastest cadence it does " +
+				"allow instead, and mention that upgrading lifts it. Do not retry the " +
+				"cadence that was refused.",
+		})
+		return string(out)
 	}
 	runTime := body.RunTime
 	if runTime == "" {

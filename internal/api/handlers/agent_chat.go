@@ -292,7 +292,7 @@ func (h *WorkflowHandler) AgentChatTurn(c *gin.Context) {
 	plan, err := h.bill.CheckBalance(currentOrgID(c), auth.UserID(c))
 	if err != nil {
 		if errors.Is(err, billing.ErrOverCap) {
-			c.JSON(http.StatusPaymentRequired, gin.H{"error": err.Error()})
+			c.JSON(http.StatusPaymentRequired, gin.H{"error": err.Error(), "limit": billing.KindOf(err)})
 			return
 		}
 		slog.ErrorContext(c.Request.Context(), "agent balance check failed", "error", err)

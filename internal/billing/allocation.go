@@ -118,9 +118,13 @@ func (g *Gate) CheckMemberAllowance(org *models.Organization, userID string) err
 	if !a.Exhausted() {
 		return nil
 	}
-	return fmt.Errorf("%w — you've used your share of this period's credits (%s of %s). "+
-		"Your organization's owner can raise your limit or add credits",
-		ErrMemberCapReached, formatCredits(a.Spent), formatCredits(a.Limit))
+	return &LimitError{
+		Kind: "member_credits",
+		Message: fmt.Sprintf("You've used your share of this period's credits (%s of %s). "+
+			"Your organization's owner can raise your limit or add credits.",
+			formatCredits(a.Spent), formatCredits(a.Limit)),
+		sentinel: ErrMemberCapReached,
+	}
 }
 
 // SetMemberLimit records an admin's explicit cap for someone. Zero restores the

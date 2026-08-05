@@ -215,7 +215,7 @@ func (h *WorkflowHandler) InviteMember(c *gin.Context) {
 	if err != nil {
 		switch {
 		case errors.Is(err, tenancy.ErrNoSeats):
-			c.JSON(http.StatusPaymentRequired, gin.H{"error": err.Error(), "limit": "seats"})
+			c.JSON(http.StatusPaymentRequired, gin.H{"error": err.Error(), "limit": billing.KindOf(err)})
 		case errors.Is(err, tenancy.ErrAlreadyMember):
 			c.JSON(http.StatusConflict, gin.H{"error": "that person is already in your organization"})
 		default:

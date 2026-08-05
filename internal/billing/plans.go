@@ -26,6 +26,42 @@ import (
 // upgrade path in the message — never as a generic error, which reads as a bug.
 var ErrLimit = errors.New("plan limit reached")
 
+// LimitError is a limit expressed so that the sentence shown to a person and the
+// sentinel used for control flow are separate things.
+//
+// Building these with fmt.Errorf("%w: …", ErrLimit) put "plan limit reached: " in
+// front of copy that already explains itself — machine vocabulary leaking into
+// product voice. Stripping it back off by prefix match was worse: it broke the
+// moment one sentinel wrapped another, which is exactly what a test caught.
+//
+// Error() is the sentence. Unwrap keeps errors.Is working. Kind lets a handler
+// label the response without matching on message text.
+type LimitError struct {
+	// Kind names the limit for the client: "workflows", "published_schedules",
+	// "schedule_interval", "seats", "members", "credits".
+	Kind    string
+	Message string
+	// sentinel is what errors.Is compares against.
+	sentinel error
+}
+
+func (e *LimitError) Error() string { return e.Message }
+func (e *LimitError) Unwrap() error { return e.sentinel }
+
+// Limit builds a plan-limit error.
+func Limit(kind, format string, args ...any) *LimitError {
+	return &LimitError{Kind: kind, Message: fmt.Sprintf(format, args...), sentinel: ErrLimit}
+}
+
+// KindOf returns the limit name when an error carries one, else "".
+func KindOf(err error) string {
+	var le *LimitError
+	if errors.As(err, &le) {
+		return le.Kind
+	}
+	return ""
+}
+
 // Limits is one plan's entitlements.
 type Limits struct {
 	// MaxWorkflows caps saved workflows. Zero means unlimited.
@@ -176,8 +212,8 @@ func (g *Gate) CheckWorkflowCount(orgID string, plan models.Plan) error {
 		return err
 	}
 	if n >= int64(lim.MaxWorkflows) {
-		return fmt.Errorf("%w: the %s plan includes %d workflows. Upgrade for more",
-			ErrLimit, plan, lim.MaxWorkflows)
+		return Limit("workflows", "The %s plan includes %d workflows. Upgrade for more.",
+			plan, lim.MaxWorkflows)
 	}
 	return nil
 }
@@ -207,11 +243,13 @@ func (g *Gate) CheckPublishSchedule(orgID, workflowID string, plan models.Plan) 
 	}
 	if n >= int64(lim.MaxPublishedSchedules) {
 		if lim.MaxPublishedSchedules == 1 {
-			return fmt.Errorf("%w: the %s plan runs one scheduled workflow at a time. "+
-				"Unpublish the other one, or upgrade to run more", ErrLimit, plan)
+			return Limit("published_schedules",
+				"The %s plan runs one scheduled workflow at a time. Unpublish the "+
+					"other one, or upgrade to run more.", plan)
 		}
-		return fmt.Errorf("%w: the %s plan runs %d scheduled workflows. Upgrade for more",
-			ErrLimit, plan, lim.MaxPublishedSchedules)
+		return Limit("published_schedules",
+			"The %s plan runs %d scheduled workflows at once. Upgrade to run more.",
+			plan, lim.MaxPublishedSchedules)
 	}
 	return nil
 }
@@ -234,9 +272,24 @@ func ScheduleInterval(plan models.Plan, requested time.Duration) (time.Duration,
 }
 
 // AllowsFrequency reports whether a named frequency is fast enough for the plan.
-// The schedule UI offers interval/hourly/daily/weekly/monthly rather than raw
-// durations, so the check has to speak the same vocabulary.
 func AllowsFrequency(plan models.Plan, frequency string, intervalSeconds int) (bool, string) {
+	if err := CheckFrequency(plan, frequency, intervalSeconds); err != nil {
+		return false, err.Error()
+	}
+	return true, ""
+}
+
+// CheckFrequency refuses a cadence the plan cannot run, as a LimitError so that
+// every caller — the schedule form, and the builder's set_schedule tool — reports
+// the same sentence under the same limit name.
+//
+// The AI path needs this as much as the form does. Without it the builder could
+// set a two-minute schedule on a plan whose own UI refuses one, which is worse
+// than the limit not existing: it works until somebody edits it by hand.
+//
+// The schedule UI offers interval/hourly/daily/weekly/monthly rather than raw
+// durations, so the check speaks that vocabulary.
+func CheckFrequency(plan models.Plan, frequency string, intervalSeconds int) error {
 	floor := LimitsFor(plan).MinScheduleInterval
 	var d time.Duration
 	switch frequency {
@@ -251,14 +304,20 @@ func AllowsFrequency(plan models.Plan, frequency string, intervalSeconds int) (b
 	case "monthly":
 		d = 30 * 24 * time.Hour
 	default:
-		return true, "" // unknown frequency: not this function's job to reject
+		return nil // unknown frequency: not this function's job to reject
 	}
 	if d >= floor {
-		return true, ""
+		return nil
 	}
-	return false, fmt.Sprintf(
-		"The %s plan runs schedules at most once every %s. Choose a slower schedule, "+
+	return Limit("schedule_interval",
+		"The %s plan runs schedules at most once every %s. Choose a slower cadence, "+
 			"or upgrade to run it more often.", plan, humanizeInterval(floor))
+}
+
+// SlowestAllowed names the fastest cadence a plan permits, so a refusal can say
+// what IS available rather than only what is not.
+func SlowestAllowed(plan models.Plan) string {
+	return humanizeInterval(LimitsFor(plan).MinScheduleInterval)
 }
 
 func humanizeInterval(d time.Duration) string {

@@ -136,8 +136,12 @@ func (g *Gate) AdmitRun(orgID, userID, runID string) (*Reservation, error) {
 	if err != nil {
 		if errors.Is(err, credits.ErrInsufficient) {
 			bal, _ := credits.Balance(g.db, orgID)
-			return nil, fmt.Errorf("%w — %d credits left. Runs resume when your "+
-				"allowance renews, or upgrade for a larger one", ErrOverCap, credits.Spendable(bal))
+			return nil, &LimitError{
+				Kind: "credits",
+				Message: fmt.Sprintf("Out of credits — %d left. Runs resume when your "+
+					"allowance renews, or upgrade for a larger one.", credits.Spendable(bal)),
+				sentinel: ErrOverCap,
+			}
 		}
 		return nil, err
 	}
@@ -203,8 +207,12 @@ func (g *Gate) CheckBalance(orgID, userID string) (models.Plan, error) {
 		return models.PlanFree, err
 	}
 	if credits.Spendable(bal) <= 0 {
-		return EffectivePlan(org), fmt.Errorf("%w — your credits are used up for this "+
-			"period. Upgrade for a larger allowance, or wait for it to renew", ErrOverCap)
+		return EffectivePlan(org), &LimitError{
+			Kind: "credits",
+			Message: "Your credits are used up for this period. Upgrade for a larger " +
+				"allowance, or wait for it to renew.",
+			sentinel: ErrOverCap,
+		}
 	}
 	return EffectivePlan(org), nil
 }

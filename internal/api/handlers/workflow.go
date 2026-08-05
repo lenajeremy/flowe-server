@@ -187,7 +187,7 @@ func (h *WorkflowHandler) Create(c *gin.Context) {
 
 	if err := h.bill.CheckWorkflowCount(currentOrgID(c), h.planFor(c)); err != nil {
 		if errors.Is(err, billing.ErrLimit) {
-			c.JSON(http.StatusPaymentRequired, gin.H{"error": err.Error(), "limit": "workflows"})
+			c.JSON(http.StatusPaymentRequired, gin.H{"error": err.Error(), "limit": billing.KindOf(err)})
 			return
 		}
 		slog.Error("workflow count check failed", "error", err)
@@ -295,7 +295,7 @@ func (h *WorkflowHandler) SetPublished(published bool) gin.HandlerFunc {
 		if published {
 			if err := h.bill.CheckPublishSchedule(currentOrgID(c), wf.ID.String(), h.planFor(c)); err != nil {
 				if errors.Is(err, billing.ErrLimit) {
-					c.JSON(http.StatusPaymentRequired, gin.H{"error": err.Error(), "limit": "published_schedules"})
+					c.JSON(http.StatusPaymentRequired, gin.H{"error": err.Error(), "limit": billing.KindOf(err)})
 					return
 				}
 				slog.Error("publish limit check failed", "error", err)

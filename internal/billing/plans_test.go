@@ -1,6 +1,7 @@
 package billing
 
 import (
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -151,5 +152,60 @@ func TestEveryPlanHasAFiniteRetentionWindow(t *testing.T) {
 		if RunRetentionFor(plan) <= 0 {
 			t.Fatalf("plan %s keeps run history forever", plan)
 		}
+	}
+}
+
+func TestALimitErrorReadsAsASentenceAndStillMatchesItsSentinel(t *testing.T) {
+	// The two jobs are separate: Error() is what a person reads, the sentinel is
+	// what code branches on. Building these by wrapping put "plan limit reached: "
+	// in front of the copy, and stripping it back off by prefix broke as soon as one
+	// sentinel wrapped another.
+	err := Limit("published_schedules",
+		"The free plan runs one scheduled workflow at a time. Unpublish the other one, "+
+			"or upgrade to run more.")
+
+	if strings.Contains(err.Error(), "plan limit reached") {
+		t.Fatalf("sentinel vocabulary leaked into the message: %q", err.Error())
+	}
+	if !errors.Is(err, ErrLimit) {
+		t.Fatal("errors.Is stopped working")
+	}
+	if KindOf(err) != "published_schedules" {
+		t.Fatalf("kind = %q", KindOf(err))
+	}
+}
+
+func TestMessagesKeepColonsAndPunctuation(t *testing.T) {
+	// Nothing trims at a delimiter any more, so a message containing a colon or a
+	// time survives intact.
+	err := Limit("schedule_interval", "Schedules run at 09:00 at the earliest on this plan.")
+	if err.Error() != "Schedules run at 09:00 at the earliest on this plan." {
+		t.Fatalf("got %q", err.Error())
+	}
+}
+
+func TestTheNestedCreditSentinelStillMatchesBothLevels(t *testing.T) {
+	// A member's cap wraps the org-level ErrOverCap, so both checks have to work —
+	// callers branch on one or the other depending on what they are protecting.
+	e := &LimitError{Kind: "member_credits", Message: "You've used your share.",
+		sentinel: ErrMemberCapReached}
+	if !errors.Is(e, ErrMemberCapReached) {
+		t.Fatal("does not match its own sentinel")
+	}
+	if !errors.Is(e, ErrOverCap) {
+		t.Fatal("does not match the sentinel its own sentinel wraps")
+	}
+	if strings.Contains(e.Error(), "credit limit reached") ||
+		strings.Contains(e.Error(), "personal allowance used up") {
+		t.Fatalf("sentinel text in the message: %q", e.Error())
+	}
+}
+
+func TestKindOfIgnoresUnrelatedErrors(t *testing.T) {
+	if got := KindOf(errors.New("something else broke")); got != "" {
+		t.Fatalf("kind = %q for an unrelated error", got)
+	}
+	if got := KindOf(nil); got != "" {
+		t.Fatalf("kind = %q for nil", got)
 	}
 }

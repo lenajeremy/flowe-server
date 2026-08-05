@@ -929,7 +929,7 @@ func (h *WorkflowHandler) AIGenerate(c *gin.Context) {
 	plan, err := h.bill.CheckBalance(currentOrgID(c), auth.UserID(c))
 	if err != nil {
 		if errors.Is(err, billing.ErrOverCap) {
-			c.JSON(http.StatusPaymentRequired, gin.H{"error": err.Error()})
+			c.JSON(http.StatusPaymentRequired, gin.H{"error": err.Error(), "limit": billing.KindOf(err)})
 			return
 		}
 		slog.ErrorContext(c.Request.Context(), "builder balance check failed", "error", err)
