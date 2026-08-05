@@ -441,7 +441,16 @@ func (g *Gate) onCheckoutCompleted(ctx context.Context, ev stripeEvent) error {
 		}
 	}
 	if orgID == "" {
-		return fmt.Errorf("checkout session %s has no organization reference", sess.ID)
+		// Not a session we created, so there is nothing to apply — the same
+		// conclusion onInvoicePaid reaches for an invoice it cannot match. A Stripe
+		// account carries traffic we do not own: Payment Links, a subscription set up
+		// by hand in the Dashboard, anything else billing to the same account. An
+		// error here would be worse than useless: Stripe retries a 5xx with backoff
+		// for three days and disables an endpoint that keeps failing, so an event
+		// that never concerned us would take real billing down with it.
+		slog.InfoContext(ctx, "billing: ignoring checkout session with no organization reference",
+			"session_id", sess.ID)
+		return nil
 	}
 
 	updates := map[string]any{}
@@ -485,7 +494,12 @@ func (g *Gate) onSubscriptionChanged(ev stripeEvent) error {
 		// metadata, and refusing it would make manual provisioning impossible.
 		var org models.Organization
 		if err := g.db.Where("stripe_customer_id = ?", sub.Customer).First(&org).Error; err != nil {
-			return fmt.Errorf("subscription %s belongs to no known organization", sub.ID)
+			// A subscription on this Stripe account that is not one of ours. Ignored
+			// rather than failed, for the same reason as the checkout case above: a
+			// repeated 5xx gets the endpoint disabled and takes real billing with it.
+			slog.Info("billing: ignoring subscription for an unknown customer",
+				"subscription_id", sub.ID)
+			return nil
 		}
 		orgID = org.ID.String()
 	}
