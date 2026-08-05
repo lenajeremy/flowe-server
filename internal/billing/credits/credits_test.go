@@ -189,3 +189,44 @@ func TestTheCreditPegMatchesTheRates(t *testing.T) {
 			"every plan's margin calculation is now wrong", impliedPerDollar, CreditsPerDollar)
 	}
 }
+
+func TestSmallTierModelsAreNeverPricedAsFrontier(t *testing.T) {
+	// Found in production traffic, not by reading the table: gpt-5.4-mini was
+	// billing at the gpt-5 rate of 6x, because the table happened to have entries
+	// for gpt-4o-mini and gpt-4.1-mini but not for the gpt-5 family. Small models
+	// ship faster than anyone updates a table, so the rule has to be general.
+	frontierVsSmall := []struct{ small, big string }{
+		{"gpt-5.4-mini", "gpt-5.5"},
+		{"gpt-5-mini", "gpt-5"},
+		{"gpt-5.5-nano", "gpt-5.5"},
+		{"gpt-4o-mini", "gpt-4o"},
+		{"gpt-4.1-mini", "gpt-4.1"},
+		{"gemini-3-flash", "gemini-2.5-pro"},
+		{"claude-haiku-4-5-20251001", "claude-opus"},
+		// A small model from a family we have never heard of must not land on the
+		// conservative default meant for unknown frontier models.
+		{"newprovider-7-mini", "gpt-5.5"},
+	}
+	for _, tc := range frontierVsSmall {
+		small, big := ModelMultiplier(tc.small), ModelMultiplier(tc.big)
+		if small >= big {
+			t.Fatalf("%s costs %vx, not less than %s at %vx", tc.small, small, tc.big, big)
+		}
+		if small > 1 {
+			t.Fatalf("%s should be priced at the small tier, got %vx", tc.small, small)
+		}
+	}
+}
+
+func TestTheSmallTierRuleOnlyEverLowersAMultiplier(t *testing.T) {
+	// The ceiling must not become a floor. If a provider ever ships something
+	// expensive with "lite" in the name, the table entry still has to win downward
+	// — but nothing here may push a multiplier UP to the small tier.
+	if got := ModelMultiplier("claude-haiku"); got != 1 {
+		t.Fatalf("haiku is already 1x in the table, got %v", got)
+	}
+	// A frontier model without a marker keeps its table value untouched.
+	if got := ModelMultiplier("claude-opus"); got != 15 {
+		t.Fatalf("opus multiplier changed to %v — the small-tier rule leaked", got)
+	}
+}

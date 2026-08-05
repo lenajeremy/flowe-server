@@ -91,6 +91,24 @@ var modelMultipliers = []struct {
 // visibly.
 const defaultMultiplier = 4
 
+// smallTierMarkers name the cheap variant within a model family. Every provider
+// uses one of these words for it, and none of them ever names a frontier model.
+//
+// This exists because prefix matching alone gets small models badly wrong. Live
+// traffic caught gpt-5.4-mini billing at the gpt-5 frontier rate of 15x the small
+// tier, purely because no "mini" entry happened to match — and the entries that do
+// exist (gpt-4o-mini, gpt-4.1-mini) only cover models someone remembered to add.
+// New small models ship constantly, so an explicit table will always be behind.
+var smallTierMarkers = []string{"-mini", "-nano", "-flash", "-lite", "-small", "haiku"}
+
+// smallTierMultiplier is what any small-tier model costs.
+//
+// Applied as a CEILING, never a floor: it can only lower a multiplier, so it
+// cannot accidentally make a model cheaper to us than the table already says. A
+// model with "mini" in its name being priced above the small tier is always the
+// error; the reverse is not.
+const smallTierMultiplier = 1
+
 // ModelMultiplier returns the cost multiplier for a model id.
 func ModelMultiplier(model string) float64 {
 	m := strings.ToLower(strings.TrimSpace(model))
@@ -101,6 +119,11 @@ func ModelMultiplier(model string) float64 {
 	for _, e := range modelMultipliers {
 		if strings.HasPrefix(m, e.prefix) && len(e.prefix) > bestLen {
 			best, bestLen = e.mult, len(e.prefix)
+		}
+	}
+	for _, marker := range smallTierMarkers {
+		if strings.Contains(m, marker) && best > smallTierMultiplier {
+			return smallTierMultiplier
 		}
 	}
 	return best
