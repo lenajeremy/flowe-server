@@ -197,6 +197,14 @@ func (h *WorkflowHandler) GetUsage(c *gin.Context) {
 
 	org, _ := h.bill.Org(orgID)
 	alloc, _ := h.bill.AllocationFor(org, me)
+
+	// Whether this org has anyone else in it. Counted from MEMBERSHIP rather than
+	// from who happens to have spent: a three-person team where only one person has
+	// used anything is still a team, and hiding the per-person view from them would
+	// be wrong the moment a second person starts working.
+	var memberCount int64
+	h.db.DB.Model(&models.OrgMember{}).
+		Where("organization_id = ?", orgID).Count(&memberCount)
 	c.JSON(http.StatusOK, gin.H{
 		"period": gin.H{
 			"label": periodLabel,
@@ -204,6 +212,7 @@ func (h *WorkflowHandler) GetUsage(c *gin.Context) {
 			"to":    to.Format(time.RFC3339),
 		},
 		"is_admin":     admin,
+		"member_count": memberCount,
 		"viewing_user": scopeUser,
 		"my_allocation": gin.H{
 			"limit":     alloc.Limit,
