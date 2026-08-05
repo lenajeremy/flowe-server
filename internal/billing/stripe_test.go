@@ -4,6 +4,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
@@ -182,20 +183,132 @@ func TestBusinessAndFreeAreNotSelfServe(t *testing.T) {
 	}
 }
 
-// newSub builds a subscription object with one price and some metadata.
+// newSub builds a subscription object from JSON rather than a struct literal.
+//
+// Deliberately through the same decoding path the real webhook uses: a literal has
+// to be edited every time Stripe's shape changes, and that edit is exactly where a
+// test stops reflecting the payload it is meant to model.
 func newSub(priceID string, metadata map[string]any) subscriptionObject {
+	payload := map[string]any{
+		"id":       "sub_test",
+		"customer": "cus_test",
+		"status":   "active",
+		"items": map[string]any{
+			"data": []any{map[string]any{
+				"quantity":           1,
+				"current_period_end": 1788588452,
+				"price":              map[string]any{"id": priceID},
+			}},
+		},
+	}
+	if metadata != nil {
+		payload["metadata"] = metadata
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		panic(err)
+	}
 	var sub subscriptionObject
-	sub.Metadata = metadata
-	if priceID != "" || metadata == nil {
-		item := struct {
-			Quantity int `json:"quantity"`
-			Price    struct {
-				ID string `json:"id"`
-			} `json:"price"`
-		}{}
-		item.Quantity = 1
-		item.Price.ID = priceID
-		sub.Items.Data = append(sub.Items.Data, item)
+	if err := json.Unmarshal(raw, &sub); err != nil {
+		panic(err)
 	}
 	return sub
+}
+
+// Stripe moved current_period_end off the subscription and onto each item
+// (API 2025-09 onward). Caught in live testing, not review: the field silently
+// parsed as zero, which downgraded cancelling customers immediately AND made every
+// renewal grant collide with the first month's idempotency reference — so a
+// customer would pay monthly and receive credits once.
+func TestPeriodEndIsReadFromWhereverThisAPIVersionKeepsIt(t *testing.T) {
+	const want = int64(1788588452)
+
+	cases := map[string]string{
+		// Current API versions: on the item only.
+		"item only": `{"id":"sub_1","status":"active",
+			"items":{"data":[{"quantity":1,"current_period_end":1788588452,"price":{"id":"p"}}]}}`,
+		// Older versions: on the subscription only.
+		"subscription only": `{"id":"sub_1","status":"active","current_period_end":1788588452,
+			"items":{"data":[{"quantity":1,"price":{"id":"p"}}]}}`,
+		// Both present: the item wins, being authoritative going forward.
+		"both": `{"id":"sub_1","status":"active","current_period_end":111,
+			"items":{"data":[{"quantity":1,"current_period_end":1788588452,"price":{"id":"p"}}]}}`,
+	}
+	for name, raw := range cases {
+		var sub subscriptionObject
+		if err := json.Unmarshal([]byte(raw), &sub); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if got := sub.periodEnd(); got != want {
+			t.Fatalf("%s: periodEnd = %d, want %d", name, got, want)
+		}
+	}
+
+	// No period anywhere is zero rather than a panic — callers must treat zero as
+	// "unknown" and not write it, which applySubscription does.
+	var empty subscriptionObject
+	if got := empty.periodEnd(); got != 0 {
+		t.Fatalf("an empty subscription reported period %d", got)
+	}
+}
+
+func TestGrantReferenceChangesWithThePeriod(t *testing.T) {
+	// The property the zero-period bug destroyed: two billing periods must produce
+	// two references, or the second grant is skipped as a duplicate of the first.
+	mk := func(end int64) subscriptionObject {
+		var sub subscriptionObject
+		raw := fmt.Sprintf(`{"id":"sub_1","items":{"data":[{"quantity":1,
+			"current_period_end":%d,"price":{"id":"p"}}]}}`, end)
+		if err := json.Unmarshal([]byte(raw), &sub); err != nil {
+			t.Fatal(err)
+		}
+		return sub
+	}
+	refFor := func(s subscriptionObject) string {
+		return fmt.Sprintf("sub:%s:period:%d:seats:%d", s.ID, s.periodEnd(), seatsFromSubscription(s))
+	}
+	first, second := mk(1788588452), mk(1791180452)
+	if refFor(first) == refFor(second) {
+		t.Fatal("consecutive periods share a grant reference — every renewal after " +
+			"the first would be silently skipped as a duplicate")
+	}
+	// And the same period must still dedupe, which is what stops a redelivered
+	// webhook granting twice.
+	if refFor(first) != refFor(mk(1788588452)) {
+		t.Fatal("the same period produced two references — a redelivered webhook " +
+			"would grant twice")
+	}
+}
+
+func TestSeatsDefaultToOneWhenTheQuantityIsMissing(t *testing.T) {
+	var sub subscriptionObject
+	if err := json.Unmarshal([]byte(
+		`{"id":"sub_1","items":{"data":[{"price":{"id":"p"}}]}}`), &sub); err != nil {
+		t.Fatal(err)
+	}
+	if got := seatsFromSubscription(sub); got != 1 {
+		t.Fatalf("seats = %d with no quantity, want 1 — zero would leave a paying "+
+			"customer with no allowance", got)
+	}
+}
+
+func TestSeatCountIsPartOfTheGrantReference(t *testing.T) {
+	// Adding seats mid-period must grant the difference rather than being swallowed
+	// as a duplicate of the original period's grant.
+	mk := func(seats int) subscriptionObject {
+		var sub subscriptionObject
+		raw := fmt.Sprintf(`{"id":"sub_1","items":{"data":[{"quantity":%d,
+			"current_period_end":1788588452,"price":{"id":"p"}}]}}`, seats)
+		if err := json.Unmarshal([]byte(raw), &sub); err != nil {
+			t.Fatal(err)
+		}
+		return sub
+	}
+	refFor := func(s subscriptionObject) string {
+		return fmt.Sprintf("sub:%s:period:%d:seats:%d", s.ID, s.periodEnd(), seatsFromSubscription(s))
+	}
+	if refFor(mk(2)) == refFor(mk(5)) {
+		t.Fatal("2 seats and 5 seats share a reference in the same period, so " +
+			"upgrading seats would grant no extra allowance")
+	}
 }

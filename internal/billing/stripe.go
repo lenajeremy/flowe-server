@@ -328,12 +328,17 @@ type stripeEvent struct {
 
 // subscriptionObject is the part of a Stripe subscription we act on.
 type subscriptionObject struct {
-	ID                 string         `json:"id"`
-	Customer           string         `json:"customer"`
-	Status             string         `json:"status"`
-	CancelAtPeriodEnd  bool           `json:"cancel_at_period_end"`
-	CurrentPeriodEnd   int64          `json:"current_period_end"`
-	Metadata           map[string]any `json:"metadata"`
+	ID                string         `json:"id"`
+	Customer          string         `json:"customer"`
+	Status            string         `json:"status"`
+	CancelAtPeriodEnd bool           `json:"cancel_at_period_end"`
+	Metadata          map[string]any `json:"metadata"`
+	// CurrentPeriodEnd is read from BOTH here and the item below, because Stripe
+	// moved it. On recent API versions (2025-09 onward) the subscription-level field
+	// is gone and the period lives on each item; on older ones it is here. Reading
+	// only one place silently yields zero on the other, and see periodEnd for why a
+	// zero here is not a cosmetic problem.
+	CurrentPeriodEnd   int64 `json:"current_period_end"`
 	PresentmentDetails *struct {
 		PresentmentCurrency string `json:"presentment_currency"`
 	} `json:"presentment_details"`
@@ -343,11 +348,35 @@ type subscriptionObject struct {
 			// than counted from org_members, so a team that has not finished inviting
 			// people still gets the allowance it is paying for.
 			Quantity int `json:"quantity"`
-			Price    struct {
+			// CurrentPeriodEnd is where recent API versions put the billing period.
+			CurrentPeriodEnd int64 `json:"current_period_end"`
+			Price            struct {
 				ID string `json:"id"`
 			} `json:"price"`
 		} `json:"data"`
 	} `json:"items"`
+}
+
+// periodEnd is when the paid period runs out, from wherever this API version keeps
+// it — the item first, since that is where current versions put it.
+//
+// Getting this wrong is not cosmetic, which is why it is its own function with its
+// own test. A zero here does two bad things at once:
+//
+//   - EffectivePlan treats a cancelled subscription with no period end as already
+//     lapsed, so a customer who cancels loses access immediately instead of at the
+//     end of the month they paid for;
+//   - the monthly grant's idempotency reference includes the period, so every
+//     period would produce the SAME reference and every renewal after the first
+//     would be skipped as a duplicate. The customer would pay every month and be
+//     granted credits once.
+func (sub subscriptionObject) periodEnd() int64 {
+	for _, it := range sub.Items.Data {
+		if it.CurrentPeriodEnd > 0 {
+			return it.CurrentPeriodEnd
+		}
+	}
+	return sub.CurrentPeriodEnd
 }
 
 // HandleWebhook applies one verified Stripe event.
@@ -482,8 +511,8 @@ func (g *Gate) applySubscription(orgID string, sub subscriptionObject, eventID s
 	if plan != "" {
 		updates["plan"] = string(plan)
 	}
-	if sub.CurrentPeriodEnd > 0 {
-		updates["current_period_end"] = time.Unix(sub.CurrentPeriodEnd, 0)
+	if end := sub.periodEnd(); end > 0 {
+		updates["current_period_end"] = time.Unix(end, 0)
 	}
 	if err := g.db.Model(&models.Organization{}).
 		Where("id = ?", orgID).Updates(updates).Error; err != nil {
@@ -497,7 +526,7 @@ func (g *Gate) applySubscription(orgID string, sub subscriptionObject, eventID s
 		// The seat count is part of the reference, so ADDING seats mid-period grants
 		// the difference rather than being swallowed as a duplicate of the original
 		// period's grant. Stripe prorates the charge; the allowance has to follow.
-		ref := fmt.Sprintf("sub:%s:period:%d:seats:%d", sub.ID, sub.CurrentPeriodEnd, seats)
+		ref := fmt.Sprintf("sub:%s:period:%d:seats:%d", sub.ID, sub.periodEnd(), seats)
 		if err := credits.Grant(g.db, orgID, planGrantForSeats(plan, seats),
 			models.ReasonMonthlyGrant, ref); err != nil {
 			return err
