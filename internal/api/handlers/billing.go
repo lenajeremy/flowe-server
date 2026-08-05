@@ -311,9 +311,8 @@ func (h *WorkflowHandler) StartCheckout(c *gin.Context) {
 	}
 	plan := models.Plan(strings.ToLower(strings.TrimSpace(body.Plan)))
 
-	// Refuse tiers we do not sell self-serve, before touching Stripe. Team is
-	// per-seat and fully wired, but gated until invites exist — selling seats
-	// nobody can fill is a refund, not revenue.
+	// Refuse tiers we do not sell self-serve, before touching Stripe. Business is
+	// sold by conversation.
 	for _, p := range planCatalog() {
 		if p.ID == string(plan) && !p.SelfServe {
 			c.JSON(http.StatusBadRequest, gin.H{
@@ -325,6 +324,22 @@ func (h *WorkflowHandler) StartCheckout(c *gin.Context) {
 	org, err := h.bill.Org(currentOrgID(c))
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not load your account"})
+		return
+	}
+
+	// Already on this plan. Enforced here and not only in the UI, because a second
+	// Checkout for the same plan creates a SECOND subscription — the customer is
+	// then billed twice and only one of them is the org's, which is a refund and a
+	// support conversation rather than a validation error.
+	//
+	// Changing seat count is the one legitimate reason to re-checkout a plan you
+	// already have, and that belongs in the portal where Stripe prorates it.
+	if current := billing.EffectivePlan(org); current == plan {
+		c.JSON(http.StatusConflict, gin.H{
+			"error":        "you're already on this plan — change seats or cancel in the billing portal",
+			"current_plan": string(current),
+			"use_portal":   org.StripeCustomerID != "",
+		})
 		return
 	}
 

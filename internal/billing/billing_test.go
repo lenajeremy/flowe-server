@@ -152,3 +152,28 @@ func TestAnUnknownNodeTypeIsChargedNotIgnored(t *testing.T) {
 			"would ship unbilled", reason)
 	}
 }
+
+func TestTheSamePlanIsNotAnUpgrade(t *testing.T) {
+	// The guard behind the disabled button. A second Checkout for the plan you
+	// already hold creates a SECOND Stripe subscription — the customer is billed
+	// twice, and only one of them is the one the org is linked to. That is a refund
+	// and a support conversation, not a validation error, so it is refused on the
+	// server and not only hidden in the UI.
+	live := &models.Organization{
+		Plan: models.PlanPro, PlanStatus: "active",
+		CurrentPeriodEnd: ptr(time.Now().Add(20 * 24 * time.Hour)),
+	}
+	if EffectivePlan(live) != models.PlanPro {
+		t.Fatal("an active Pro org should read as Pro")
+	}
+
+	// A LAPSED subscription is a different case: the org has fallen back to free, so
+	// re-subscribing to Pro is a genuine purchase and must not be blocked.
+	lapsed := &models.Organization{
+		Plan: models.PlanPro, PlanStatus: "canceled",
+		CurrentPeriodEnd: ptr(time.Now().Add(-24 * time.Hour)),
+	}
+	if got := EffectivePlan(lapsed); got == models.PlanPro {
+		t.Fatal("a lapsed Pro org still reads as Pro, so it could never re-subscribe")
+	}
+}
