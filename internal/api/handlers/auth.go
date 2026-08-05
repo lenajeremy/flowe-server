@@ -54,6 +54,24 @@ func randomOTP() string {
 	return fmt.Sprintf("%06d", n.Int64())
 }
 
+// clientBaseURL is where to send this particular browser back to.
+//
+// Prefers the request's own Origin when it is allowed, falling back to the
+// configured FRONTEND_URL. That matters because FRONTEND_URL is a static list
+// whose first entry can easily be a port nothing is serving any more — a dev
+// server moves, or an entry goes stale — and a redirect built from it lands the
+// user on "cannot connect" AFTER they have paid. The Origin is, by definition,
+// somewhere the browser just successfully talked to.
+//
+// Still validated through auth.OriginAllowed: an attacker-supplied Origin must
+// never become a redirect target we hand to Stripe.
+func clientBaseURL(c *gin.Context) string {
+	if o := strings.TrimRight(strings.TrimSpace(c.GetHeader("Origin")), "/"); o != "" && auth.OriginAllowed(o) {
+		return o
+	}
+	return frontendURL()
+}
+
 // frontendURL returns the primary frontend origin (first entry of the
 // comma-separated FRONTEND_URL env var).
 func frontendURL() string {
@@ -125,10 +143,7 @@ func (h *WorkflowHandler) AuthEmailStart(c *gin.Context) {
 
 	// The magic link goes back to wherever the user is actually running the
 	// app — the request Origin when allowed, else the configured frontend.
-	linkBase := frontendURL()
-	if o := strings.TrimRight(c.GetHeader("Origin"), "/"); o != "" && auth.OriginAllowed(o) {
-		linkBase = o
-	}
+	linkBase := clientBaseURL(c)
 
 	sendErr := sendLoginEmail(email, code, token, linkBase)
 	telemetry.EmailSent(ctx, "login_code", sendErr)

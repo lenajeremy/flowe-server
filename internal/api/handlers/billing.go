@@ -326,7 +326,7 @@ func (h *WorkflowHandler) StartCheckout(c *gin.Context) {
 	var user models.User
 	h.db.DB.Where("id = ?", auth.UserID(c)).First(&user)
 
-	base := frontendURL()
+	base := clientBaseURL(c)
 	session, err := h.bill.StartCheckout(c.Request.Context(), org, user.Email, plan, body.Seats,
 		base+"/settings/billing?checkout=success",
 		base+"/pricing?checkout=cancelled")
@@ -353,7 +353,7 @@ func (h *WorkflowHandler) OpenPortal(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not load your account"})
 		return
 	}
-	url, err := h.bill.PortalURL(c.Request.Context(), org, frontendURL()+"/settings/billing")
+	url, err := h.bill.PortalURL(c.Request.Context(), org, clientBaseURL(c)+"/settings/billing")
 	if err != nil {
 		if errors.Is(err, billing.ErrStripeNotConfigured) {
 			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "billing is not available yet"})
