@@ -3,7 +3,6 @@ package credits
 import (
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	"gorm.io/gorm"
@@ -89,11 +88,18 @@ func lockBalance(tx *gorm.DB, orgID string) (*models.CreditBalance, error) {
 		Where("organization_id = ?", orgID).First(&bal).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		bal = models.CreditBalance{OrganizationID: orgID}
-		if err := tx.Create(&bal).Error; err != nil {
+		// ON CONFLICT DO NOTHING, not a plain insert. Two operations arriving together
+		// for an org that has no balance row yet — the first two scheduled runs after
+		// signup, or a webhook racing a run — both reach this branch and both insert.
+		// A plain insert makes one of them fail on the primary key, and in Postgres
+		// that error poisons the whole transaction: the re-read below cannot run, so
+		// the recovery this code documents was unreachable and the caller got a raw
+		// "duplicate key" instead. Conflicting here instead blocks until the other
+		// transaction settles, which is exactly the serialisation we want.
+		if err := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&bal).Error; err != nil {
 			return nil, err
 		}
-		// Re-read under the lock: another transaction may have created it first,
-		// in which case ours conflicted and this one is the row that exists.
+		// Re-read under the lock: whoever won the insert, this is the row that exists.
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
 			Where("organization_id = ?", orgID).First(&bal).Error; err != nil {
 			return nil, err
@@ -208,8 +214,15 @@ func Grant(db *gorm.DB, orgID string, amount int64, reason models.LedgerReason, 
 		if externalRef != "" {
 			entry.ExternalRef = &externalRef
 		}
-		if err := tx.Create(&entry).Error; err != nil {
-			return err
+		// The count above is a check, not a guarantee — two redeliveries can both read
+		// zero and both insert. DO NOTHING settles it in the database, where it can
+		// actually be settled, and RowsAffected reports which call won.
+		res := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&entry)
+		if res.Error != nil {
+			return res.Error
+		}
+		if res.RowsAffected == 0 {
+			return nil
 		}
 		now := time.Now()
 		updates := map[string]any{
@@ -497,12 +510,19 @@ func GrantPeriodTo(db *gorm.DB, orgID string, target int64, reason models.Ledger
 			Reason:         reason,
 			ExternalRef:    &ref,
 		}
-		if err := tx.Create(&entry).Error; err != nil {
-			// A concurrent delivery of the same event already wrote this exact row.
-			if isDuplicateRef(err) {
-				return nil
-			}
-			return err
+		// DO NOTHING on the unique external_ref rather than catching the violation
+		// afterwards: a concurrent delivery of the same event is expected, and letting
+		// the insert fail aborts the transaction in Postgres, so the commit that
+		// follows fails too. RowsAffected, not the error, is what says whether this
+		// call was the one that wrote the row.
+		res := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&entry)
+		if res.Error != nil {
+			return res.Error
+		}
+		if res.RowsAffected == 0 {
+			// Somebody else already granted this exact period. Crediting the balance
+			// here as well would hand out the allowance twice.
+			return nil
 		}
 		now := time.Now()
 		updates := map[string]any{
@@ -514,12 +534,6 @@ func GrantPeriodTo(db *gorm.DB, orgID string, target int64, reason models.Ledger
 		}
 		return tx.Model(bal).Updates(updates).Error
 	})
-}
-
-// isDuplicateRef recognises a unique-violation on external_ref, which is a
-// concurrent delivery of the same event rather than a failure.
-func isDuplicateRef(err error) bool {
-	return err != nil && strings.Contains(strings.ToLower(err.Error()), "duplicate key")
 }
 
 // SpentByUserSince is one person's consumption within an org since a moment.
