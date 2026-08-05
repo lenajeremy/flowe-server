@@ -5,6 +5,8 @@ import (
 	"gorm.io/gorm"
 
 	"workflow-ai/server/internal/auth"
+	"workflow-ai/server/internal/billing"
+	"workflow-ai/server/internal/database/models"
 )
 
 // Tenant scoping.
@@ -47,4 +49,21 @@ func orgIDOrDeny(c *gin.Context) string {
 // currentOrgID is the org to stamp on rows being created.
 func currentOrgID(c *gin.Context) string {
 	return auth.OrgID(c)
+}
+
+// planFor resolves the requesting org's entitlements.
+//
+// A database read per call rather than a cached value on the session: a plan
+// changes on a Stripe webhook, and a stale plan is an entitlement bug — either
+// giving away a paid feature or withholding one someone just bought. The query is
+// a single indexed primary-key lookup, and it only runs on the handful of routes
+// that actually gate on a plan.
+func (h *WorkflowHandler) planFor(c *gin.Context) models.Plan {
+	org, err := h.bill.Org(orgIDOrDeny(c))
+	if err != nil {
+		// Unresolvable org: apply the most conservative entitlements rather than
+		// failing the request, so a missing row degrades to free instead of 500.
+		return models.PlanFree
+	}
+	return billing.EffectivePlan(org)
 }

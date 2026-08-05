@@ -185,6 +185,16 @@ func (h *WorkflowHandler) Create(c *gin.Context) {
 		return
 	}
 
+	if err := h.bill.CheckWorkflowCount(currentOrgID(c), h.planFor(c)); err != nil {
+		if errors.Is(err, billing.ErrLimit) {
+			c.JSON(http.StatusPaymentRequired, gin.H{"error": err.Error(), "limit": "workflows"})
+			return
+		}
+		slog.Error("workflow count check failed", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to save workflow"})
+		return
+	}
+
 	wf := &models.Workflow{
 		UserID:         auth.UserID(c),
 		OrganizationID: currentOrgID(c),
@@ -279,6 +289,19 @@ func (h *WorkflowHandler) SetPublished(published bool) gin.HandlerFunc {
 		wf, ok := h.loadOwnedWorkflow(c, c.Param("id"))
 		if !ok {
 			return
+		}
+		// Only publishing is gated; unpublishing must always work, or a customer who
+		// hits a limit cannot get back under it.
+		if published {
+			if err := h.bill.CheckPublishSchedule(currentOrgID(c), wf.ID.String(), h.planFor(c)); err != nil {
+				if errors.Is(err, billing.ErrLimit) {
+					c.JSON(http.StatusPaymentRequired, gin.H{"error": err.Error(), "limit": "published_schedules"})
+					return
+				}
+				slog.Error("publish limit check failed", "error", err)
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update workflow"})
+				return
+			}
 		}
 		if err := h.db.DB.Model(wf).Update("published", published).Error; err != nil {
 			slog.Error("failed to set published", "id", wf.ID, "published", published, "error", err)

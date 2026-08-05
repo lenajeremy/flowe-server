@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"workflow-ai/server/internal/billing"
 	"workflow-ai/server/internal/database/models"
 	"workflow-ai/server/internal/executor"
 	"workflow-ai/server/internal/hub"
@@ -254,6 +255,17 @@ func (h *WorkflowHandler) SetSchedule(c *gin.Context) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "interval_seconds must be at least 60"})
 			return
 		}
+	}
+
+	// A published schedule is the only thing that spends money with nobody
+	// watching, so its frequency is the limit that actually protects unit
+	// economics. Refused rather than clamped here because the user is looking at a
+	// form with a frequency picker — silently saving something they did not choose
+	// would be discovered later, as a workflow that "isn't running".
+	plan := h.planFor(c)
+	if ok, msg := billing.AllowsFrequency(plan, body.Frequency, body.IntervalSeconds); !ok {
+		c.JSON(http.StatusPaymentRequired, gin.H{"error": msg, "limit": "schedule_interval"})
+		return
 	}
 
 	repeat := true

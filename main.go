@@ -103,8 +103,10 @@ func main() {
 	// makes it post to the credit ledger as well. Without this the server still
 	// measures everything and charges for nothing, which is the right behaviour for
 	// a deployment running without billing.
-	billing.New(dbClient.DB).Install()
+	gate := billing.New(dbClient.DB)
+	gate.Install()
 	go sweepHolds(dbClient.DB)
+	go pruneRunHistory(gate)
 
 	const port = 8080
 	api.InitServer(port, dbClient, redisClient)
@@ -124,6 +126,20 @@ func sweepHolds(db *gorm.DB) {
 		}
 		if n > 0 {
 			slog.Info("billing: reclaimed holds from unfinished runs", "count", n)
+		}
+	}
+}
+
+// pruneRunHistory enforces each plan's run-retention window. Run history is the
+// unflagged storage cost: every run persists a JSONB blob of all its events,
+// including node outputs, and before this nothing ever deleted one.
+func pruneRunHistory(gate *billing.Gate) {
+	for {
+		time.Sleep(billing.PruneInterval)
+		if n, err := gate.PruneRunHistory(); err != nil {
+			slog.Error("run history prune failed", "error", err)
+		} else if n > 0 {
+			slog.Info("run history pruned", "deleted", n)
 		}
 	}
 }
