@@ -35,12 +35,15 @@ type Spend struct {
 	Amount int64 // positive; the ledger stores it negated
 	Reason models.LedgerReason
 
-	RunID    string
-	NodeID   string
-	Op       string
-	Provider string
-	Model    string
-	Surface  string
+	RunID        string
+	WorkflowID   string
+	WorkflowName string
+	NodeID       string
+	NodeLabel    string
+	Op           string
+	Provider     string
+	Model        string
+	Surface      string
 
 	InputTokens      int
 	OutputTokens     int
@@ -126,7 +129,9 @@ func Record(db *gorm.DB, s Spend) error {
 			OrganizationID:   s.OrgID,
 			Delta:            -s.Amount,
 			Reason:           s.Reason,
+			WorkflowName:     s.WorkflowName,
 			NodeID:           s.NodeID,
+			NodeLabel:        s.NodeLabel,
 			Op:               s.Op,
 			Provider:         s.Provider,
 			Model:            s.Model,
@@ -138,6 +143,9 @@ func Record(db *gorm.DB, s Spend) error {
 		}
 		if s.RunID != "" {
 			entry.RunID = &s.RunID
+		}
+		if s.WorkflowID != "" {
+			entry.WorkflowID = &s.WorkflowID
 		}
 		if err := tx.Create(&entry).Error; err != nil {
 			return err

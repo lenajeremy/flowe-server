@@ -93,3 +93,62 @@ func TestMissingOrEmptyOrgIsFree(t *testing.T) {
 		t.Fatalf("zero org = %q, want free", got)
 	}
 }
+
+// nodeCharge decides what a completed step costs. Getting it wrong is either
+// silently free work or a bill for something that cost us nothing.
+
+func TestStructuralNodesAreFree(t *testing.T) {
+	// These make no outbound call and cost us nothing. Charging for them would meter
+	// the SHAPE of someone's workflow rather than its work, which pushes people to
+	// write worse workflows to save credits.
+	for _, n := range []string{
+		"textInput", "imageInput", "textOutput", "branch", "loop",
+		"webhookTrigger", "scheduledTrigger", "humanApproval",
+	} {
+		if amount, _ := nodeCharge(n); amount != 0 {
+			t.Fatalf("%s charges %d credits, want 0", n, amount)
+		}
+	}
+}
+
+func TestOutboundNodesAreCharged(t *testing.T) {
+	cases := map[string]models.LedgerReason{
+		"httpRequest": models.ReasonIntegration,
+		"slack":       models.ReasonIntegration,
+		"jira":        models.ReasonIntegration,
+		"emailSend":   models.ReasonEmail,
+		"resend":      models.ReasonEmail,
+		"sendgrid":    models.ReasonEmail,
+		"webSearch":   models.ReasonWebTool,
+		"webScrape":   models.ReasonWebTool,
+	}
+	for node, wantReason := range cases {
+		amount, reason := nodeCharge(node)
+		if amount <= 0 {
+			t.Fatalf("%s is free, but it makes an outbound call", node)
+		}
+		if reason != wantReason {
+			t.Fatalf("%s charged as %q, want %q", node, reason, wantReason)
+		}
+	}
+}
+
+func TestWebToolsCostMoreThanIntegrations(t *testing.T) {
+	// Brave and Jina bill us per call, so that one is real cost recovery rather than
+	// the nominal fair-use fee integrations carry.
+	web, _ := nodeCharge("webSearch")
+	integration, _ := nodeCharge("slack")
+	if web <= integration {
+		t.Fatalf("web tool (%d) should cost more than an integration call (%d)", web, integration)
+	}
+}
+
+func TestAnUnknownNodeTypeIsChargedNotIgnored(t *testing.T) {
+	// A node type added later must not default to free. Silently unbilled work is
+	// the failure that is never noticed, whereas a nominal charge on something that
+	// turns out to be structural is a one-line fix.
+	if amount, reason := nodeCharge("someProviderWeAddNextMonth"); amount <= 0 {
+		t.Fatalf("an unrecognised node type is free (reason %q) — new integrations "+
+			"would ship unbilled", reason)
+	}
+}

@@ -92,6 +92,11 @@ func InitServer(port int, db *database.DBClient, rdb *redis.Client) {
 		api.DELETE("/org/invites/:id", wh.RevokeInvite)
 		api.POST("/org/invites/accept", wh.AcceptInvite)
 
+		// Usage: the itemised ledger, and the CSV someone forwards to whoever asks
+		// about the bill.
+		api.GET("/usage", wh.GetUsage)
+		api.GET("/usage/export.csv", wh.ExportUsage)
+
 		// Billing
 		api.GET("/billing", wh.GetBilling)
 		api.POST("/billing/checkout", wh.StartCheckout)

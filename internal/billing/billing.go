@@ -44,7 +44,8 @@ func New(db *gorm.DB) *Gate { return &Gate{db: db} }
 // UsageSink is a nil-able hook rather than a hard dependency.
 func (g *Gate) Install() {
 	telemetry.UsageSink = g.recordUsage
-	slog.Info("billing: usage sink installed — LLM tokens now post to the credit ledger")
+	telemetry.NodeSpendSink = g.recordNodeSpend
+	slog.Info("billing: usage sinks installed — LLM tokens and node operations now post to the credit ledger")
 }
 
 // recordUsage converts one measured call into a ledger row.
@@ -82,13 +83,7 @@ func (g *Gate) recordUsage(ctx context.Context, provider, model string, u teleme
 		CachedTokens:     u.CacheReadTokens,
 		CacheWriteTokens: u.CacheWriteTokens,
 	}
-	if cc, ok := telemetry.CallContextFrom(ctx); ok {
-		spend.NodeID = cc.NodeID
-		spend.Op = cc.Op
-		if spend.RunID == "" {
-			spend.RunID = cc.RunID
-		}
-	}
+	applyCallContext(ctx, &spend)
 
 	if err := credits.Record(g.db, spend); err != nil {
 		// The tokens were spent regardless, so this is lost revenue and a real
@@ -204,38 +199,6 @@ func BillingContextFor(orgID string, plan models.Plan) telemetry.BillingContext 
 	return telemetry.BillingContext{OrgID: orgID, Plan: string(plan)}
 }
 
-// RecordNominal charges for a non-LLM operation — an integration call, an email, a
-// web-tool fetch.
-//
-// Our marginal cost on integrations is close to zero, so this is a fair-use brake
-// against abuse rather than cost recovery. It is priced low enough to be
-// effectively free at honest volume: metering the thing the product is FOR makes
-// people engineer around the pricing instead of using the product.
-func (g *Gate) RecordNominal(ctx context.Context, reason models.LedgerReason, amount int64) {
-	b := telemetry.BillingFrom(ctx)
-	if b.OrgID == "" || amount <= 0 {
-		return
-	}
-	spend := credits.Spend{
-		OrgID:  b.OrgID,
-		Amount: amount,
-		Reason: reason,
-		RunID:  b.RunID,
-		HoldID: b.HoldID,
-	}
-	if cc, ok := telemetry.CallContextFrom(ctx); ok {
-		spend.NodeID = cc.NodeID
-		spend.Op = cc.Op
-		if spend.RunID == "" {
-			spend.RunID = cc.RunID
-		}
-	}
-	if err := credits.Record(g.db, spend); err != nil {
-		slog.ErrorContext(ctx, "billing: failed to record operation spend",
-			"error", err, "org_id", b.OrgID, "reason", reason)
-	}
-}
-
 // ── Plan resolution ──────────────────────────────────────────────
 
 // EffectivePlan is the plan an org is actually entitled to right now.
@@ -294,3 +257,75 @@ func (g *Gate) Org(orgID string) (*models.Organization, error) { return g.org(or
 // callers should reach for the helpers above rather than writing their own
 // ledger queries.
 func (g *Gate) DB() *gorm.DB { return g.db }
+
+// applyCallContext copies the identity of the node being executed onto a spend, so
+// each ledger row says which workflow, run and step it paid for.
+//
+// Denormalized deliberately — see the comment on CreditLedger.WorkflowID. An audit
+// line has to stay legible after run history has been pruned.
+func applyCallContext(ctx context.Context, spend *credits.Spend) {
+	cc, ok := telemetry.CallContextFrom(ctx)
+	if !ok {
+		return
+	}
+	spend.WorkflowID = cc.WorkflowID
+	spend.WorkflowName = cc.WorkflowName
+	spend.NodeID = cc.NodeID
+	spend.NodeLabel = cc.NodeLabel
+	spend.Op = cc.Op
+	if spend.RunID == "" {
+		spend.RunID = cc.RunID
+	}
+}
+
+// nodeCharge is the flat fee for one completed operation, by node type.
+//
+// Our marginal cost on integrations is close to zero, so these are value pricing
+// and a fair-use brake, not cost recovery — priced low enough to be effectively
+// free at honest volume. Web tools are the exception: Brave and Jina bill us per
+// call, so that one is real cost.
+func nodeCharge(nodeType string) (int64, models.LedgerReason) {
+	switch nodeType {
+	case "emailSend", "resend", "sendgrid":
+		return credits.EmailSend, models.ReasonEmail
+	case "webSearch", "webScrape", "webFetch":
+		return credits.WebToolCall, models.ReasonWebTool
+	case "textInput", "imageInput", "textOutput", "branch", "loop",
+		"webhookTrigger", "scheduledTrigger", "humanApproval":
+		// Structural nodes do no outbound work and cost us nothing. Charging for
+		// them would meter the shape of someone's workflow rather than its work,
+		// which pushes people to write worse workflows to save credits.
+		return 0, ""
+	default:
+		return credits.IntegrationOp, models.ReasonIntegration
+	}
+}
+
+// recordNodeSpend charges one completed node.
+func (g *Gate) recordNodeSpend(ctx context.Context, nodeType, op string) {
+	amount, reason := nodeCharge(nodeType)
+	if amount <= 0 {
+		return
+	}
+	b := telemetry.BillingFrom(ctx)
+	if b.OrgID == "" {
+		return
+	}
+	spend := credits.Spend{
+		OrgID:    b.OrgID,
+		Amount:   amount,
+		Reason:   reason,
+		RunID:    b.RunID,
+		HoldID:   b.HoldID,
+		Provider: nodeType,
+		Surface:  telemetry.SurfaceFrom(ctx),
+	}
+	applyCallContext(ctx, &spend)
+	if spend.Op == "" {
+		spend.Op = op
+	}
+	if err := credits.Record(g.db, spend); err != nil {
+		slog.ErrorContext(ctx, "billing: failed to record node spend",
+			"error", err, "org_id", b.OrgID, "node_type", nodeType)
+	}
+}

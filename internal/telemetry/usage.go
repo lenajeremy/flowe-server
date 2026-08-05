@@ -100,3 +100,23 @@ func UsageUnmeasured(ctx context.Context, provider, model string) {
 		attribute.String("model", model),
 		attribute.String("surface", SurfaceFrom(ctx))))
 }
+
+// NodeSpendSink is called once per successfully completed workflow node, so
+// billing can charge the nominal per-operation fee.
+//
+// Separate from UsageSink because the two are charged on different bases: an LLM
+// call bills on the tokens it reported, while an integration call bills a flat
+// nominal amount. Calling both for an LLM node would double-charge it, so the
+// executor only fires this for nodes that are not token-billed.
+//
+// Success only. Charging for a node that failed is the complaint that credit
+// systems attract most, and the marginal cost of a failed integration call is
+// zero anyway.
+var NodeSpendSink func(ctx context.Context, nodeType, op string)
+
+// NodeSpend reports a completed node to the billing hook, if one is installed.
+func NodeSpend(ctx context.Context, nodeType, op string) {
+	if NodeSpendSink != nil {
+		NodeSpendSink(ctx, nodeType, op)
+	}
+}

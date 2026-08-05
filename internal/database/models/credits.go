@@ -49,11 +49,22 @@ type CreditLedger struct {
 	// has no run: an empty string is not a valid uuid, so the alternatives are NULL
 	// or giving up type checking on the column. Set it through credits.Record,
 	// which does the conversion in one place.
-	RunID    *string `json:"run_id,omitempty"    gorm:"type:uuid;index"`
-	NodeID   string  `json:"node_id,omitempty"`
-	Op       string  `json:"op,omitempty"`
-	Provider string  `json:"provider,omitempty"`
-	Model    string  `json:"model,omitempty"`
+	RunID *string `json:"run_id,omitempty"    gorm:"type:uuid;index"`
+	// WorkflowID and WorkflowName are DENORMALIZED rather than joined through
+	// run_id. An audit row has to stay readable on its own: run history is pruned
+	// on a per-plan retention window, so a join would silently lose the attribution
+	// on exactly the older rows an audit is most likely to ask about. The name is
+	// stored as it was at the time for the same reason — a workflow renamed later
+	// should not rewrite what an old charge says it was for.
+	WorkflowID   *string `json:"workflow_id,omitempty" gorm:"type:uuid;index"`
+	WorkflowName string  `json:"workflow_name,omitempty"`
+	NodeID       string  `json:"node_id,omitempty"`
+	// NodeLabel is the user's own name for the step, which is what makes a usage
+	// line legible without opening the workflow.
+	NodeLabel string `json:"node_label,omitempty"`
+	Op        string `json:"op,omitempty"`
+	Provider  string `json:"provider,omitempty"`
+	Model     string `json:"model,omitempty"`
 
 	// Raw token counts, kept alongside the credit delta so a pricing change can
 	// be replayed against history and so COGS can be computed per surface. Cached

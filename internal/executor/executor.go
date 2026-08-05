@@ -460,6 +460,13 @@ func executeNode(ctx context.Context, node WorkflowASTNode, outputs map[string]s
 		telemetry.RecordIntegrationCall(ctx, string(node.Data.NodeType), op, err, time.Since(start))
 	}
 
+	// Charge the nominal per-operation fee, on success only. LLM nodes are billed
+	// on the tokens they actually reported (see telemetry.LLMTokens), so charging
+	// them here as well would bill them twice.
+	if err == nil && !tokenBilledNode(node.Data.NodeType) {
+		telemetry.NodeSpend(ctx, string(node.Data.NodeType), node.Data.IntegrationOp)
+	}
+
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())

@@ -33,3 +33,14 @@ func clampMaxTokens(ctx context.Context, requested int) int {
 		"requested", requested, "ceiling", ceiling, "plan", string(plan))
 	return ceiling
 }
+
+// tokenBilledNode reports whether a node type is already charged on its token
+// usage, and so must not also be charged the flat per-operation fee.
+//
+// An LLM node's cost is its tokens; an agent turn's likewise. Everything else —
+// integrations, email, HTTP, data — is a flat nominal charge, because our marginal
+// cost on those is close to zero and the fee is a fair-use brake rather than cost
+// recovery.
+func tokenBilledNode(t NodeType) bool {
+	return t == NodeTypeLLM
+}

@@ -188,6 +188,28 @@ func backfillOrganizations(db *gorm.DB) error {
 			return fmt.Errorf("seed signup ledger: %w", err)
 		}
 
+		// Ledger rows written before workflow identity was denormalized can still be
+		// attributed, because their run is (usually) still there. Done once, guarded
+		// by the NULL check, and only where the run survives — a pruned run leaves
+		// the row unattributed rather than guessing.
+		if tx.Migrator().HasColumn(&models.CreditLedger{}, "workflow_id") {
+			res := tx.Exec(`
+				UPDATE credit_ledger l
+				SET workflow_id = r.workflow_id::uuid,
+				    workflow_name = r.workflow_name
+				FROM workflow_runs r
+				WHERE l.run_id = r.id
+				  AND l.workflow_id IS NULL
+				  AND r.workflow_id <> ''`)
+			if res.Error != nil {
+				return fmt.Errorf("backfill ledger workflow attribution: %w", res.Error)
+			}
+			if res.RowsAffected > 0 {
+				slog.Info("attributed existing ledger rows to their workflow",
+					"count", res.RowsAffected)
+			}
+		}
+
 		// The column can only be locked down once nothing is NULL. If a row slipped
 		// through — a user row soft-deleted while owning live rows, say — this
 		// fails here rather than letting an untenanted row exist indefinitely.
