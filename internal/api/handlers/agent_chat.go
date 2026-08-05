@@ -286,6 +286,9 @@ func (h *WorkflowHandler) AgentChatTurn(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
 		return
 	}
+	c.Request = c.Request.WithContext(
+		telemetry.WithSurface(c.Request.Context(), telemetry.SurfaceAgent))
+
 	uid := auth.UserID(c)
 	if !auth.Allow(c.Request.Context(), h.redis, "rl:agent:"+uid, 30, time.Minute) {
 		c.JSON(http.StatusTooManyRequests, gin.H{"error": "too many requests — try again in a minute"})
@@ -475,7 +478,7 @@ func (h *WorkflowHandler) agentAnthropicLoop(c *gin.Context, flusher http.Flushe
 			sendSSE(c.Writer, flusher, "error", fmt.Sprintf("Request failed: %v", err))
 			break
 		}
-		stopReason, assistantContent, err := consumeStream(c, resp, flusher)
+		stopReason, assistantContent, err := consumeStream(c, resp, flusher, model.ID)
 		resp.Body.Close()
 		if err != nil {
 			sendSSE(c.Writer, flusher, "error", fmt.Sprintf("Stream error: %v", err))
@@ -550,7 +553,7 @@ func (h *WorkflowHandler) agentOpenAILoop(c *gin.Context, flusher http.Flusher, 
 			sendSSE(c.Writer, flusher, "error", fmt.Sprintf("Request failed: %v", err))
 			break
 		}
-		content, toolCalls, err := consumeOpenAIStream(c, resp, flusher)
+		content, toolCalls, err := consumeOpenAIStream(c, resp, flusher, model.Provider, model.ID)
 		resp.Body.Close()
 		if err != nil {
 			sendSSE(c.Writer, flusher, "error", fmt.Sprintf("Stream error: %v", err))

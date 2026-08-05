@@ -310,6 +310,9 @@ func callAnthropicWithTools(ctx context.Context, model, system, user string, max
 		if resp.StatusCode != http.StatusOK {
 			return "", fmt.Errorf("anthropic %d: %s", resp.StatusCode, raw)
 		}
+		// Each round of the tool loop is its own billable call, so usage is
+		// recorded per iteration rather than once for the whole conversation.
+		telemetry.LLMTokens(ctx, "anthropic", model, usageFromAnthropic(raw))
 
 		var r anthropicToolResp
 		if err := json.Unmarshal(raw, &r); err != nil {
@@ -433,6 +436,7 @@ func callOpenAIWithTools(ctx context.Context, model, system, user string, maxTok
 		if resp.StatusCode != http.StatusOK {
 			return "", fmt.Errorf("openai %d: %s", resp.StatusCode, raw)
 		}
+		telemetry.LLMTokens(ctx, "openai", model, usageFromOpenAI(raw))
 
 		var r openAIToolResp
 		if err := json.Unmarshal(raw, &r); err != nil {

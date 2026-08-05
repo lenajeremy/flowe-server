@@ -152,3 +152,40 @@ func Clip(s string, n int) string {
 	}
 	return s[:n] + "…"
 }
+
+// ── Surface ───────────────────────────────────────────────────
+
+// Surface is which part of the product spent the tokens: the AI builder, an LLM
+// node in a run, the agent chat loop, or a web-tool summariser. It matters for
+// billing as much as for dashboards, because the builder spends before anyone
+// pays and has to be separable from work a customer asked for.
+type Surface string
+
+const (
+	SurfaceBuilder Surface = "builder"
+	SurfaceNode    Surface = "node"
+	SurfaceAgent   Surface = "agent"
+	SurfaceTool    Surface = "tool"
+	surfaceUnknown         = "unknown"
+)
+
+type surfaceKey struct{}
+
+// WithSurface tags a context for the surfaces that have no CallContext of their
+// own — the builder and agent loops run outside a workflow node.
+func WithSurface(ctx context.Context, s Surface) context.Context {
+	return context.WithValue(ctx, surfaceKey{}, s)
+}
+
+// SurfaceFrom resolves the spending surface. An explicit tag wins; otherwise the
+// presence of a node call context means this is node work. "unknown" is a bug
+// rather than a category — a call site that reports it has not been wired up.
+func SurfaceFrom(ctx context.Context) string {
+	if s, ok := ctx.Value(surfaceKey{}).(Surface); ok && s != "" {
+		return string(s)
+	}
+	if _, ok := CallContextFrom(ctx); ok {
+		return string(SurfaceNode)
+	}
+	return surfaceUnknown
+}

@@ -920,6 +920,11 @@ func (h *WorkflowHandler) AIGenerate(c *gin.Context) {
 		return
 	}
 
+	// Tag the surface once, here, so every LLM call this request makes — including
+	// the ones inside the tool loop — bills as builder usage rather than "unknown".
+	c.Request = c.Request.WithContext(
+		telemetry.WithSurface(c.Request.Context(), telemetry.SurfaceBuilder))
+
 	model := resolveChatModel(req.Model)
 	prov := chatProviders[model.Provider]
 	apiKey := os.Getenv(prov.KeyEnv)
@@ -1205,7 +1210,7 @@ func (h *WorkflowHandler) runAnthropicChat(c *gin.Context, flusher http.Flusher,
 			return false
 		}
 
-		stopReason, assistantContent, err := consumeStream(c, resp, flusher)
+		stopReason, assistantContent, err := consumeStream(c, resp, flusher, model.ID)
 		resp.Body.Close()
 		if err != nil {
 			sendSSE(c.Writer, flusher, "error", fmt.Sprintf("Stream error: %v", err))
@@ -1261,10 +1266,13 @@ func (h *WorkflowHandler) runOpenAIChat(c *gin.Context, flusher http.Flusher, re
 		sendSSE(c.Writer, flusher, "thinking", statusForRound(round))
 
 		body, _ := json.Marshal(map[string]any{
-			"model":    model.ID,
-			"stream":   true,
-			"messages": messages,
-			"tools":    openAIToolDefs(),
+			"model":  model.ID,
+			"stream": true,
+			// Without include_usage a streamed response carries no token counts
+			// at all, which would leave the whole builder surface unbillable.
+			"stream_options": map[string]any{"include_usage": true},
+			"messages":       messages,
+			"tools":          openAIToolDefs(),
 		})
 
 		resp, err := doOpenAIRequest(c, url, apiKey, body)
@@ -1273,7 +1281,7 @@ func (h *WorkflowHandler) runOpenAIChat(c *gin.Context, flusher http.Flusher, re
 			return false
 		}
 
-		content, toolCalls, err := consumeOpenAIStream(c, resp, flusher)
+		content, toolCalls, err := consumeOpenAIStream(c, resp, flusher, model.Provider, model.ID)
 		resp.Body.Close()
 		if err != nil {
 			sendSSE(c.Writer, flusher, "error", fmt.Sprintf("Stream error: %v", err))
@@ -1344,7 +1352,7 @@ func statusForRound(round int) string {
 
 // consumeStream reads the Anthropic SSE stream, sends thinking/text events to
 // the client, and returns the stop_reason + full content blocks array.
-func consumeStream(c *gin.Context, resp *http.Response, flusher http.Flusher) (string, []any, error) {
+func consumeStream(c *gin.Context, resp *http.Response, flusher http.Flusher, model string) (string, []any, error) {
 	if resp.StatusCode != http.StatusOK {
 		raw, _ := io.ReadAll(resp.Body)
 		return "", nil, fmt.Errorf("anthropic %d: %s", resp.StatusCode, truncate(string(raw), 500))
@@ -1358,7 +1366,11 @@ func consumeStream(c *gin.Context, resp *http.Response, flusher http.Flusher) (s
 		currentBlock  map[string]any
 		toolInputBuf  strings.Builder
 		stopReason    string
+		usage         telemetry.Usage
 	)
+	// Recorded on the way out so a stream that errors mid-flight still bills for
+	// what it consumed.
+	defer func() { telemetry.LLMTokens(c.Request.Context(), "anthropic", model, usage) }()
 
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -1373,6 +1385,20 @@ func consumeStream(c *gin.Context, resp *http.Response, flusher http.Flusher) (s
 		var event streamEvent
 		if err := json.Unmarshal([]byte(data), &event); err != nil {
 			continue
+		}
+
+		// message_start carries input counts, message_delta the output ones.
+		if event.Message != nil {
+			usage.InputTokens += event.Message.Usage.InputTokens
+			usage.OutputTokens += event.Message.Usage.OutputTokens
+			usage.CacheReadTokens += event.Message.Usage.CacheReadInputTokens
+			usage.CacheWriteTokens += event.Message.Usage.CacheCreationInputTokens
+		}
+		if event.Usage != nil {
+			usage.InputTokens += event.Usage.InputTokens
+			usage.OutputTokens += event.Usage.OutputTokens
+			usage.CacheReadTokens += event.Usage.CacheReadInputTokens
+			usage.CacheWriteTokens += event.Usage.CacheCreationInputTokens
 		}
 
 		switch event.Type {
@@ -1444,7 +1470,7 @@ func consumeStream(c *gin.Context, resp *http.Response, flusher http.Flusher) (s
 // consumeOpenAIStream reads an OpenAI-compatible SSE stream, forwards text
 // (and reasoning, when the provider exposes it) to the client, and returns
 // the accumulated assistant text plus any tool calls.
-func consumeOpenAIStream(c *gin.Context, resp *http.Response, flusher http.Flusher) (string, []map[string]any, error) {
+func consumeOpenAIStream(c *gin.Context, resp *http.Response, flusher http.Flusher, provider, model string) (string, []map[string]any, error) {
 	if resp.StatusCode != http.StatusOK {
 		raw, _ := io.ReadAll(resp.Body)
 		return "", nil, fmt.Errorf("provider %d: %s", resp.StatusCode, truncate(string(raw), 500))
@@ -1457,7 +1483,9 @@ func consumeOpenAIStream(c *gin.Context, resp *http.Response, flusher http.Flush
 		content string
 		calls   []map[string]any // ordered tool calls
 		byIndex = map[int]map[string]any{}
+		usage   telemetry.Usage
 	)
+	defer func() { telemetry.LLMTokens(c.Request.Context(), provider, model, usage) }()
 
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -1470,6 +1498,18 @@ func consumeOpenAIStream(c *gin.Context, resp *http.Response, flusher http.Flush
 		}
 
 		var chunk openAIStreamChunk
+		if json.Unmarshal([]byte(data), &chunk) == nil && chunk.Usage != nil {
+			// OpenAI reports prompt_tokens inclusive of cached ones, so the
+			// cached count is subtracted out rather than billed at both rates.
+			cached := chunk.Usage.PromptTokensDetails.CachedTokens
+			input := chunk.Usage.PromptTokens - cached
+			if input < 0 {
+				input = 0
+			}
+			usage.InputTokens += input
+			usage.OutputTokens += chunk.Usage.CompletionTokens
+			usage.CacheReadTokens += cached
+		}
 		if err := json.Unmarshal([]byte(data), &chunk); err != nil || len(chunk.Choices) == 0 {
 			continue
 		}
@@ -1599,6 +1639,17 @@ type openAIStreamChunk struct {
 		} `json:"delta"`
 		FinishReason string `json:"finish_reason"`
 	} `json:"choices"`
+	// The terminal chunk carries usage and NO choices, so it must be handled
+	// before any guard that skips choice-less chunks. Note the field names differ
+	// from Anthropic's: Chat Completions says prompt/completion, and nests the
+	// cached count one level deeper.
+	Usage *struct {
+		PromptTokens        int `json:"prompt_tokens"`
+		CompletionTokens    int `json:"completion_tokens"`
+		PromptTokensDetails struct {
+			CachedTokens int `json:"cached_tokens"`
+		} `json:"prompt_tokens_details"`
+	} `json:"usage,omitempty"`
 }
 
 // ── Anthropic streaming types ───────────────────────────────────
@@ -1607,6 +1658,20 @@ type streamEvent struct {
 	Type         string       `json:"type"`
 	ContentBlock *streamBlock `json:"content_block,omitempty"`
 	Delta        *streamDelta `json:"delta,omitempty"`
+	// Anthropic splits usage across two events: input counts arrive on
+	// message_start, output counts on the terminal message_delta. Both have to
+	// be read or the call looks free.
+	Message *struct {
+		Usage streamUsage `json:"usage"`
+	} `json:"message,omitempty"`
+	Usage *streamUsage `json:"usage,omitempty"`
+}
+
+type streamUsage struct {
+	InputTokens              int `json:"input_tokens"`
+	OutputTokens             int `json:"output_tokens"`
+	CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
+	CacheReadInputTokens     int `json:"cache_read_input_tokens"`
 }
 
 type streamBlock struct {

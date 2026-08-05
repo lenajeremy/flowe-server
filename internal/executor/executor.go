@@ -229,6 +229,9 @@ func callAnthropic(ctx context.Context, model, system, user string, temp float64
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("anthropic %d: %s", resp.StatusCode, raw)
 	}
+	// Record before parsing the content: a response we cannot read still cost
+	// tokens, and dropping usage on a parse failure is a billing leak.
+	telemetry.LLMTokens(ctx, "anthropic", model, usageFromAnthropic(raw))
 	var r anthropicResponse
 	_ = json.Unmarshal(raw, &r)
 	for _, b := range r.Content {
@@ -310,6 +313,7 @@ func callOpenAI(ctx context.Context, model, system, user string, temp float64, m
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("openai %d: %s", resp.StatusCode, raw)
 	}
+	telemetry.LLMTokens(ctx, "openai", model, usageFromOpenAI(raw))
 	var r openAIResponse
 	_ = json.Unmarshal(raw, &r)
 	if len(r.Choices) > 0 {
