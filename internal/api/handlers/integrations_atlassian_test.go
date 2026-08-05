@@ -205,7 +205,7 @@ func TestPKCEChallengeIsS256OfTheVerifier(t *testing.T) {
 }
 
 func TestOAuthStateCarriesTheVerifierAndIsSingleUse(t *testing.T) {
-	state := newOAuthStateFull("user-1", "https://example.com", "", "verifier-abc")
+	state := newOAuthStateFull("user-1", "org-1", "https://example.com", "", "verifier-abc")
 	got, ok := consumeOAuthState(state)
 	if !ok {
 		t.Fatal("state did not validate")

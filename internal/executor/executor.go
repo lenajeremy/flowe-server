@@ -1420,7 +1420,7 @@ func extractLoopItems(input, field string) []string {
 
 // RunWorkflow executes a workflow AST. ownerID is the workflow owner's user
 // ID, used to resolve their integration connections (OAuth tokens).
-func RunWorkflow(ctx context.Context, workflow WorkflowAST, keys APIKeys, runID, ownerID string, emit EmitFn) {
+func RunWorkflow(ctx context.Context, workflow WorkflowAST, keys APIKeys, runID, ownerID, orgID string, emit EmitFn) {
 	start := time.Now()
 
 	trigger := triggerFromContext(ctx)
@@ -1435,6 +1435,7 @@ func RunWorkflow(ctx context.Context, workflow WorkflowAST, keys APIKeys, runID,
 
 	// Run-scoped stores live in-memory for this run only.
 	ctx = withRunScope(ctx)
+	ctx = WithOrg(ctx, orgID)
 	ctx = context.WithValue(ctx, workflowNameCtxKey{}, workflow.Name)
 
 	slog.InfoContext(ctx, "workflow run started",

@@ -6,7 +6,6 @@ import (
 	"strings"
 	"time"
 
-	"workflow-ai/server/internal/auth"
 	"workflow-ai/server/internal/database/models"
 	"workflow-ai/server/internal/executor"
 
@@ -36,7 +35,7 @@ type aiRunSummary struct {
 // listRunsForAI backs the list_runs tool: the workflow's recent runs, newest
 // first, each tagged with the node that failed so the model knows what to open.
 func (h *WorkflowHandler) listRunsForAI(c *gin.Context, workflowID string) string {
-	q := h.db.DB.Model(&models.WorkflowRun{}).Where("user_id = ?", auth.UserID(c))
+	q := h.orgScope(c).Model(&models.WorkflowRun{})
 	scope := "this workflow"
 	if workflowID != "" {
 		q = q.Where("workflow_id = ?", workflowID)
@@ -106,7 +105,7 @@ func (h *WorkflowHandler) runLogsForAI(c *gin.Context, input any) string {
 	}
 
 	var run models.WorkflowRun
-	if err := h.db.DB.First(&run, "id = ? AND user_id = ?", runID, auth.UserID(c)).Error; err != nil {
+	if err := h.orgScope(c).First(&run, "id = ?", runID).Error; err != nil {
 		return `{"error":"run not found"}`
 	}
 

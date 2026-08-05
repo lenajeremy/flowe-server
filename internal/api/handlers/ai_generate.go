@@ -1105,7 +1105,7 @@ func (h *WorkflowHandler) execChatTool(c *gin.Context, flusher http.Flusher, req
 		return h.integrationResourcesForAI(currentUserID(c), provider)
 
 	case "list_data_stores":
-		return h.dataStoresForAI(currentUserID(c), req.WorkflowID)
+		return h.dataStoresForAI(currentOrgID(c), req.WorkflowID)
 
 	case "set_schedule":
 		return h.setScheduleForAI(c, req.WorkflowID, input)
@@ -1128,7 +1128,7 @@ func (h *WorkflowHandler) execChatTool(c *gin.Context, flusher http.Flusher, req
 			return `{"error":"a data store proposal needs a name, a kind (kv|collection|text) and a scope (run|workflow|account)"}`
 		}
 
-		proposalID, ch := registerProposal(currentUserID(c), req.WorkflowID, spec)
+		proposalID, ch := registerProposal(currentUserID(c), currentOrgID(c), req.WorkflowID, spec)
 		defer clearProposal(proposalID)
 
 		card, _ := json.Marshal(map[string]any{

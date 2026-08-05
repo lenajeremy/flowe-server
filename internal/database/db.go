@@ -52,9 +52,20 @@ func (c *DBClient) Setup() error {
 	backfillPublished := c.DB.Migrator().HasTable(&models.Workflow{}) &&
 		!c.DB.Migrator().HasColumn(&models.Workflow{}, "published")
 
+	// Tenancy has to touch the schema both before and after AutoMigrate — see
+	// migrate_org.go for why the order is what it is.
+	if err := prepareOrgColumns(c.DB); err != nil {
+		return err
+	}
+
 	if err := c.DB.AutoMigrate(
 		&models.User{},
 		&models.LoginCode{},
+		&models.Organization{},
+		&models.OrgMember{},
+		&models.CreditLedger{},
+		&models.CreditBalance{},
+		&models.CreditHold{},
 		&models.WorkflowRun{},
 		&models.Workflow{},
 		&models.ApiKey{},
@@ -68,6 +79,10 @@ func (c *DBClient) Setup() error {
 		&models.DataKV{},
 		&models.DataRecord{},
 	); err != nil {
+		return err
+	}
+
+	if err := backfillOrganizations(c.DB); err != nil {
 		return err
 	}
 

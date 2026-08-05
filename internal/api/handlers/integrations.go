@@ -441,6 +441,10 @@ func currentUserID(c *gin.Context) string {
 
 type oauthStateEntry struct {
 	userID string
+	// orgID is captured when the flow STARTS, because the provider's redirect back
+	// carries no session — there is no other way to know which tenant the
+	// resulting connection belongs to.
+	orgID  string
 	origin string // opener origin for the popup's postMessage target
 	shop   string // shopify shop domain (empty for other providers)
 	// verifier is the PKCE code verifier for providers that require it. It is
@@ -456,15 +460,15 @@ var (
 	oauthStates   = map[string]oauthStateEntry{}
 )
 
-func newOAuthState(userID, origin string) string {
-	return newOAuthStateFull(userID, origin, "", "")
+func newOAuthState(userID, orgID, origin string) string {
+	return newOAuthStateFull(userID, orgID, origin, "", "")
 }
 
-func newOAuthStateShop(userID, origin, shop string) string {
-	return newOAuthStateFull(userID, origin, shop, "")
+func newOAuthStateShop(userID, orgID, origin, shop string) string {
+	return newOAuthStateFull(userID, orgID, origin, shop, "")
 }
 
-func newOAuthStateFull(userID, origin, shop, verifier string) string {
+func newOAuthStateFull(userID, orgID, origin, shop, verifier string) string {
 	b := make([]byte, 16)
 	_, _ = rand.Read(b)
 	s := hex.EncodeToString(b)
@@ -476,7 +480,7 @@ func newOAuthStateFull(userID, origin, shop, verifier string) string {
 		}
 	}
 	oauthStates[s] = oauthStateEntry{
-		userID: userID, origin: origin, shop: shop, verifier: verifier,
+		userID: userID, orgID: orgID, origin: origin, shop: shop, verifier: verifier,
 		expires: time.Now().Add(10 * time.Minute),
 	}
 	return s
@@ -520,7 +524,7 @@ func (h *WorkflowHandler) ListIntegrations(c *gin.Context) {
 	// How many of the user's workflows reference each provider. The connections
 	// screen shows this so "disconnect" can say what it will break rather than
 	// leaving the user to guess.
-	usage := h.providerWorkflowCounts(currentUserID(c))
+	usage := h.providerWorkflowCounts(currentOrgID(c))
 
 	out := []gin.H{}
 	for _, p := range allProviders {
@@ -559,15 +563,18 @@ func (h *WorkflowHandler) ListIntegrations(c *gin.Context) {
 	c.JSON(http.StatusOK, out)
 }
 
-// providerWorkflowCounts counts, per provider, how many of the user's workflows
+// providerWorkflowCounts counts, per provider, how many of the org's workflows
 // contain at least one node of that provider's type. Node type is the provider
 // key, so a jsonb containment test finds them without loading every graph.
-func (h *WorkflowHandler) providerWorkflowCounts(userID string) map[string]int {
+//
+// Counted per ORG because workflows are org-owned: disconnecting a credential
+// should warn about everything it would break, including a teammate's workflow.
+func (h *WorkflowHandler) providerWorkflowCounts(orgID string) map[string]int {
 	counts := map[string]int{}
 	for _, p := range allProviders {
 		var n int64
 		h.db.DB.Model(&models.Workflow{}).
-			Where("user_id = ? AND deleted_at IS NULL", userID).
+			Where("organization_id = ? AND deleted_at IS NULL", orgID).
 			Where(`nodes @> ?`, fmt.Sprintf(`[{"data":{"nodeType":%q}}]`, p)).
 			Count(&n)
 		counts[p] = int(n)
@@ -604,7 +611,7 @@ func (h *WorkflowHandler) ConnectIntegration(c *gin.Context) {
 		q.Set("client_id", clientID)
 		q.Set("redirect_uri", oauthRedirectURI(provider))
 		q.Set("scope", "read_orders,write_orders,read_products,write_products,read_customers,write_customers,read_draft_orders,write_draft_orders,read_inventory,write_inventory,read_locations,read_price_rules,write_price_rules")
-		q.Set("state", newOAuthStateShop(currentUserID(c), openerOrigin(c), shop))
+		q.Set("state", newOAuthStateShop(currentUserID(c), currentOrgID(c), openerOrigin(c), shop))
 		c.JSON(http.StatusOK, gin.H{"url": "https://" + shop + "/admin/oauth/authorize?" + q.Encode()})
 		return
 	}
@@ -619,7 +626,7 @@ func (h *WorkflowHandler) ConnectIntegration(c *gin.Context) {
 		q.Set("code_challenge", pkceChallenge(verifier))
 		q.Set("code_challenge_method", "S256")
 	}
-	q.Set("state", newOAuthStateFull(currentUserID(c), openerOrigin(c), "", verifier))
+	q.Set("state", newOAuthStateFull(currentUserID(c), currentOrgID(c), openerOrigin(c), "", verifier))
 	for k, vs := range prov.extraAuthQ {
 		for _, v := range vs {
 			q.Set(k, v)
@@ -640,7 +647,7 @@ func (h *WorkflowHandler) CallbackIntegration(c *gin.Context) {
 	}
 	ctx := c.Request.Context()
 	st, stateOK := consumeOAuthState(c.Query("state"))
-	userID, openerOrig, shop := st.userID, st.origin, st.shop
+	userID, orgID, openerOrig, shop := st.userID, st.orgID, st.origin, st.shop
 	if errParam := c.Query("error"); errParam != "" {
 		slog.WarnContext(ctx, "integration connect failed", "provider", provider, "reason", truncate(errParam, 200))
 		telemetry.AuthEvent(ctx, "integration_oauth", "error")
@@ -721,11 +728,13 @@ func (h *WorkflowHandler) CallbackIntegration(c *gin.Context) {
 		return
 	}
 	conn.UserID = userID
+	conn.OrganizationID = orgID
 
 	// Upsert: one connection per user per provider. Hard delete — a soft-deleted
-	// row would still occupy the (user_id, provider) unique index and block the
-	// insert, and dead tokens shouldn't linger in the table anyway.
-	h.db.DB.Unscoped().Where("user_id = ? AND provider = ?", userID, provider).Delete(&models.IntegrationConnection{})
+	// row would still occupy the (organization_id, user_id, provider) unique index
+	// and block the insert, and dead tokens shouldn't linger in the table anyway.
+	h.db.DB.Unscoped().Where("organization_id = ? AND user_id = ? AND provider = ?",
+		orgID, userID, provider).Delete(&models.IntegrationConnection{})
 	if err := h.db.DB.Create(conn).Error; err != nil {
 		slog.WarnContext(ctx, "integration connect failed", "provider", provider, "reason", "store_failed")
 		telemetry.AuthEvent(ctx, "integration_oauth", "error")
@@ -744,7 +753,8 @@ func (h *WorkflowHandler) DisconnectIntegration(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "unknown provider"})
 		return
 	}
-	h.db.DB.Unscoped().Where("user_id = ? AND provider = ?", currentUserID(c), provider).Delete(&models.IntegrationConnection{})
+	h.db.DB.Unscoped().Where("organization_id = ? AND user_id = ? AND provider = ?",
+		currentOrgID(c), currentUserID(c), provider).Delete(&models.IntegrationConnection{})
 	slog.InfoContext(c.Request.Context(), "integration disconnected", "provider", provider, "user_id", currentUserID(c))
 	c.JSON(http.StatusOK, gin.H{"disconnected": provider})
 }

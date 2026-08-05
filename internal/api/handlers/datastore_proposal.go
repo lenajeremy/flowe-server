@@ -41,6 +41,7 @@ type proposalOutcome struct {
 type pendingProposal struct {
 	spec       storeProposalSpec
 	userID     string
+	orgID      string
 	workflowID string
 	ch         chan proposalOutcome
 }
@@ -50,11 +51,12 @@ var (
 	pendingProposalsMu sync.Mutex
 )
 
-func registerProposal(userID, workflowID string, spec storeProposalSpec) (string, chan proposalOutcome) {
+func registerProposal(userID, orgID, workflowID string, spec storeProposalSpec) (string, chan proposalOutcome) {
 	id := uuid.NewString()
 	ch := make(chan proposalOutcome, 1)
 	pendingProposalsMu.Lock()
-	pendingProposals[id] = &pendingProposal{spec: spec, userID: userID, workflowID: workflowID, ch: ch}
+	pendingProposals[id] = &pendingProposal{spec: spec, userID: userID, orgID: orgID,
+		workflowID: workflowID, ch: ch}
 	pendingProposalsMu.Unlock()
 	return id, ch
 }
@@ -121,12 +123,13 @@ func (h *WorkflowHandler) ResolveDataStoreProposal(c *gin.Context) {
 	}
 
 	store := models.DataStore{
-		UserID:     p.userID,
-		WorkflowID: workflowID,
-		Name:       spec.Name,
-		Kind:       spec.Kind,
-		Scope:      spec.Scope,
-		Schema:     models.JSONB(spec.Schema),
+		UserID:         p.userID,
+		OrganizationID: p.orgID,
+		WorkflowID:     workflowID,
+		Name:           spec.Name,
+		Kind:           spec.Kind,
+		Scope:          spec.Scope,
+		Schema:         models.JSONB(spec.Schema),
 	}
 	if err := h.db.DB.Create(&store).Error; err != nil {
 		c.JSON(http.StatusConflict, gin.H{"error": "a store with that name already exists in this scope"})

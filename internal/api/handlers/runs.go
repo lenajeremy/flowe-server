@@ -12,19 +12,23 @@ import (
 	"workflow-ai/server/internal/executor"
 	"workflow-ai/server/internal/hub"
 	"workflow-ai/server/internal/telemetry"
+	"workflow-ai/server/internal/tenancy"
 
 	"github.com/gin-gonic/gin"
 )
 
-// optionalUserID resolves the caller from a bearer token on a public
-// (non-RequireAuth) route, returning "" when unauthenticated.
-func (h *WorkflowHandler) optionalUserID(c *gin.Context) string {
+// optionalCaller resolves the caller from a bearer token on a public
+// (non-RequireAuth) route, returning empty strings when unauthenticated.
+func (h *WorkflowHandler) optionalCaller(c *gin.Context) (userID, orgID string) {
 	token := auth.BearerToken(c)
 	if token == "" {
-		return ""
+		return "", ""
 	}
-	uid, _ := auth.GetSession(c.Request.Context(), h.redis, token)
-	return uid
+	uid, oid, _ := auth.GetSessionFull(c.Request.Context(), h.redis, token)
+	if uid != "" && oid == "" {
+		oid = tenancy.PersonalOrgID(uid).String()
+	}
+	return uid, oid
 }
 
 // canViewRun authorizes access to a run served over a capability URL. The owner
@@ -32,7 +36,9 @@ func (h *WorkflowHandler) optionalUserID(c *gin.Context) string {
 // only while the run is recent — so a leaked link can't expose old run output,
 // which may contain sensitive node data, indefinitely.
 func (h *WorkflowHandler) canViewRun(c *gin.Context, run *models.WorkflowRun) bool {
-	if uid := h.optionalUserID(c); uid != "" && run.UserID == uid {
+	// Anyone in the owning org counts as the owner: a run belongs to the tenant,
+	// not to whoever happened to trigger it.
+	if _, orgID := h.optionalCaller(c); orgID != "" && run.OrganizationID == orgID {
 		return true
 	}
 	return time.Since(run.CreatedAt) < 14*24*time.Hour

@@ -50,11 +50,12 @@ func (h *WorkflowHandler) CreateChatSession(c *gin.Context) {
 		return
 	}
 	sess := &models.ChatSession{
-		UserID:     auth.UserID(c),
-		WorkflowID: wf.ID.String(),
-		Title:      "New chat",
-		Messages:   models.JSONB(`[]`),
-		State:      models.JSONB(`{}`),
+		UserID:         auth.UserID(c),
+		OrganizationID: currentOrgID(c),
+		WorkflowID:     wf.ID.String(),
+		Title:          "New chat",
+		Messages:       models.JSONB(`[]`),
+		State:          models.JSONB(`{}`),
 	}
 	if err := h.db.DB.Create(sess).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create session"})
@@ -70,7 +71,7 @@ func (h *WorkflowHandler) ListChatSessions(c *gin.Context) {
 	}
 	out := []agentSessionSummary{}
 	h.db.DB.Model(&models.ChatSession{}).
-		Where("workflow_id = ? AND user_id = ?", c.Param("id"), auth.UserID(c)).
+		Where("workflow_id = ? AND organization_id = ?", c.Param("id"), orgIDOrDeny(c)).
 		Order("updated_at desc").Limit(50).
 		Select("id, title, created_at, updated_at").Scan(&out)
 	c.JSON(http.StatusOK, out)
@@ -97,7 +98,7 @@ func (h *WorkflowHandler) DeleteChatSession(c *gin.Context) {
 
 func (h *WorkflowHandler) loadOwnedSession(c *gin.Context) (*models.ChatSession, bool) {
 	var sess models.ChatSession
-	if err := h.db.DB.First(&sess, "id = ? AND user_id = ?", c.Param("id"), auth.UserID(c)).Error; err != nil {
+	if err := h.orgScope(c).First(&sess, "id = ?", c.Param("id")).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "session not found"})
 		return nil, false
 	}
@@ -375,7 +376,7 @@ func (h *WorkflowHandler) AgentChatTurn(c *gin.Context) {
 		chip, _ := json.Marshal(map[string]string{"node": tool.Node.Data.Label, "nodeId": tool.Node.ID, "op": op})
 		sendSSE(c.Writer, flusher, "tool_start", string(chip))
 
-		out, err := executor.ExecuteSingleNode(c.Request.Context(), tool.Node, overrides, state, ast.Edges, keys, runID, uid, nil)
+		out, err := executor.ExecuteSingleNode(c.Request.Context(), tool.Node, overrides, state, ast.Edges, keys, runID, uid, currentOrgID(c), nil)
 		rec := agentToolCallRecord{Node: tool.Node.Data.Label, NodeID: tool.Node.ID, Op: op, Status: "ok"}
 		if err != nil {
 			rec.Status = "error"

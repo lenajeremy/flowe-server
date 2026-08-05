@@ -22,6 +22,7 @@ import (
 	"workflow-ai/server/internal/database/models"
 	mail "workflow-ai/server/internal/email"
 	"workflow-ai/server/internal/telemetry"
+	"workflow-ai/server/internal/tenancy"
 
 	"github.com/gin-gonic/gin"
 	"github.com/resend/resend-go/v2"
@@ -285,13 +286,25 @@ func (h *WorkflowHandler) findOrCreateUserByEmail(email string) (*models.User, e
 
 // startSession creates a Redis session and returns the raw bearer token the
 // client stores and sends back as `Authorization: Bearer <token>`.
+//
+// Both signup routes funnel through here, so this is also where a user's personal
+// org is provisioned. Doing it on every login rather than only on account creation
+// is deliberate: Provision is idempotent, and it means an account whose signup was
+// interrupted between the two writes repairs itself instead of staying orphaned.
 func (h *WorkflowHandler) startSession(c *gin.Context, user *models.User) (string, error) {
-	token, err := auth.CreateSession(c.Request.Context(), h.redis, user.ID.String())
+	ctx := c.Request.Context()
+	org, err := tenancy.Provision(h.db.DB, user)
 	if err != nil {
-		slog.ErrorContext(c.Request.Context(), "auth: create session failed", "error", err)
+		slog.ErrorContext(ctx, "auth: provision org failed", "error", err, "user_id", user.ID.String())
 		return "", err
 	}
-	slog.InfoContext(c.Request.Context(), "session created", "user_id", user.ID.String())
+	token, err := auth.CreateSession(ctx, h.redis, user.ID.String(), org.ID.String())
+	if err != nil {
+		slog.ErrorContext(ctx, "auth: create session failed", "error", err)
+		return "", err
+	}
+	slog.InfoContext(ctx, "session created",
+		"user_id", user.ID.String(), "org_id", org.ID.String())
 	return token, nil
 }
 
@@ -310,7 +323,7 @@ func (h *WorkflowHandler) AuthGoogleConnect(c *gin.Context) {
 	q.Set("response_type", "code")
 	q.Set("scope", "openid email profile")
 	q.Set("prompt", "select_account")
-	q.Set("state", newOAuthState("", openerOrigin(c))) // login flow: no user yet
+	q.Set("state", newOAuthState("", "", openerOrigin(c))) // login flow: no user or org yet
 	telemetry.AuthEvent(c.Request.Context(), "oauth_google", "started")
 	c.Redirect(http.StatusFound, "https://accounts.google.com/o/oauth2/v2/auth?"+q.Encode())
 }

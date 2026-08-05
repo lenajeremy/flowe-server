@@ -49,7 +49,7 @@ type storeBackend interface {
 type DataStoreOps interface {
 	storeBackend
 	// GetStore resolves store metadata for the owner (nil if missing/not owned).
-	GetStore(ownerID, storeID string) (*DataStore, error)
+	GetStore(orgID, storeID string) (*DataStore, error)
 }
 
 var DataStores DataStoreOps
@@ -72,6 +72,28 @@ func newRunScope() *runScope {
 		kv:      map[string]map[string]json.RawMessage{},
 		records: map[string][]runRecord{},
 	}
+}
+
+// orgKey carries the tenant that owns a run's data.
+//
+// Datastores are org-scoped while integration credentials stay user-owned, so the
+// executor needs both identities and they are no longer the same value. The org
+// rides in the context while the user stays an explicit parameter — but every
+// public entry point takes the org as a required argument (see RunWorkflow and
+// ExecuteSingleNode), so a new caller cannot silently omit it. If it is ever
+// missing, the lookup matches no rows rather than the wrong tenant's: a store id
+// is only reachable through its own org.
+type orgKey struct{}
+
+// WithOrg tags a context with the organization that owns the run.
+func WithOrg(ctx context.Context, orgID string) context.Context {
+	return context.WithValue(ctx, orgKey{}, orgID)
+}
+
+// OrgFromContext returns the run's owning org, or "" when untagged.
+func OrgFromContext(ctx context.Context) string {
+	s, _ := ctx.Value(orgKey{}).(string)
+	return s
 }
 
 type runScopeKey struct{}
@@ -228,7 +250,7 @@ func (r *runScope) TextAppend(storeID, text string) (string, error) {
 
 // ── node dispatch ────────────────────────────────────────────────
 
-func runDataNode(ctx context.Context, d FlowNodeData, outputs map[string]string, ownerID string) (string, error) {
+func runDataNode(ctx context.Context, d FlowNodeData, outputs map[string]string, _ string) (string, error) {
 	if DataStores == nil {
 		return "", fmt.Errorf("persistence is not configured on this server")
 	}
@@ -238,7 +260,9 @@ func runDataNode(ctx context.Context, d FlowNodeData, outputs map[string]string,
 	if storeID == "" {
 		return "", fmt.Errorf("Data node: no store selected")
 	}
-	store, err := DataStores.GetStore(ownerID, storeID)
+	// Scoped by ORG, not by the user running the workflow: an account-scoped store
+	// is shared across the org by design.
+	store, err := DataStores.GetStore(OrgFromContext(ctx), storeID)
 	if err != nil {
 		return "", fmt.Errorf("Data node: %w", err)
 	}

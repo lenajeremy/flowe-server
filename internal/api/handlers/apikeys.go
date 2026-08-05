@@ -17,8 +17,8 @@ import (
 // GET /api/apikeys
 func (h *WorkflowHandler) ListApiKeys(c *gin.Context) {
 	var keys []models.ApiKey
-	h.db.DB.Select("id, name, key_prefix, last_used_at, created_at").
-		Where("user_id = ?", auth.UserID(c)).Find(&keys)
+	h.orgScope(c).Select("id, name, key_prefix, last_used_at, created_at").
+		Find(&keys)
 	c.JSON(http.StatusOK, keys)
 }
 
@@ -37,10 +37,11 @@ func (h *WorkflowHandler) CreateApiKey(c *gin.Context) {
 	hash := fmt.Sprintf("%x", sha256.Sum256([]byte(rawKey)))
 
 	key := models.ApiKey{
-		UserID:    auth.UserID(c),
-		Name:      body.Name,
-		KeyHash:   hash,
-		KeyPrefix: rawKey[:11], // "wf_" + first 8 chars
+		UserID:         auth.UserID(c),
+		OrganizationID: currentOrgID(c),
+		Name:           body.Name,
+		KeyHash:        hash,
+		KeyPrefix:      rawKey[:11], // "wf_" + first 8 chars
 	}
 	h.db.DB.Create(&key)
 
@@ -58,7 +59,7 @@ func (h *WorkflowHandler) CreateApiKey(c *gin.Context) {
 
 // DELETE /api/apikeys/:id
 func (h *WorkflowHandler) DeleteApiKey(c *gin.Context) {
-	h.db.DB.Where("user_id = ?", auth.UserID(c)).Delete(&models.ApiKey{}, "id = ?", c.Param("id"))
+	h.orgScope(c).Delete(&models.ApiKey{}, "id = ?", c.Param("id"))
 	slog.InfoContext(c.Request.Context(), "api key deleted",
 		"user_id", auth.UserID(c), "key_id", c.Param("id"))
 	c.JSON(http.StatusOK, gin.H{"deleted": true})

@@ -25,9 +25,10 @@ func ExecuteSingleNode(
 	outputs map[string]string,
 	edges []WorkflowASTEdge,
 	keys APIKeys,
-	runID, ownerID string,
+	runID, ownerID, orgID string,
 	emit func(ExecutionEvent),
 ) (string, error) {
+	ctx = WithOrg(ctx, orgID)
 	if len(overrides) > 0 {
 		merged, err := mergeNodeData(node.Data, overrides)
 		if err != nil {

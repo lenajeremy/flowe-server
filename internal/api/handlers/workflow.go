@@ -52,10 +52,11 @@ func (h *WorkflowHandler) Run(c *gin.Context) {
 
 	// Persist run record
 	run := &models.WorkflowRun{
-		UserID:       uid,
-		WorkflowID:   req.WorkflowID,
-		WorkflowName: req.Workflow.Name,
-		Status:       models.RunStatusRunning,
+		UserID:         uid,
+		OrganizationID: currentOrgID(c),
+		WorkflowID:     req.WorkflowID,
+		WorkflowName:   req.Workflow.Name,
+		Status:         models.RunStatusRunning,
 	}
 	if err := h.db.DB.Create(run).Error; err != nil {
 		slog.Error("failed to persist workflow run", "error", err)
@@ -111,7 +112,7 @@ func (h *WorkflowHandler) Run(c *gin.Context) {
 	}
 
 	runCtx := executor.WithWorkflowID(c.Request.Context(), req.WorkflowID)
-	executor.RunWorkflow(executor.WithTrigger(runCtx, "manual"), req.Workflow, keys, runID, uid, emit)
+	executor.RunWorkflow(executor.WithTrigger(runCtx, "manual"), req.Workflow, keys, runID, uid, currentOrgID(c), emit)
 
 	// Serialize buffered events and update run record
 	eventsJSON, _ := json.Marshal(bufferedEvents)
@@ -138,11 +139,11 @@ type workflowBody struct {
 	Description *string `json:"description"`
 }
 
-// loadOwnedWorkflow fetches a workflow only if it belongs to the session
-// user; otherwise it writes a 404 (never 403 — don't leak existence).
+// loadOwnedWorkflow fetches a workflow only if it belongs to the requesting
+// org; otherwise it writes a 404 (never 403 — don't leak existence).
 func (h *WorkflowHandler) loadOwnedWorkflow(c *gin.Context, id string) (*models.Workflow, bool) {
 	var wf models.Workflow
-	if err := h.db.DB.First(&wf, "id = ? AND user_id = ?", id, auth.UserID(c)).Error; err != nil {
+	if err := h.orgScope(c).First(&wf, "id = ?", id).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "workflow not found"})
 		return nil, false
 	}
@@ -158,10 +159,11 @@ func (h *WorkflowHandler) Create(c *gin.Context) {
 	}
 
 	wf := &models.Workflow{
-		UserID: auth.UserID(c),
-		Name:   body.Name,
-		Nodes:  models.JSONB(body.Nodes),
-		Edges:  models.JSONB(body.Edges),
+		UserID:         auth.UserID(c),
+		OrganizationID: currentOrgID(c),
+		Name:           body.Name,
+		Nodes:          models.JSONB(body.Nodes),
+		Edges:          models.JSONB(body.Edges),
 	}
 	if body.Description != nil {
 		wf.Description = *body.Description
@@ -224,7 +226,7 @@ func (h *WorkflowHandler) List(c *gin.Context) {
 			(SELECT COALESCE(jsonb_agg(DISTINCT n->'data'->>'nodeType'), '[]'::jsonb)
 			 FROM jsonb_array_elements(nodes) n) AS node_types,
 			published, created_at, updated_at`).
-		Where("user_id = ?", auth.UserID(c)).
+		Where("organization_id = ?", orgIDOrDeny(c)).
 		Order("updated_at desc").Scan(&summaries).Error; err != nil {
 		slog.Error("failed to list workflows", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list workflows"})
@@ -280,7 +282,7 @@ func (h *WorkflowHandler) SetPublished(published bool) gin.HandlerFunc {
 // Delete — DELETE /api/workflows/:id
 func (h *WorkflowHandler) Delete(c *gin.Context) {
 	id := c.Param("id")
-	if err := h.db.DB.Where("user_id = ?", auth.UserID(c)).
+	if err := h.orgScope(c).
 		Delete(&models.Workflow{}, "id = ?", id).Error; err != nil {
 		slog.Error("failed to delete workflow", "id", id, "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to delete workflow"})

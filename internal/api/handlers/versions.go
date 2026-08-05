@@ -60,12 +60,13 @@ func (h *WorkflowHandler) SaveVersion(c *gin.Context) {
 	}
 
 	version := models.WorkflowVersion{
-		UserID:     workflow.UserID,
-		WorkflowID: workflowID,
-		Version:    int(count) + 1,
-		Nodes:      workflow.Nodes,
-		Edges:      workflow.Edges,
-		Name:       versionName,
+		UserID:         workflow.UserID,
+		OrganizationID: workflow.OrganizationID,
+		WorkflowID:     workflowID,
+		Version:        int(count) + 1,
+		Nodes:          workflow.Nodes,
+		Edges:          workflow.Edges,
+		Name:           versionName,
 	}
 	if err := h.db.DB.Create(&version).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})

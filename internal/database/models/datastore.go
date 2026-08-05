@@ -4,9 +4,17 @@ package models
 // can read/write. Kind fixes the shape (key-value, collection, or text); Scope
 // fixes the lifetime and reach (a single run, one workflow across runs, or the
 // whole account across workflows). Schema is optional — nil means schemaless.
+//
+// The unique name index is keyed by ORGANIZATION, not by user, so an
+// account-scoped store is shared by everyone in the org. That is the intended
+// semantics for teams — a shared store is the point of account scope — and not an
+// oversight to be "fixed" back to per-user later.
 type DataStore struct {
 	BaseModel
-	UserID string `json:"user_id"     gorm:"type:uuid;not null;index;uniqueIndex:idx_store_owner_name"`
+	OrganizationID string `json:"organization_id" gorm:"type:uuid;not null;index;uniqueIndex:idx_store_owner_name"`
+	// UserID is who created the store. Retained for attribution; it is no longer
+	// part of the uniqueness or the access predicate.
+	UserID string `json:"user_id"     gorm:"type:uuid;not null;index"`
 	// WorkflowID scopes run/workflow stores; empty for account scope. Part of
 	// the unique-name index so the same name can exist per workflow.
 	WorkflowID string `json:"workflow_id" gorm:"uniqueIndex:idx_store_owner_name"`

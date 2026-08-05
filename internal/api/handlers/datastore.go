@@ -29,7 +29,7 @@ func (h *WorkflowHandler) ops() database.DataStoreOps {
 // returning ok=false otherwise.
 func (h *WorkflowHandler) loadOwnedStore(c *gin.Context, id string) (*models.DataStore, bool) {
 	var st models.DataStore
-	if err := h.db.DB.First(&st, "id = ? AND user_id = ?", id, auth.UserID(c)).Error; err != nil {
+	if err := h.orgScope(c).First(&st, "id = ?", id).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "store not found"})
 		return nil, false
 	}
@@ -40,10 +40,10 @@ func (h *WorkflowHandler) loadOwnedStore(c *gin.Context, id string) (*models.Dat
 // returns that workflow's stores plus all account-scoped stores (the set a node
 // in that workflow can target).
 func (h *WorkflowHandler) ListDataStores(c *gin.Context) {
-	q := h.db.DB.Where("user_id = ?", auth.UserID(c))
+	q := h.orgScope(c)
 	if wf := c.Query("workflow_id"); wf != "" {
-		// Nested Where forces parentheses: user_id = ? AND (workflow_id = ? OR
-		// scope = 'account') — never let the OR escape the owner filter.
+		// Nested Where forces parentheses: organization_id = ? AND (workflow_id = ?
+		// OR scope = 'account') — never let the OR escape the tenant filter.
 		q = q.Where(h.db.DB.Where("workflow_id = ?", wf).Or("scope = ?", "account"))
 	}
 	var stores []models.DataStore
@@ -91,19 +91,20 @@ func (h *WorkflowHandler) CreateDataStore(c *gin.Context) {
 			return
 		}
 		var wf models.Workflow
-		if err := h.db.DB.First(&wf, "id = ? AND user_id = ?", body.WorkflowID, auth.UserID(c)).Error; err != nil {
+		if err := h.orgScope(c).First(&wf, "id = ?", body.WorkflowID).Error; err != nil {
 			c.JSON(http.StatusNotFound, gin.H{"error": "workflow not found"})
 			return
 		}
 	}
 
 	store := models.DataStore{
-		UserID:     auth.UserID(c),
-		WorkflowID: body.WorkflowID,
-		Name:       body.Name,
-		Kind:       body.Kind,
-		Scope:      body.Scope,
-		Schema:     models.JSONB(body.Schema),
+		UserID:         auth.UserID(c),
+		OrganizationID: currentOrgID(c),
+		WorkflowID:     body.WorkflowID,
+		Name:           body.Name,
+		Kind:           body.Kind,
+		Scope:          body.Scope,
+		Schema:         models.JSONB(body.Schema),
 	}
 	if err := h.db.DB.Create(&store).Error; err != nil {
 		c.JSON(http.StatusConflict, gin.H{"error": "a store with that name already exists in this scope"})
@@ -114,8 +115,8 @@ func (h *WorkflowHandler) CreateDataStore(c *gin.Context) {
 
 // dataStoresForAI returns the stores a workflow's data nodes can target
 // (that workflow's own + all account-scoped), as JSON for the AI builder.
-func (h *WorkflowHandler) dataStoresForAI(userID, workflowID string) string {
-	q := h.db.DB.Where("user_id = ?", userID)
+func (h *WorkflowHandler) dataStoresForAI(orgID, workflowID string) string {
+	q := h.db.DB.Where("organization_id = ?", orgID)
 	if workflowID != "" {
 		q = q.Where(h.db.DB.Where("workflow_id = ?", workflowID).Or("scope = ?", "account"))
 	} else {
@@ -212,7 +213,7 @@ func (h *WorkflowHandler) DataStoreEvents(c *gin.Context) {
 
 	// Ownership check up front — never subscribe to someone else's store.
 	var owned []models.DataStore
-	h.db.DB.Where("user_id = ? AND id IN ?", auth.UserID(c), wanted).Find(&owned)
+	h.orgScope(c).Where("id IN ?", wanted).Find(&owned)
 	if len(owned) == 0 {
 		c.JSON(http.StatusNotFound, gin.H{"error": "no matching stores"})
 		return

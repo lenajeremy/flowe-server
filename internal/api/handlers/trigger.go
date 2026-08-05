@@ -59,10 +59,11 @@ func (h *WorkflowHandler) TriggerWorkflow(c *gin.Context) {
 
 	// Create run record
 	run := models.WorkflowRun{
-		UserID:       workflow.UserID,
-		WorkflowID:   workflowID,
-		WorkflowName: workflow.Name,
-		Status:       models.RunStatusRunning,
+		UserID:         workflow.UserID,
+		OrganizationID: workflow.OrganizationID,
+		WorkflowID:     workflowID,
+		WorkflowName:   workflow.Name,
+		Status:         models.RunStatusRunning,
 	}
 	h.db.DB.Create(&run)
 
@@ -101,7 +102,7 @@ func (h *WorkflowHandler) TriggerWorkflow(c *gin.Context) {
 
 		go func() {
 			defer close(doneCh)
-			executor.RunWorkflow(executor.WithTrigger(executor.WithWorkflowID(bgCtx, workflowID), "api"), ast, keys, runID, workflow.UserID, func(event executor.ExecutionEvent) {
+			executor.RunWorkflow(executor.WithTrigger(executor.WithWorkflowID(bgCtx, workflowID), "api"), ast, keys, runID, workflow.UserID, workflow.OrganizationID, func(event executor.ExecutionEvent) {
 				event.Timestamp = time.Since(startTime).Milliseconds()
 				events = append(events, event)
 				hub.Global.Publish(runID, event)

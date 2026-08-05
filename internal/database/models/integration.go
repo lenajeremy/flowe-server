@@ -13,14 +13,26 @@ import (
 // set only for providers with expiring tokens (gmail, gitlab); a nil
 // ExpiresAt means the access token does not expire.
 //
+// Connections stay USER-owned and are explicitly grantable to the org via
+// SharedWithOrg. Making them org-owned outright would be more convenient and
+// would also mean every member's workflow silently acts as whoever connected —
+// an authority escalation with no audit trail. Making them purely user-owned
+// would break an org's workflow the day its author leaves. The grant is the
+// middle path, and it is the same mechanism per-workflow least privilege will
+// need later.
+//
 // AccessToken/RefreshToken are encrypted at rest (see cryptobox) via the hooks
 // below and are never serialized to clients (json:"-").
 type IntegrationConnection struct {
 	BaseModel
-	UserID       string `json:"user_id"        gorm:"type:uuid;not null;uniqueIndex:idx_integration_user_provider"`
-	Provider     string `json:"provider"       gorm:"not null;uniqueIndex:idx_integration_user_provider"`
-	AccessToken  string `json:"-"              gorm:"not null"`
-	RefreshToken string `json:"-"`
+	OrganizationID string `json:"organization_id" gorm:"type:uuid;not null;uniqueIndex:idx_integration_user_provider,priority:1;index"`
+	UserID         string `json:"user_id"        gorm:"type:uuid;not null;uniqueIndex:idx_integration_user_provider,priority:2"`
+	Provider       string `json:"provider"       gorm:"not null;uniqueIndex:idx_integration_user_provider,priority:3"`
+	// SharedWithOrg lets other members' workflows bind to this credential. False
+	// means only the owner's own runs may use it.
+	SharedWithOrg bool   `json:"shared_with_org" gorm:"not null;default:false"`
+	AccessToken   string `json:"-"              gorm:"not null"`
+	RefreshToken  string `json:"-"`
 	// UserAccessToken is a second grant acting as the human who connected
 	// (Slack xoxp- tokens) for providers where actions can run either as the
 	// bot or on the user's behalf. Empty for providers without user grants.

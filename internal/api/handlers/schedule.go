@@ -10,7 +10,6 @@ import (
 	"sync"
 	"time"
 
-	"workflow-ai/server/internal/auth"
 	"workflow-ai/server/internal/database/models"
 	"workflow-ai/server/internal/executor"
 	"workflow-ai/server/internal/hub"
@@ -154,7 +153,8 @@ func (h *WorkflowHandler) runWorkflowByID(workflowID string, nextRun *time.Time)
 	ast := executor.WorkflowAST{Version: "1.0", Name: workflow.Name, Nodes: nodes, Edges: edges}
 	keys := executor.APIKeys{Anthropic: os.Getenv("ANTHROPIC_API_KEY"), OpenAI: os.Getenv("OPENAI_API_KEY"), Brave: os.Getenv("BRAVE_API_KEY"), Jina: os.Getenv("JINA_API_KEY")}
 
-	run := models.WorkflowRun{UserID: workflow.UserID, WorkflowID: workflowID, WorkflowName: workflow.Name, Status: models.RunStatusRunning}
+	run := models.WorkflowRun{UserID: workflow.UserID, OrganizationID: workflow.OrganizationID,
+		WorkflowID: workflowID, WorkflowName: workflow.Name, Status: models.RunStatusRunning}
 	h.db.DB.Create(&run)
 	runID := run.ID.String()
 
@@ -173,7 +173,7 @@ func (h *WorkflowHandler) runWorkflowByID(workflowID string, nextRun *time.Time)
 	finalStatus := models.RunStatusCompleted
 	// The schedule fires with no request context — the loaded workflow's
 	// owner is what routes integration tokens to the right user.
-	executor.RunWorkflow(executor.WithTrigger(executor.WithWorkflowID(ctx, workflowID), "schedule"), ast, keys, runID, workflow.UserID, func(ev executor.ExecutionEvent) {
+	executor.RunWorkflow(executor.WithTrigger(executor.WithWorkflowID(ctx, workflowID), "schedule"), ast, keys, runID, workflow.UserID, workflow.OrganizationID, func(ev executor.ExecutionEvent) {
 		ev.Timestamp = time.Since(startTime).Milliseconds()
 		events = append(events, ev)
 		hub.Global.Publish(runID, ev)
@@ -247,7 +247,7 @@ func (h *WorkflowHandler) SetSchedule(c *gin.Context) {
 		enabled = *body.Enabled
 	}
 
-	sched := h.upsertSchedule(wf.UserID, workflowID, models.ScheduledTrigger{
+	sched := h.upsertSchedule(wf.UserID, wf.OrganizationID, workflowID, models.ScheduledTrigger{
 		Frequency:       body.Frequency,
 		IntervalSeconds: body.IntervalSeconds,
 		RunTime:         body.RunTime,
@@ -262,13 +262,14 @@ func (h *WorkflowHandler) SetSchedule(c *gin.Context) {
 // upsertSchedule writes a workflow's schedule and recomputes next_run_at.
 // Shared by the sidebar's REST endpoint and the AI builder's set_schedule tool
 // so both produce identical rows.
-func (h *WorkflowHandler) upsertSchedule(userID, workflowID string, in models.ScheduledTrigger) models.ScheduledTrigger {
+func (h *WorkflowHandler) upsertSchedule(userID, orgID, workflowID string, in models.ScheduledTrigger) models.ScheduledTrigger {
 	nextRun := calcNextRunAt(in, time.Now().UTC())
 
 	var sched models.ScheduledTrigger
 	if err := h.db.DB.Where("workflow_id = ?", workflowID).First(&sched).Error; err != nil {
 		sched = in
 		sched.UserID = userID
+		sched.OrganizationID = orgID
 		sched.WorkflowID = workflowID
 		sched.NextRunAt = &nextRun
 		h.db.DB.Create(&sched)
@@ -296,7 +297,7 @@ func (h *WorkflowHandler) setScheduleForAI(c *gin.Context, workflowID string, in
 		return `{"error":"this workflow has not been saved yet, so it has no schedule — tell the user to save it, then ask again"}`
 	}
 	var wf models.Workflow
-	if err := h.db.DB.First(&wf, "id = ? AND user_id = ?", workflowID, auth.UserID(c)).Error; err != nil {
+	if err := h.orgScope(c).First(&wf, "id = ?", workflowID).Error; err != nil {
 		return `{"error":"workflow not found"}`
 	}
 
@@ -333,7 +334,7 @@ func (h *WorkflowHandler) setScheduleForAI(c *gin.Context, workflowID string, in
 		repeat = *body.Repeat
 	}
 
-	sched := h.upsertSchedule(wf.UserID, workflowID, models.ScheduledTrigger{
+	sched := h.upsertSchedule(wf.UserID, wf.OrganizationID, workflowID, models.ScheduledTrigger{
 		Frequency:       body.Frequency,
 		IntervalSeconds: intervalSeconds,
 		RunTime:         runTime,

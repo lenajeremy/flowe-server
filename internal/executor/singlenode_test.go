@@ -45,7 +45,7 @@ func TestEmailSendMultipleRecipients(t *testing.T) {
 		ID:   "n1",
 		Data: FlowNodeData{NodeType: NodeTypeEmailSend, Label: "mail", EmailTo: " a@x.com ,b@y.com,, c@z.com "},
 	}
-	out, err := ExecuteSingleNode(context.Background(), node, nil, nil, nil, APIKeys{}, "run", "owner", nil)
+	out, err := ExecuteSingleNode(context.Background(), node, nil, nil, nil, APIKeys{}, "run", "owner", "org", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -55,7 +55,7 @@ func TestEmailSendMultipleRecipients(t *testing.T) {
 	}
 
 	empty := WorkflowASTNode{ID: "n2", Data: FlowNodeData{NodeType: NodeTypeEmailSend, Label: "mail", EmailTo: " , "}}
-	if _, err := ExecuteSingleNode(context.Background(), empty, nil, nil, nil, APIKeys{}, "run", "owner", nil); err == nil {
+	if _, err := ExecuteSingleNode(context.Background(), empty, nil, nil, nil, APIKeys{}, "run", "owner", "org", nil); err == nil {
 		t.Fatal("expected error for no recipients")
 	}
 }
@@ -72,7 +72,7 @@ func TestExecuteSingleNodeTemplatesFromState(t *testing.T) {
 	out, err := ExecuteSingleNode(context.Background(), node,
 		map[string]any{"emailTo": "{{prev.output.email}}", "emailSubject": "hi"},
 		map[string]string{"prev": `{"email":"world@example.com"}`},
-		nil, APIKeys{}, "run", "owner", nil)
+		nil, APIKeys{}, "run", "owner", "org", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

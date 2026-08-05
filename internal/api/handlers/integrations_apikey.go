@@ -103,15 +103,16 @@ func (h *WorkflowHandler) SetIntegrationKey(c *gin.Context) {
 		return
 	}
 
-	userID := currentUserID(c)
+	userID, orgID := currentUserID(c), currentOrgID(c)
 	// One connection per user per provider: replace rather than accumulate.
-	h.db.DB.Unscoped().Where("user_id = ? AND provider = ?", userID, prov.name).
-		Delete(&models.IntegrationConnection{})
+	h.db.DB.Unscoped().Where("organization_id = ? AND user_id = ? AND provider = ?",
+		orgID, userID, prov.name).Delete(&models.IntegrationConnection{})
 	conn := models.IntegrationConnection{
-		UserID:      userID,
-		Provider:    prov.name,
-		AccessToken: key,
-		Scope:       "api_key",
+		UserID:         userID,
+		OrganizationID: orgID,
+		Provider:       prov.name,
+		AccessToken:    key,
+		Scope:          "api_key",
 	}
 	if err := h.db.DB.Create(&conn).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not save the API key"})

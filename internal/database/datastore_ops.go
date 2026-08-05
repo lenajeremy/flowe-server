@@ -46,9 +46,11 @@ type DataStoreOps struct{ DB *gorm.DB }
 
 const textKey = "value" // reserved kv key backing a text store
 
-func (o DataStoreOps) GetStore(ownerID, storeID string) (*executor.DataStore, error) {
+// GetStore resolves a store within one organization. Scoped by org rather than by
+// user because an account-scoped store is deliberately shared across the org.
+func (o DataStoreOps) GetStore(orgID, storeID string) (*executor.DataStore, error) {
 	var st models.DataStore
-	err := o.DB.Where("id = ? AND user_id = ?", storeID, ownerID).First(&st).Error
+	err := o.DB.Where("id = ? AND organization_id = ?", storeID, orgID).First(&st).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, nil
 	}

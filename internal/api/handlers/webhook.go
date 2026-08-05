@@ -30,7 +30,8 @@ func (h *WorkflowHandler) GetWebhook(c *gin.Context) {
 	if err := h.db.DB.Where("workflow_id = ?", workflowID).First(&wh).Error; err != nil {
 		// Create one; handle races by re-fetching on unique constraint violation
 		token, _ := randomHex(24)
-		wh = models.WebhookTrigger{UserID: wf.UserID, WorkflowID: workflowID, Token: token}
+		wh = models.WebhookTrigger{UserID: wf.UserID, OrganizationID: wf.OrganizationID,
+			WorkflowID: workflowID, Token: token}
 		if err2 := h.db.DB.Create(&wh).Error; err2 != nil {
 			if err3 := h.db.DB.Where("workflow_id = ?", workflowID).First(&wh).Error; err3 != nil {
 				c.JSON(http.StatusInternalServerError, gin.H{"error": err2.Error()})
@@ -100,10 +101,11 @@ func (h *WorkflowHandler) ReceiveWebhook(c *gin.Context) {
 	}
 
 	run := models.WorkflowRun{
-		UserID:       workflow.UserID,
-		WorkflowID:   wh.WorkflowID,
-		WorkflowName: workflow.Name,
-		Status:       models.RunStatusRunning,
+		UserID:         workflow.UserID,
+		OrganizationID: workflow.OrganizationID,
+		WorkflowID:     wh.WorkflowID,
+		WorkflowName:   workflow.Name,
+		Status:         models.RunStatusRunning,
 	}
 	h.db.DB.Create(&run)
 
@@ -146,7 +148,7 @@ func (h *WorkflowHandler) ReceiveWebhook(c *gin.Context) {
 		var events []executor.ExecutionEvent
 		startTime := time.Now()
 		finalStatus := models.RunStatusCompleted
-		executor.RunWorkflow(executor.WithTrigger(executor.WithWorkflowID(bgCtx, wh.WorkflowID), "webhook"), ast, keys, runID, workflow.UserID, func(event executor.ExecutionEvent) {
+		executor.RunWorkflow(executor.WithTrigger(executor.WithWorkflowID(bgCtx, wh.WorkflowID), "webhook"), ast, keys, runID, workflow.UserID, workflow.OrganizationID, func(event executor.ExecutionEvent) {
 			event.Timestamp = time.Since(startTime).Milliseconds()
 			events = append(events, event)
 			hub.Global.Publish(runID, event)

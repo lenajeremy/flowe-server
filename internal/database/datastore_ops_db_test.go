@@ -36,10 +36,14 @@ func dbForTest(t *testing.T) *gorm.DB {
 func TestDataStoreOpsDB(t *testing.T) {
 	db := dbForTest(t)
 	ops := DataStoreOps{DB: db}
+	// Stores are scoped by org now, so "owner" here is the tenant. The user column
+	// records who created it and no longer takes part in the lookup.
 	owner := uuid.NewString()
+	creator := uuid.NewString()
 
 	newStore := func(name, kind string) string {
-		s := models.DataStore{UserID: owner, Name: name, Kind: kind, Scope: "account"}
+		s := models.DataStore{UserID: creator, OrganizationID: owner,
+			Name: name, Kind: kind, Scope: "account"}
 		if err := db.Create(&s).Error; err != nil {
 			t.Fatalf("create %s store: %v", kind, err)
 		}
@@ -58,7 +62,7 @@ func TestDataStoreOpsDB(t *testing.T) {
 		t.Fatalf("GetStore returned %+v", got)
 	}
 	if s, _ := ops.GetStore(uuid.NewString(), kv); s != nil {
-		t.Fatal("store leaked across owners")
+		t.Fatal("store leaked across organizations")
 	}
 	if n, _ := ops.KVIncrement(kv, "c", 1); n != 1 {
 		t.Fatalf("increment #1 = %v, want 1", n)

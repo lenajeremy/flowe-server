@@ -59,9 +59,10 @@ func (h *WorkflowHandler) SaveWorkflowChat(c *gin.Context) {
 	err := h.db.DB.Where("workflow_id = ?", workflowID).First(&chat).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		chat = models.WorkflowChat{
-			UserID:     wf.UserID,
-			WorkflowID: workflowID,
-			Messages:   raw,
+			UserID:         wf.UserID,
+			OrganizationID: wf.OrganizationID,
+			WorkflowID:     workflowID,
+			Messages:       raw,
 		}
 		h.db.DB.Create(&chat)
 	} else if err == nil {
