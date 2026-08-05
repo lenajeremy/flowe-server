@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -143,8 +144,10 @@ func (h *WorkflowHandler) GetUsage(c *gin.Context) {
 	q := h.db.DB.Model(&models.CreditLedger{}).
 		Where("organization_id = ? AND created_at >= ? AND created_at < ?", orgID, from, to)
 	// kind filters to charges or credits; absent means everything, because a
-	// statement you cannot reconcile is not a statement.
-	switch c.Query("kind") {
+	// statement you cannot reconcile is not a statement. The same value goes to the
+	// summary so the cards above the table describe the rows inside it.
+	kind := c.Query("kind")
+	switch kind {
 	case "spend":
 		q = q.Where("delta < 0")
 	case "grant":
@@ -188,7 +191,7 @@ func (h *WorkflowHandler) GetUsage(c *gin.Context) {
 		rows = append(rows, r)
 	}
 
-	summary, err := h.usageSummary(orgID, from, to, scopeUser, admin)
+	summary, err := h.usageSummary(orgID, from, to, scopeUser, kind, admin)
 	if err != nil {
 		slog.ErrorContext(c.Request.Context(), "usage: summary failed", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not summarise your usage"})
@@ -285,7 +288,12 @@ type usageBreakdown struct {
 // usageSummary aggregates the same window three ways, because "what did this cost"
 // has three different useful answers: by type of work, by which workflow, and by
 // which model.
-func (h *WorkflowHandler) usageSummary(orgID string, from, to time.Time, scopeUser string, admin bool) (gin.H, error) {
+//
+// `kind` is the same filter the ledger list uses. The breakdowns used to ignore it
+// and always describe spend, so selecting "Credits" left a table reading "nothing
+// charged" directly beneath three cards itemising charges — the page contradicted
+// itself and neither half was labelled as to which one the filter had reached.
+func (h *WorkflowHandler) usageSummary(orgID string, from, to time.Time, scopeUser, kind string, admin bool) (gin.H, error) {
 	type agg struct {
 		Key     string
 		Credits int64
@@ -296,18 +304,26 @@ func (h *WorkflowHandler) usageSummary(orgID string, from, to time.Time, scopeUs
 	// columns instead splits NULL from empty string, which shows up as two rows with
 	// the identical label and figures that look like they should have been added
 	// together — and, since they are, a reader has no way to tell which is which.
+	grants := kind == "grant"
 	scan := func(keyExpr string) ([]usageBreakdown, error) {
 		var rows []agg
 		err := h.db.DB.Model(&models.CreditLedger{}).
-			Select(keyExpr+" AS key, -SUM(delta) AS credits, COUNT(*) AS calls, "+
+			// SUM(ABS(delta)) rather than -SUM(delta): the same expression has to
+			// produce a positive figure whether the rows are charges or credits.
+			Select(keyExpr+" AS key, SUM(ABS(delta)) AS credits, COUNT(*) AS calls, "+
 				"COALESCE(SUM(input_tokens + output_tokens + cached_tokens + cache_write_tokens),0) AS tokens").
-			// Restricted to genuine spend reasons so every breakdown sums to the
-			// headline "spent" figure. A correction is a negative delta but is not
-			// consumption, and a summary whose parts do not add up to its own total is
-			// worse than one that leaves a category out — the reader cannot tell which
-			// number to trust. Corrections are still visible as individual rows.
-			Where(`organization_id = ? AND created_at >= ? AND created_at < ?
-				AND delta < 0 AND reason IN ?`, orgID, from, to, spendReasonList()).
+			Where(`organization_id = ? AND created_at >= ? AND created_at < ?`, orgID, from, to).
+			Scopes(func(d *gorm.DB) *gorm.DB {
+				if grants {
+					return d.Where("delta > 0")
+				}
+				// Restricted to genuine spend reasons so every breakdown sums to the
+				// headline "spent" figure. A correction is a negative delta but is not
+				// consumption, and a summary whose parts do not add up to its own total
+				// is worse than one that leaves a category out — the reader cannot tell
+				// which number to trust. Corrections are still visible as rows.
+				return d.Where("delta < 0 AND reason IN ?", spendReasonList())
+			}).
 			Scopes(func(d *gorm.DB) *gorm.DB {
 				if scopeUser == "" {
 					return d
@@ -344,7 +360,14 @@ func (h *WorkflowHandler) usageSummary(orgID string, from, to time.Time, scopeUs
 	if err != nil {
 		return nil, err
 	}
-	byModel, err := scan("COALESCE(NULLIF(model, ''), NULLIF(provider, ''), 'None')")
+	// Only LLM rows have a model. A non-LLM charge stores its NODE TYPE in provider,
+	// so falling back to it listed "emailSend" and "httpRequest" under a heading that
+	// said "By model" — reading as though we bill against models nobody has heard of.
+	// Those steps still have to appear or the card stops summing to the total, so
+	// they group under one bucket that says what they are.
+	byModel, err := scan(fmt.Sprintf(
+		`CASE WHEN reason = '%s' THEN COALESCE(NULLIF(model, ''), NULLIF(provider, ''), 'Unknown model')
+		      ELSE 'Other steps' END`, models.ReasonLLMUsage))
 	if err != nil {
 		return nil, err
 	}
@@ -357,9 +380,19 @@ func (h *WorkflowHandler) usageSummary(orgID string, from, to time.Time, scopeUs
 		spentQ = spentQ.Where("user_id = ?", scopeUser)
 	}
 	spentQ.Select("COALESCE(-SUM(delta),0)").Scan(&spent)
-	h.db.DB.Model(&models.CreditLedger{}).
-		Where("organization_id = ? AND created_at >= ? AND created_at < ? AND delta > 0", orgID, from, to).
-		Select("COALESCE(SUM(delta),0)").Scan(&granted)
+	grantQ := h.db.DB.Model(&models.CreditLedger{}).
+		Where("organization_id = ? AND created_at >= ? AND created_at < ? AND delta > 0", orgID, from, to)
+	if scopeUser != "" {
+		// Scoped like everything else on the page. Grants are org-level and carry no
+		// user, so this is always 0 in a per-person view — which is the honest answer
+		// and the one the ledger below already gives. Left unscoped, a member saw the
+		// organization's entire allowance added up next to their own few hundred
+		// credits of spend, with an empty Credits tab underneath insisting there were
+		// no such rows. The caller decides whether a figure that can only be 0 is
+		// worth a card; it must not be a different scope from its neighbours.
+		grantQ = grantQ.Where("user_id = ?", scopeUser)
+	}
+	grantQ.Select("COALESCE(SUM(delta),0)").Scan(&granted)
 
 	out := gin.H{
 		"spent":       spent,
@@ -380,6 +413,7 @@ func (h *WorkflowHandler) usageSummary(orgID string, from, to time.Time, scopeUs
 		org, _ := h.bill.Org(orgID)
 		names := h.userNames(orgID)
 		people := make([]gin.H, 0, len(perUser))
+		seen := make(map[string]bool, len(perUser))
 		for _, u := range perUser {
 			label := names[u.UserID]
 			if label == "" {
@@ -396,6 +430,34 @@ func (h *WorkflowHandler) usageSummary(orgID string, from, to time.Time, scopeUs
 				if a, err := h.bill.AllocationFor(org, u.UserID); err == nil {
 					row["limit"] = a.Limit
 					row["percent"] = a.UsedPercent()
+					row["remaining"] = a.Remaining()
+					row["custom_limit"] = a.Custom
+				}
+			}
+			people = append(people, row)
+			seen[u.UserID] = true
+		}
+		// Everyone else on the team, at zero. Built only from the ledger, this list
+		// silently omitted anybody who had not spent in the window — so a two-person
+		// team showed one name, and the admin could not select the quiet colleague to
+		// confirm they had spent nothing. "No spend" is an answer; an absent row is
+		// not, and it makes the team look smaller than it is.
+		quiet := make([]string, 0, len(names))
+		for uid := range names {
+			if !seen[uid] {
+				quiet = append(quiet, uid)
+			}
+		}
+		// By name, because Go randomises map iteration and an order that reshuffles on
+		// every poll is its own bug in a list people read down.
+		sort.Slice(quiet, func(i, j int) bool { return names[quiet[i]] < names[quiet[j]] })
+		for _, uid := range quiet {
+			row := gin.H{"user_id": uid, "name": names[uid], "credits": 0, "calls": 0, "tokens": 0}
+			if org != nil {
+				if a, err := h.bill.AllocationFor(org, uid); err == nil {
+					row["limit"] = a.Limit
+					row["percent"] = a.UsedPercent()
+					row["remaining"] = a.Remaining()
 					row["custom_limit"] = a.Custom
 				}
 			}
@@ -453,6 +515,15 @@ func (h *WorkflowHandler) ExportUsage(c *gin.Context) {
 
 	q := h.db.DB.
 		Where("organization_id = ? AND created_at >= ? AND created_at < ?", orgID, from, to)
+	// Honours the charges/credits filter too. The button sits beside that control,
+	// so an export that quietly ignored it handed back a different set of rows from
+	// the one on screen — and nothing in the file said so.
+	switch c.Query("kind") {
+	case "spend":
+		q = q.Where("delta < 0")
+	case "grant":
+		q = q.Where("delta > 0")
+	}
 	if scopeUser != "" {
 		q = q.Where("user_id = ?", scopeUser)
 	}
