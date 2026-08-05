@@ -67,12 +67,23 @@ func InitServer(port int, db *database.DBClient, rdb *redis.Client) {
 		public.POST("/webhooks/:token", wh.ReceiveWebhook)
 
 		public.GET("/integrations/:provider/callback", wh.CallbackIntegration)
+
+		// The pricing page is public, and it renders from the same limits table the
+		// server enforces so it cannot advertise something a handler will refuse.
+		public.GET("/billing/plans", wh.PublicPlans)
+		// Authenticated by Stripe's signature over the raw body, not by a session.
+		public.POST("/billing/stripe/webhook", wh.StripeWebhook)
 	}
 
 	// Everything else requires a session.
 	api := r.Group("/api", auth.RequireAuth(rdb))
 	{
 		api.POST("/run", wh.Run)
+
+		// Billing
+		api.GET("/billing", wh.GetBilling)
+		api.POST("/billing/checkout", wh.StartCheckout)
+		api.POST("/billing/portal", wh.OpenPortal)
 
 		// Workflow persistence
 		api.POST("/workflows", wh.Create)
