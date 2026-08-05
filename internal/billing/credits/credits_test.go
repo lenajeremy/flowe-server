@@ -129,3 +129,63 @@ func TestRunHoldIsAffordableOnItsOwnPlansGrant(t *testing.T) {
 		}
 	}
 }
+
+// TestGrantsKeepCOGSBelowRevenue is the guard on the mistake this file already
+// made once: grants of 500k for Pro and 2M for Team worked out at 172% and 202% of
+// revenue in provider cost, so every paid plan lost money when the customer used
+// what they bought. Nothing in the code says a plan's price, so the check has to
+// state it here.
+func TestGrantsKeepCOGSBelowRevenue(t *testing.T) {
+	// Kept in step with the pricing page's figures by hand; there is no shared
+	// constant because prices live in Stripe, not in the binary.
+	const (
+		proMonthlyUSD  = 29.0
+		teamMonthlyUSD = 99.0
+		// Business is contract-priced; this is the floor we would ever sign at.
+		businessFloorUSD = 500.0
+		// Above this the plan is not viable once Stripe's ~4% and support are
+		// counted. Well clear of a target of about 30%.
+		maxCOGSFraction = 0.45
+	)
+
+	cases := []struct {
+		plan    models.Plan
+		revenue float64
+	}{
+		{models.PlanPro, proMonthlyUSD},
+		{models.PlanTeam, teamMonthlyUSD},
+		{models.PlanBusiness, businessFloorUSD},
+	}
+	for _, tc := range cases {
+		costUSD := float64(PlanGrant(tc.plan)) / CreditsPerDollar
+		fraction := costUSD / tc.revenue
+		if fraction > maxCOGSFraction {
+			t.Fatalf("plan %s: a fully-used allowance costs $%.2f against $%.2f revenue "+
+				"(%.0f%% COGS, limit %.0f%%) — this plan loses money when the customer "+
+				"uses what they paid for", tc.plan, costUSD, tc.revenue,
+				fraction*100, maxCOGSFraction*100)
+		}
+	}
+
+	// The free grant is acquisition cost, so it has no revenue to sit under — but it
+	// must stay small enough that farming our managed provider keys is not worth
+	// the effort.
+	freeCost := float64(GrantFree) / CreditsPerDollar
+	if freeCost > 5.0 {
+		t.Fatalf("the free grant costs $%.2f of provider spend per signup, which is "+
+			"worth farming", freeCost)
+	}
+}
+
+func TestTheCreditPegMatchesTheRates(t *testing.T) {
+	// CreditsPerDollar is derived from InputPer1k, so the two can silently drift
+	// apart when rates are edited. A multiplier-1 model at roughly $1 per million
+	// input tokens means 1k input tokens costs $0.001.
+	const baselineDollarsPer1kInput = 0.001
+	creditsFor1k := ForTokens("claude-haiku", 1000, 0, 0, 0)
+	impliedPerDollar := float64(creditsFor1k) / baselineDollarsPer1kInput
+	if impliedPerDollar != CreditsPerDollar {
+		t.Fatalf("the rates imply %.0f credits per dollar but CreditsPerDollar is %d — "+
+			"every plan's margin calculation is now wrong", impliedPerDollar, CreditsPerDollar)
+	}
+}

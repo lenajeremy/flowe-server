@@ -131,14 +131,41 @@ func ForTokens(model string, inputTokens, outputTokens, cachedTokens, cacheWrite
 	return int64(cost) + 1
 }
 
-// Monthly grant per plan. The free grant is deliberately small: free tier plus our
-// managed provider keys is an invitation to farm our quota, and a grant not worth
-// the effort of farming is cheaper than building signup friction.
+// CreditsPerDollar pegs a credit to real money, which is what makes every number
+// below auditable instead of a vibe.
+//
+// It falls out of the rates above rather than being chosen separately: a
+// haiku-class model (multiplier 1) costs about $1 per million input tokens, so 1k
+// input tokens is $0.001 and is priced at InputPer1k = 10 credits. That fixes one
+// credit at $0.0001 of provider cost.
+//
+// Whenever the rates change, this constant has to be rechecked with it — the
+// grants below are derived from it, and a stale peg turns every plan's margin into
+// a guess.
+const CreditsPerDollar = 10_000
+
+// Monthly grant per plan, sized so provider cost is a KNOWN fraction of revenue.
+//
+// The target is ~30% of revenue at full utilisation, which leaves room for
+// Stripe's ~4% and still holds a defensible gross margin. Most accounts use far
+// less than their allowance, so realised COGS is lower; the point of sizing
+// against full use is that the worst case is bounded rather than unknown.
+//
+// An earlier draft of these numbers was 500k for Pro and 2M for Team, which
+// worked out at 172% and 202% of revenue — every paid plan lost money if the
+// customer actually used what they bought. TestGrantsKeepCOGSBelowRevenue exists
+// so that cannot come back unnoticed.
 const (
-	GrantFree     = 25_000
-	GrantPro      = 500_000
-	GrantTeam     = 2_000_000
-	GrantBusiness = 10_000_000
+	// Free is customer acquisition cost, not cost recovery: $2.50 of provider
+	// spend per signup. Small enough that farming our managed keys is not worth
+	// the effort, which is cheaper than building signup friction.
+	GrantFree = 25_000
+	// $9.00 of provider cost against $29 revenue.
+	GrantPro = 90_000
+	// $30.00 against $99.
+	GrantTeam = 300_000
+	// $150.00, against a contract that starts well above that.
+	GrantBusiness = 1_500_000
 )
 
 // PlanGrant is the credit allowance for one billing period.
