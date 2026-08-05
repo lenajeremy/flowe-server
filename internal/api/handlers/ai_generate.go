@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"workflow-ai/server/internal/auth"
+	"workflow-ai/server/internal/billing"
 	"workflow-ai/server/internal/executor"
 	"workflow-ai/server/internal/telemetry"
 
@@ -920,10 +922,26 @@ func (h *WorkflowHandler) AIGenerate(c *gin.Context) {
 		return
 	}
 
+	// The AI builder spends real tokens before anyone has paid anything, so it is
+	// metered like any other surface. Left free it would be both the largest
+	// zero-revenue cost and an open invitation to farm our provider quota through
+	// the free tier. The free grant is sized to allow genuine evaluation instead.
+	plan, err := h.bill.CheckBalance(currentOrgID(c))
+	if err != nil {
+		if errors.Is(err, billing.ErrOverCap) {
+			c.JSON(http.StatusPaymentRequired, gin.H{"error": err.Error()})
+			return
+		}
+		slog.ErrorContext(c.Request.Context(), "builder balance check failed", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not start"})
+		return
+	}
+
 	// Tag the surface once, here, so every LLM call this request makes — including
 	// the ones inside the tool loop — bills as builder usage rather than "unknown".
-	c.Request = c.Request.WithContext(
-		telemetry.WithSurface(c.Request.Context(), telemetry.SurfaceBuilder))
+	ctx := telemetry.WithSurface(c.Request.Context(), telemetry.SurfaceBuilder)
+	ctx = telemetry.WithBilling(ctx, billing.BillingContextFor(currentOrgID(c), plan))
+	c.Request = c.Request.WithContext(ctx)
 
 	model := resolveChatModel(req.Model)
 	prov := chatProviders[model.Provider]

@@ -525,6 +525,11 @@ func runNodeInner(ctx context.Context, node WorkflowASTNode, outputs map[string]
 		if d.MaxTokens != nil {
 			maxTok = *d.MaxTokens
 		}
+		// A credit hold is only meaningful if a single call has a bounded worst
+		// case, and an unset or arbitrarily large MaxTokens has none. Clamping to
+		// the plan's ceiling is what makes the reservation a real check rather than
+		// a gesture.
+		maxTok = clampMaxTokens(ctx, maxTok)
 		if d.OutputSchema != "" {
 			sys += "\n\nRespond ONLY with valid JSON that matches this schema. No markdown, no explanation, just JSON:\n" + d.OutputSchema
 		}

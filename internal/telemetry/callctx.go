@@ -189,3 +189,46 @@ func SurfaceFrom(ctx context.Context) string {
 	}
 	return surfaceUnknown
 }
+
+// ── Billing identity ─────────────────────────────────────────────
+
+// BillingContext is who pays for the work in this context.
+//
+// It lives in telemetry rather than in the billing package because the packages
+// that need to READ it — the executor, the handlers, the usage sink — all already
+// import telemetry, and a lower-level home avoids an import cycle. Nothing here
+// knows what a credit is.
+type BillingContext struct {
+	// OrgID is the paying tenant. Empty means the work is unattributed, which for
+	// a metered call is a leak: someone is billing us and we are billing nobody.
+	OrgID string
+	// Plan lets the executor enforce a per-call token ceiling without a database
+	// round-trip per node. Stale for the length of one run at worst, which is
+	// acceptable for a ceiling — the balance check is what has to be current.
+	Plan string
+	// HoldID is the run's credit reservation, so each settled spend draws down the
+	// reservation instead of only the balance. Empty outside a workflow run.
+	HoldID string
+	// RunID identifies the run for surfaces that have no CallContext (the agent
+	// loop settles against its own synthetic run).
+	RunID string
+}
+
+type billingKey struct{}
+
+// WithBilling tags a context with the paying org. Called once at each entry
+// point: a run, a builder request, an agent turn.
+func WithBilling(ctx context.Context, b BillingContext) context.Context {
+	return context.WithValue(ctx, billingKey{}, b)
+}
+
+// BillingFrom returns the paying identity, zero-valued when untagged.
+func BillingFrom(ctx context.Context) BillingContext {
+	b, _ := ctx.Value(billingKey{}).(BillingContext)
+	return b
+}
+
+// OrgFrom is the paying org for this context, or "".
+func OrgFrom(ctx context.Context) string {
+	return BillingFrom(ctx).OrgID
+}

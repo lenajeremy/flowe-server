@@ -16,6 +16,7 @@ import (
 	"workflow-ai/server/internal/telemetry"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 )
 
 var schedulerOnce sync.Once
@@ -153,8 +154,24 @@ func (h *WorkflowHandler) runWorkflowByID(workflowID string, nextRun *time.Time)
 	ast := executor.WorkflowAST{Version: "1.0", Name: workflow.Name, Nodes: nodes, Edges: edges}
 	keys := executor.APIKeys{Anthropic: os.Getenv("ANTHROPIC_API_KEY"), OpenAI: os.Getenv("OPENAI_API_KEY"), Brave: os.Getenv("BRAVE_API_KEY"), Jina: os.Getenv("JINA_API_KEY")}
 
-	run := models.WorkflowRun{UserID: workflow.UserID, OrganizationID: workflow.OrganizationID,
+	// A scheduled run is the case the credit cap exists for: it spends money while
+	// nobody is watching. Refusing here — and recording WHY on the run — is what
+	// makes the stop visible instead of looking like the schedule silently died.
+	runIDPre := uuid.New()
+	res, admitErr := h.bill.AdmitRun(workflow.OrganizationID, runIDPre.String())
+	run := models.WorkflowRun{BaseModel: models.BaseModel{ID: runIDPre},
+		UserID: workflow.UserID, OrganizationID: workflow.OrganizationID,
 		WorkflowID: workflowID, WorkflowName: workflow.Name, Status: models.RunStatusRunning}
+	if admitErr != nil {
+		run.Status = models.RunStatusError
+		run.ErrorMessage = admitErr.Error()
+		h.db.DB.Create(&run)
+		slog.WarnContext(ctx, "scheduler: run refused", "workflow_id", workflowID,
+			"reason", admitErr.Error())
+		telemetry.ScheduleFire(ctx, "error")
+		return
+	}
+	defer h.bill.Finish(res)
 	h.db.DB.Create(&run)
 	runID := run.ID.String()
 
@@ -173,7 +190,8 @@ func (h *WorkflowHandler) runWorkflowByID(workflowID string, nextRun *time.Time)
 	finalStatus := models.RunStatusCompleted
 	// The schedule fires with no request context — the loaded workflow's
 	// owner is what routes integration tokens to the right user.
-	executor.RunWorkflow(executor.WithTrigger(executor.WithWorkflowID(ctx, workflowID), "schedule"), ast, keys, runID, workflow.UserID, workflow.OrganizationID, func(ev executor.ExecutionEvent) {
+	runCtx := res.Context(executor.WithWorkflowID(ctx, workflowID), runID)
+	executor.RunWorkflow(executor.WithTrigger(runCtx, "schedule"), ast, keys, runID, workflow.UserID, workflow.OrganizationID, func(ev executor.ExecutionEvent) {
 		ev.Timestamp = time.Since(startTime).Milliseconds()
 		events = append(events, ev)
 		hub.Global.Publish(runID, ev)

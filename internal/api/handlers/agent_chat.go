@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -13,6 +14,7 @@ import (
 
 	"workflow-ai/server/config"
 	"workflow-ai/server/internal/auth"
+	"workflow-ai/server/internal/billing"
 	"workflow-ai/server/internal/database/models"
 	"workflow-ai/server/internal/executor"
 	"workflow-ai/server/internal/telemetry"
@@ -287,8 +289,19 @@ func (h *WorkflowHandler) AgentChatTurn(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
 		return
 	}
-	c.Request = c.Request.WithContext(
-		telemetry.WithSurface(c.Request.Context(), telemetry.SurfaceAgent))
+	plan, err := h.bill.CheckBalance(currentOrgID(c))
+	if err != nil {
+		if errors.Is(err, billing.ErrOverCap) {
+			c.JSON(http.StatusPaymentRequired, gin.H{"error": err.Error()})
+			return
+		}
+		slog.ErrorContext(c.Request.Context(), "agent balance check failed", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not start"})
+		return
+	}
+	ctx := telemetry.WithSurface(c.Request.Context(), telemetry.SurfaceAgent)
+	ctx = telemetry.WithBilling(ctx, billing.BillingContextFor(currentOrgID(c), plan))
+	c.Request = c.Request.WithContext(ctx)
 
 	uid := auth.UserID(c)
 	if !auth.Allow(c.Request.Context(), h.redis, "rl:agent:"+uid, 30, time.Minute) {

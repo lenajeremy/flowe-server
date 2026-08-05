@@ -16,6 +16,7 @@ import (
 	"workflow-ai/server/internal/telemetry"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -100,12 +101,27 @@ func (h *WorkflowHandler) ReceiveWebhook(c *gin.Context) {
 		slog.WarnContext(ctx, "webhook payload invalid", "workflow_id", wh.WorkflowID, "workflow_name", workflow.Name)
 	}
 
+	runIDPre := uuid.New()
+	res, admitErr := h.bill.AdmitRun(workflow.OrganizationID, runIDPre.String())
 	run := models.WorkflowRun{
+		BaseModel:      models.BaseModel{ID: runIDPre},
 		UserID:         workflow.UserID,
 		OrganizationID: workflow.OrganizationID,
 		WorkflowID:     wh.WorkflowID,
 		WorkflowName:   workflow.Name,
 		Status:         models.RunStatusRunning,
+	}
+	if admitErr != nil {
+		// 402 rather than a generic failure: the caller's webhook is fine, the
+		// account is out of credit, and those need different responses at the
+		// sender's end.
+		run.Status = models.RunStatusError
+		run.ErrorMessage = admitErr.Error()
+		h.db.DB.Create(&run)
+		slog.WarnContext(ctx, "webhook run refused", "workflow_id", wh.WorkflowID,
+			"reason", admitErr.Error())
+		c.JSON(http.StatusPaymentRequired, gin.H{"error": admitErr.Error(), "run_id": run.ID.String()})
+		return
 	}
 	h.db.DB.Create(&run)
 
@@ -148,7 +164,9 @@ func (h *WorkflowHandler) ReceiveWebhook(c *gin.Context) {
 		var events []executor.ExecutionEvent
 		startTime := time.Now()
 		finalStatus := models.RunStatusCompleted
-		executor.RunWorkflow(executor.WithTrigger(executor.WithWorkflowID(bgCtx, wh.WorkflowID), "webhook"), ast, keys, runID, workflow.UserID, workflow.OrganizationID, func(event executor.ExecutionEvent) {
+		defer h.bill.Finish(res)
+		runCtx := res.Context(executor.WithWorkflowID(bgCtx, wh.WorkflowID), runID)
+		executor.RunWorkflow(executor.WithTrigger(runCtx, "webhook"), ast, keys, runID, workflow.UserID, workflow.OrganizationID, func(event executor.ExecutionEvent) {
 			event.Timestamp = time.Since(startTime).Milliseconds()
 			events = append(events, event)
 			hub.Global.Publish(runID, event)

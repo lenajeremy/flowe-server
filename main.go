@@ -4,10 +4,13 @@ import (
 	"context"
 	"log"
 	"log/slog"
+	"time"
 
 	"workflow-ai/server/config"
 	"workflow-ai/server/internal/api"
 	"workflow-ai/server/internal/api/handlers"
+	"workflow-ai/server/internal/billing"
+	"workflow-ai/server/internal/billing/credits"
 	"workflow-ai/server/internal/database"
 	"workflow-ai/server/internal/database/models"
 	rdb "workflow-ai/server/internal/database/redis"
@@ -15,6 +18,7 @@ import (
 	"workflow-ai/server/internal/telemetry"
 
 	"github.com/redis/go-redis/extra/redisotel/v9"
+	"gorm.io/gorm"
 	gormtracing "gorm.io/plugin/opentelemetry/tracing"
 )
 
@@ -95,6 +99,31 @@ func main() {
 	// in-memory inside the executor and never reach the DB.
 	executor.DataStores = database.DataStoreOps{DB: dbClient.DB}
 
+	// Metering already records token usage as a metric; installing the gate is what
+	// makes it post to the credit ledger as well. Without this the server still
+	// measures everything and charges for nothing, which is the right behaviour for
+	// a deployment running without billing.
+	billing.New(dbClient.DB).Install()
+	go sweepHolds(dbClient.DB)
+
 	const port = 8080
 	api.InitServer(port, dbClient, redisClient)
+}
+
+// sweepHolds reclaims credit reservations from runs that never finished — a
+// crashed process, or a container killed mid-run. Without it every crash
+// permanently shrinks an org's spendable balance, and the customer's only symptom
+// is being unable to start runs for no visible reason.
+func sweepHolds(db *gorm.DB) {
+	for {
+		time.Sleep(15 * time.Minute)
+		n, err := credits.SweepExpiredHolds(db)
+		if err != nil {
+			slog.Error("billing: hold sweep failed", "error", err)
+			continue
+		}
+		if n > 0 {
+			slog.Info("billing: reclaimed holds from unfinished runs", "count", n)
+		}
+	}
 }

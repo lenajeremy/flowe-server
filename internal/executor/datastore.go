@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+
+	"workflow-ai/server/internal/telemetry"
 )
 
 // DataStore is the executor's view of a persistence container's metadata.
@@ -74,7 +76,7 @@ func newRunScope() *runScope {
 	}
 }
 
-// orgKey carries the tenant that owns a run's data.
+// The tenant that owns a run's data.
 //
 // Datastores are org-scoped while integration credentials stay user-owned, so the
 // executor needs both identities and they are no longer the same value. The org
@@ -83,17 +85,22 @@ func newRunScope() *runScope {
 // ExecuteSingleNode), so a new caller cannot silently omit it. If it is ever
 // missing, the lookup matches no rows rather than the wrong tenant's: a store id
 // is only reachable through its own org.
-type orgKey struct{}
+//
+// Stored in telemetry.BillingContext rather than in a key of our own, because the
+// paying org and the data-owning org are the same org. Two separate context keys
+// could drift apart, and a run billing one tenant while reading another's data is
+// the worst version of that bug.
 
 // WithOrg tags a context with the organization that owns the run.
 func WithOrg(ctx context.Context, orgID string) context.Context {
-	return context.WithValue(ctx, orgKey{}, orgID)
+	b := telemetry.BillingFrom(ctx)
+	b.OrgID = orgID
+	return telemetry.WithBilling(ctx, b)
 }
 
 // OrgFromContext returns the run's owning org, or "" when untagged.
 func OrgFromContext(ctx context.Context) string {
-	s, _ := ctx.Value(orgKey{}).(string)
-	return s
+	return telemetry.OrgFrom(ctx)
 }
 
 type runScopeKey struct{}

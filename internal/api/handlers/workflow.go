@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -9,6 +10,7 @@ import (
 
 	"workflow-ai/server/config"
 	"workflow-ai/server/internal/auth"
+	"workflow-ai/server/internal/billing"
 	"workflow-ai/server/internal/database"
 	"workflow-ai/server/internal/database/models"
 	"workflow-ai/server/internal/executor"
@@ -16,16 +18,21 @@ import (
 	"workflow-ai/server/internal/telemetry"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 )
 
 type WorkflowHandler struct {
 	db    *database.DBClient
 	redis *redis.Client
+	// bill admits runs, checks balances and posts spend. Always non-nil, so no
+	// handler needs a "is billing on?" branch — a deployment without billing is
+	// expressed by generous plan limits, not by a missing gate.
+	bill *billing.Gate
 }
 
 func NewWorkflowHandler(db *database.DBClient, rdb *redis.Client) *WorkflowHandler {
-	return &WorkflowHandler{db: db, redis: rdb}
+	return &WorkflowHandler{db: db, redis: rdb, bill: billing.New(db.DB)}
 }
 
 // ── Run (SSE) ─────────────────────────────────────────────────
@@ -50,8 +57,25 @@ func (h *WorkflowHandler) Run(c *gin.Context) {
 		}
 	}
 
+	// Credit check before anything runs. Stopping partway through would leave a
+	// half-finished workflow that has already sent the email or charged the card,
+	// so the run id is minted here and the budget reserved against it first.
+	runIDPre := uuid.New()
+	res, err := h.bill.AdmitRun(currentOrgID(c), runIDPre.String())
+	if err != nil {
+		if errors.Is(err, billing.ErrOverCap) {
+			c.JSON(http.StatusPaymentRequired, gin.H{"error": err.Error()})
+			return
+		}
+		slog.ErrorContext(c.Request.Context(), "run admission failed", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not start the run"})
+		return
+	}
+	defer h.bill.Finish(res)
+
 	// Persist run record
 	run := &models.WorkflowRun{
+		BaseModel:      models.BaseModel{ID: runIDPre},
 		UserID:         uid,
 		OrganizationID: currentOrgID(c),
 		WorkflowID:     req.WorkflowID,
@@ -112,6 +136,9 @@ func (h *WorkflowHandler) Run(c *gin.Context) {
 	}
 
 	runCtx := executor.WithWorkflowID(c.Request.Context(), req.WorkflowID)
+	// Carries the plan (for the per-call token ceiling) and the hold, so each spend
+	// settles against this run's reservation rather than only the balance.
+	runCtx = res.Context(runCtx, runID)
 	executor.RunWorkflow(executor.WithTrigger(runCtx, "manual"), req.Workflow, keys, runID, uid, currentOrgID(c), emit)
 
 	// Serialize buffered events and update run record

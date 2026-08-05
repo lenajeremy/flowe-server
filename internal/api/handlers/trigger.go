@@ -16,6 +16,7 @@ import (
 	"workflow-ai/server/internal/hub"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -58,12 +59,24 @@ func (h *WorkflowHandler) TriggerWorkflow(c *gin.Context) {
 	c.ShouldBindJSON(&body)
 
 	// Create run record
+	runIDPre := uuid.New()
+	res, admitErr := h.bill.AdmitRun(workflow.OrganizationID, runIDPre.String())
 	run := models.WorkflowRun{
+		BaseModel:      models.BaseModel{ID: runIDPre},
 		UserID:         workflow.UserID,
 		OrganizationID: workflow.OrganizationID,
 		WorkflowID:     workflowID,
 		WorkflowName:   workflow.Name,
 		Status:         models.RunStatusRunning,
+	}
+	if admitErr != nil {
+		run.Status = models.RunStatusError
+		run.ErrorMessage = admitErr.Error()
+		h.db.DB.Create(&run)
+		slog.WarnContext(c.Request.Context(), "api trigger refused",
+			"workflow_id", workflowID, "reason", admitErr.Error())
+		c.JSON(http.StatusPaymentRequired, gin.H{"error": admitErr.Error(), "run_id": run.ID.String()})
+		return
 	}
 	h.db.DB.Create(&run)
 
@@ -94,6 +107,7 @@ func (h *WorkflowHandler) TriggerWorkflow(c *gin.Context) {
 	// Link the detached background run to the API request's trace.
 	bgCtx := trace.ContextWithSpanContext(context.Background(), trace.SpanContextFromContext(c.Request.Context()))
 	go func() {
+		defer h.bill.Finish(res)
 		var events []executor.ExecutionEvent
 		startTime := time.Now()
 
@@ -102,7 +116,8 @@ func (h *WorkflowHandler) TriggerWorkflow(c *gin.Context) {
 
 		go func() {
 			defer close(doneCh)
-			executor.RunWorkflow(executor.WithTrigger(executor.WithWorkflowID(bgCtx, workflowID), "api"), ast, keys, runID, workflow.UserID, workflow.OrganizationID, func(event executor.ExecutionEvent) {
+			runCtx := res.Context(executor.WithWorkflowID(bgCtx, workflowID), runID)
+			executor.RunWorkflow(executor.WithTrigger(runCtx, "api"), ast, keys, runID, workflow.UserID, workflow.OrganizationID, func(event executor.ExecutionEvent) {
 				event.Timestamp = time.Since(startTime).Milliseconds()
 				events = append(events, event)
 				hub.Global.Publish(runID, event)
