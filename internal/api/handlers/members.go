@@ -110,6 +110,16 @@ func (h *WorkflowHandler) ListMembers(c *gin.Context) {
 		return
 	}
 
+	// Over cap happens after a downgrade: switching Team→Pro leaves the people who
+	// were already in the org on a plan that includes one seat. Their access is NOT
+	// revoked — silently cutting off a colleague because the owner changed plan is
+	// worse than a visible warning, and the owner is the only one who can decide who
+	// should stay. So it is surfaced here and left for them to resolve.
+	overCap := 0
+	if lim.MaxMembers != 0 && usage.Committed() > usage.Paid {
+		overCap = usage.Committed() - usage.Paid
+	}
+
 	c.JSON(http.StatusOK, gin.H{
 		"members": members,
 		"invites": invites,
@@ -117,8 +127,10 @@ func (h *WorkflowHandler) ListMembers(c *gin.Context) {
 			"paid":      usage.Paid,
 			"used":      usage.Committed(),
 			"available": usage.Available(),
+			"over_cap":  overCap,
 			"per_seat":  billing.LimitsFor(plan).PerSeat,
 		},
+		"plan_name":  planDisplayName(plan),
 		"plan":       string(plan),
 		"can_manage": tenancy.CanManageMembers(h.db.DB, orgID, me),
 		"can_add":    lim.MaxMembers == 0 || usage.Available() > 0,
