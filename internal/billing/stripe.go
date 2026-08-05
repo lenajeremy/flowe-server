@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
@@ -333,6 +334,9 @@ type subscriptionObject struct {
 	Status            string         `json:"status"`
 	CancelAtPeriodEnd bool           `json:"cancel_at_period_end"`
 	Metadata          map[string]any `json:"metadata"`
+	// Schedule is set when a change has been queued for a later phase — which is how
+	// a downgrade waits for the end of the paid period rather than applying now.
+	Schedule string `json:"schedule"`
 	// CurrentPeriodEnd is read from BOTH here and the item below, because Stripe
 	// moved it. On recent API versions (2025-09 onward) the subscription-level field
 	// is gone and the period lives on each item; on older ones it is here. Reading
@@ -347,7 +351,8 @@ type subscriptionObject struct {
 			// Quantity is the seat count on a per-seat plan. Read from Stripe rather
 			// than counted from org_members, so a team that has not finished inviting
 			// people still gets the allowance it is paying for.
-			Quantity int `json:"quantity"`
+			ID       string `json:"id"`
+			Quantity int    `json:"quantity"`
 			// CurrentPeriodEnd is where recent API versions put the billing period.
 			CurrentPeriodEnd int64 `json:"current_period_end"`
 			Price            struct {
@@ -514,6 +519,18 @@ func (g *Gate) applySubscription(orgID string, sub subscriptionObject, eventID s
 	if end := sub.periodEnd(); end > 0 {
 		updates["current_period_end"] = time.Unix(end, 0)
 	}
+	// A queued change means the customer has asked for something that has not
+	// happened yet. Recorded so the app can say "Team until 5 September, then Pro"
+	// instead of appearing to have ignored the request.
+	pendingPlan, pendingSeats, pendingAt := g.pendingChange(sub)
+	updates["pending_plan"] = string(pendingPlan)
+	updates["pending_seats"] = pendingSeats
+	if pendingAt != nil {
+		updates["pending_plan_at"] = *pendingAt
+	} else {
+		updates["pending_plan_at"] = nil
+	}
+
 	if err := g.db.Model(&models.Organization{}).
 		Where("id = ?", orgID).Updates(updates).Error; err != nil {
 		return err
@@ -523,12 +540,12 @@ func (g *Gate) applySubscription(orgID string, sub subscriptionObject, eventID s
 	// the event id, so the several events that can describe one period (created,
 	// then updated) grant exactly once.
 	if plan != "" && (sub.Status == "active" || sub.Status == "trialing") {
-		// The seat count is part of the reference, so ADDING seats mid-period grants
-		// the difference rather than being swallowed as a duplicate of the original
-		// period's grant. Stripe prorates the charge; the allowance has to follow.
-		ref := fmt.Sprintf("sub:%s:period:%d:seats:%d", sub.ID, sub.periodEnd(), seats)
-		if err := credits.Grant(g.db, orgID, planGrantForSeats(plan, seats),
-			models.ReasonMonthlyGrant, ref); err != nil {
+		// Topped up to the period's TARGET rather than granted afresh. Adding seats
+		// mid-period should reach the new total, not add a second full allowance on
+		// top of the first — see credits.GrantPeriodTo.
+		refPrefix := fmt.Sprintf("sub:%s:period:%d", sub.ID, sub.periodEnd())
+		if err := credits.GrantPeriodTo(g.db, orgID, planGrantForSeats(plan, seats),
+			models.ReasonMonthlyGrant, refPrefix); err != nil {
 			return err
 		}
 	}
@@ -584,9 +601,9 @@ func (g *Gate) onInvoicePaid(ev stripeEvent) error {
 		periodEnd = inv.Lines.Data[0].Period.End
 	}
 	seats := max(org.Seats, 1)
-	ref := fmt.Sprintf("sub:%s:period:%d:seats:%d", inv.Subscription, periodEnd, seats)
-	return credits.Grant(g.db, org.ID.String(), planGrantForSeats(plan, seats),
-		models.ReasonMonthlyGrant, ref)
+	refPrefix := fmt.Sprintf("sub:%s:period:%d", inv.Subscription, periodEnd)
+	return credits.GrantPeriodTo(g.db, org.ID.String(), planGrantForSeats(plan, seats),
+		models.ReasonMonthlyGrant, refPrefix)
 }
 
 // planFromSubscription resolves which plan a subscription represents.
@@ -597,11 +614,8 @@ func (g *Gate) onInvoicePaid(ev stripeEvent) error {
 // without updated metadata.
 func planFromSubscription(sub subscriptionObject) models.Plan {
 	if len(sub.Items.Data) > 0 {
-		priceID := sub.Items.Data[0].Price.ID
-		for plan, env := range priceEnv {
-			if configured := strings.TrimSpace(os.Getenv(env)); configured != "" && configured == priceID {
-				return plan
-			}
+		if plan := planForPrice(sub.Items.Data[0].Price.ID); plan != "" {
+			return plan
 		}
 	}
 	if v, ok := sub.Metadata["plan"].(string); ok {
@@ -616,4 +630,130 @@ func planFromSubscription(sub subscriptionObject) models.Plan {
 // through the limits table so the pricing page and the grant cannot disagree.
 func planGrantForSeats(plan models.Plan, seats int) int64 {
 	return Scale(LimitsFor(plan), seats).MonthlyCredits
+}
+
+// pendingChange reads the next phase of a subscription's schedule, if there is one.
+//
+// Returns the plan and seat count that will take effect, and when. Everything is
+// zero when nothing is queued, which is the normal case.
+//
+// Failures are swallowed deliberately: not knowing about a pending change costs a
+// line of UI copy, whereas failing the whole webhook over it would leave the plan
+// itself unsynced — which is much worse.
+func (g *Gate) pendingChange(sub subscriptionObject) (models.Plan, int, *time.Time) {
+	if sub.Schedule == "" {
+		return "", 0, nil
+	}
+	raw, err := stripeGet(context.Background(), "/v1/subscription_schedules/"+sub.Schedule)
+	if err != nil {
+		slog.Warn("billing: could not read subscription schedule",
+			"error", err, "schedule", sub.Schedule)
+		return "", 0, nil
+	}
+	var sched struct {
+		CurrentPhase *struct {
+			EndDate int64 `json:"end_date"`
+		} `json:"current_phase"`
+		Phases []struct {
+			StartDate int64 `json:"start_date"`
+			Items     []struct {
+				Price    string `json:"price"`
+				Quantity int    `json:"quantity"`
+			} `json:"items"`
+		} `json:"phases"`
+	}
+	if json.Unmarshal(raw, &sched) != nil || sched.CurrentPhase == nil {
+		return "", 0, nil
+	}
+	// The next phase is the one starting when the current one ends. Compared on the
+	// boundary rather than by index, because a schedule can carry finished phases.
+	for _, ph := range sched.Phases {
+		if ph.StartDate != sched.CurrentPhase.EndDate || len(ph.Items) == 0 {
+			continue
+		}
+		plan := planForPrice(ph.Items[0].Price)
+		if plan == "" {
+			return "", 0, nil
+		}
+		at := time.Unix(ph.StartDate, 0)
+		return plan, max(ph.Items[0].Quantity, 1), &at
+	}
+	return "", 0, nil
+}
+
+// planForPrice maps a configured Stripe price back to its plan.
+func planForPrice(priceID string) models.Plan {
+	if priceID == "" {
+		return ""
+	}
+	for plan, env := range priceEnv {
+		if configured := strings.TrimSpace(os.Getenv(env)); configured != "" && configured == priceID {
+			return plan
+		}
+	}
+	return ""
+}
+
+// ── Seats ────────────────────────────────────────────────────────
+
+// ErrSeatsBelowMembers means a seat reduction would leave people in the org with
+// no seat to sit in.
+var ErrSeatsBelowMembers = errors.New("more members than seats")
+
+// SetSeats changes a per-seat subscription's quantity.
+//
+// Direction decides the timing, and the asymmetry is deliberate:
+//
+//   - An INCREASE applies immediately and is prorated. The reason to add a seat is
+//     to invite someone now, so a seat that arrives next month is useless.
+//   - A DECREASE is scheduled for the end of the period already paid for. The
+//     customer bought those seats; taking them away early and refunding the
+//     difference is worse for both sides than simply honouring what they paid for.
+//
+// Refusing a reduction that would leave the org over its cap is the caller's job
+// (see the members check in the handler) — this function is about Stripe.
+func (g *Gate) SetSeats(ctx context.Context, org *models.Organization, seats int) error {
+	if org.StripeSubscriptionID == "" {
+		return fmt.Errorf("this organization has no subscription to change")
+	}
+	if seats < MinSeats {
+		return fmt.Errorf("the smallest team is %d seats", MinSeats)
+	}
+
+	raw, err := stripeGet(ctx, "/v1/subscriptions/"+org.StripeSubscriptionID)
+	if err != nil {
+		return err
+	}
+	var sub subscriptionObject
+	if err := json.Unmarshal(raw, &sub); err != nil {
+		return err
+	}
+	if len(sub.Items.Data) == 0 {
+		return fmt.Errorf("subscription has no items")
+	}
+	current := seatsFromSubscription(sub)
+	if current == seats {
+		return nil
+	}
+
+	form := url.Values{}
+	form.Set("items[0][id]", sub.Items.Data[0].ID)
+	form.Set("items[0][quantity]", strconv.Itoa(seats))
+	if seats > current {
+		// always_invoice bills the prorated difference NOW. create_prorations only
+		// parks it on the next invoice — which meant a customer could take the extra
+		// seats' credit today and not pay for them until the following month.
+		form.Set("proration_behavior", "always_invoice")
+	} else {
+		// Applied at the period boundary, so the seats they paid for stay usable
+		// until then. always_invoice would bill the change now; none would drop the
+		// seats now without crediting — both take value away early.
+		form.Set("proration_behavior", "none")
+		form.Set("billing_cycle_anchor", "unchanged")
+	}
+	if _, err := stripePost(ctx, "/v1/subscriptions/"+org.StripeSubscriptionID, form,
+		fmt.Sprintf("seats:%s:%d", org.StripeSubscriptionID, seats)); err != nil {
+		return err
+	}
+	return nil
 }

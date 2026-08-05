@@ -71,6 +71,7 @@ func (g *Gate) recordUsage(ctx context.Context, provider, model string, u teleme
 
 	spend := credits.Spend{
 		OrgID:            b.OrgID,
+		UserID:           b.UserID,
 		Amount:           cost,
 		Reason:           models.ReasonLLMUsage,
 		RunID:            b.RunID,
@@ -99,6 +100,7 @@ func (g *Gate) recordUsage(ctx context.Context, provider, model string, u teleme
 // Reservation is a run's admitted budget, returned by AdmitRun.
 type Reservation struct {
 	OrgID  string
+	UserID string
 	Plan   models.Plan
 	HoldID string
 }
@@ -113,7 +115,7 @@ const holdTTL = 2 * time.Hour
 // Checked before the run rather than during it on purpose: stopping partway
 // through leaves a half-finished workflow that has already sent the email or
 // charged the card, which is worse than not starting.
-func (g *Gate) AdmitRun(orgID, runID string) (*Reservation, error) {
+func (g *Gate) AdmitRun(orgID, userID, runID string) (*Reservation, error) {
 	if orgID == "" {
 		return nil, fmt.Errorf("cannot admit a run with no organization")
 	}
@@ -122,6 +124,13 @@ func (g *Gate) AdmitRun(orgID, runID string) (*Reservation, error) {
 		return nil, err
 	}
 	plan := EffectivePlan(org)
+
+	// The person whose allowance this run draws on. For a scheduled or webhook run
+	// that is the workflow's owner, who is not present to be told — so the refusal
+	// lands on the run record instead.
+	if err := g.CheckMemberAllowance(org, userID); err != nil {
+		return nil, err
+	}
 
 	hold, err := credits.Reserve(g.db, orgID, runID, credits.HoldForRun(plan), holdTTL)
 	if err != nil {
@@ -132,7 +141,7 @@ func (g *Gate) AdmitRun(orgID, runID string) (*Reservation, error) {
 		}
 		return nil, err
 	}
-	res := &Reservation{OrgID: orgID, Plan: plan}
+	res := &Reservation{OrgID: orgID, UserID: userID, Plan: plan}
 	if hold != nil {
 		res.HoldID = hold.ID.String()
 	}
@@ -147,6 +156,7 @@ func (r *Reservation) Context(ctx context.Context, runID string) context.Context
 	}
 	return telemetry.WithBilling(ctx, telemetry.BillingContext{
 		OrgID:  r.OrgID,
+		UserID: r.UserID,
 		Plan:   string(r.Plan),
 		HoldID: r.HoldID,
 		RunID:  runID,
@@ -175,13 +185,18 @@ func (g *Gate) Finish(res *Reservation) {
 // hold. The check is deliberately "any credit left" rather than an estimate: one
 // turn cannot overshoot far, and refusing on a guess would block work the customer
 // can actually afford.
-func (g *Gate) CheckBalance(orgID string) (models.Plan, error) {
+func (g *Gate) CheckBalance(orgID, userID string) (models.Plan, error) {
 	if orgID == "" {
 		return models.PlanFree, fmt.Errorf("no organization on this request")
 	}
 	org, err := g.org(orgID)
 	if err != nil {
 		return models.PlanFree, err
+	}
+	// Personal share first: its message names a different fix (ask your owner)
+	// from the org running dry (upgrade or wait for renewal).
+	if err := g.CheckMemberAllowance(org, userID); err != nil {
+		return EffectivePlan(org), err
 	}
 	bal, err := credits.Balance(g.db, orgID)
 	if err != nil {
@@ -195,8 +210,8 @@ func (g *Gate) CheckBalance(orgID string) (models.Plan, error) {
 }
 
 // BillingContextFor builds the paying identity for a non-run surface.
-func BillingContextFor(orgID string, plan models.Plan) telemetry.BillingContext {
-	return telemetry.BillingContext{OrgID: orgID, Plan: string(plan)}
+func BillingContextFor(orgID, userID string, plan models.Plan) telemetry.BillingContext {
+	return telemetry.BillingContext{OrgID: orgID, UserID: userID, Plan: string(plan)}
 }
 
 // ── Plan resolution ──────────────────────────────────────────────
@@ -313,6 +328,7 @@ func (g *Gate) recordNodeSpend(ctx context.Context, nodeType, op string) {
 	}
 	spend := credits.Spend{
 		OrgID:    b.OrgID,
+		UserID:   b.UserID,
 		Amount:   amount,
 		Reason:   reason,
 		RunID:    b.RunID,

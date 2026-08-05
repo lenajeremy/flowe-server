@@ -212,6 +212,10 @@ type BillingContext struct {
 	// RunID identifies the run for surfaces that have no CallContext (the agent
 	// loop settles against its own synthetic run).
 	RunID string
+	// UserID is whose personal allowance this spend draws on. For interactive work
+	// it is the signed-in person; for an unattended run it is the workflow's owner,
+	// who is the one that set it running.
+	UserID string
 }
 
 type billingKey struct{}

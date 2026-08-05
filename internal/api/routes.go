@@ -91,6 +91,8 @@ func InitServer(port int, db *database.DBClient, rdb *redis.Client) {
 		api.POST("/org/invites", wh.InviteMember)
 		api.DELETE("/org/invites/:id", wh.RevokeInvite)
 		api.POST("/org/invites/accept", wh.AcceptInvite)
+		api.POST("/org/seats", wh.SetSeats)
+		api.POST("/org/members/:userId/limit", wh.SetMemberLimit)
 
 		// Usage: the itemised ledger, and the CSV someone forwards to whoever asks
 		// about the bill.

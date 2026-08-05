@@ -3,6 +3,7 @@ package credits
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"gorm.io/gorm"
@@ -35,6 +36,8 @@ type Spend struct {
 	Amount int64 // positive; the ledger stores it negated
 	Reason models.LedgerReason
 
+	// UserID is whose allocation this comes out of — see CreditLedger.UserID.
+	UserID       string
 	RunID        string
 	WorkflowID   string
 	WorkflowName string
@@ -146,6 +149,9 @@ func Record(db *gorm.DB, s Spend) error {
 		}
 		if s.WorkflowID != "" {
 			entry.WorkflowID = &s.WorkflowID
+		}
+		if s.UserID != "" {
+			entry.UserID = &s.UserID
 		}
 		if err := tx.Create(&entry).Error; err != nil {
 			return err
@@ -443,4 +449,116 @@ func PeriodStart(bal models.CreditBalance) time.Time {
 	// No grant recorded: report against everything we know about rather than
 	// silently showing zero usage.
 	return time.Time{}
+}
+
+// GrantPeriodTo tops an org up to a TARGET allowance for one billing period,
+// granting only the shortfall.
+//
+// Grant() alone is wrong for anything whose amount can change within a period.
+// Seat counts can: an org that goes from 2 seats to 5 mid-month should end up with
+// 5 seats' worth of allowance for that month, not 2 seats' worth plus 5 seats'
+// worth. Granting the full new figure each time turned every seat change into
+// freshly minted credit — stepping 2→3→4→5 would have produced 1,120,000 credits
+// for a period worth 400,000.
+//
+// refPrefix identifies the period (e.g. "sub:sub_123:period:1788594498"). Every
+// grant for that period carries it, so the total already given can be summed and
+// only the difference issued. Idempotent: re-delivering the same webhook computes
+// a shortfall of zero.
+func GrantPeriodTo(db *gorm.DB, orgID string, target int64, reason models.LedgerReason, refPrefix string) error {
+	if target <= 0 || refPrefix == "" {
+		return nil
+	}
+	return db.Transaction(func(tx *gorm.DB) error {
+		var granted int64
+		if err := tx.Model(&models.CreditLedger{}).
+			Where("organization_id = ? AND delta > 0 AND external_ref LIKE ?", orgID, refPrefix+"%").
+			Select("COALESCE(SUM(delta), 0)").Scan(&granted).Error; err != nil {
+			return err
+		}
+		shortfall := target - granted
+		if shortfall <= 0 {
+			// Already at or above the target. A seat REDUCTION mid-period does not
+			// claw credit back: they paid for those seats and the reduction only takes
+			// effect at the period boundary anyway.
+			return nil
+		}
+
+		bal, err := lockBalance(tx, orgID)
+		if err != nil {
+			return err
+		}
+		// The reference records the running total, so each top-up is distinct while
+		// the prefix still groups the period.
+		ref := fmt.Sprintf("%s:to:%d", refPrefix, target)
+		entry := models.CreditLedger{
+			OrganizationID: orgID,
+			Delta:          shortfall,
+			Reason:         reason,
+			ExternalRef:    &ref,
+		}
+		if err := tx.Create(&entry).Error; err != nil {
+			// A concurrent delivery of the same event already wrote this exact row.
+			if isDuplicateRef(err) {
+				return nil
+			}
+			return err
+		}
+		now := time.Now()
+		updates := map[string]any{
+			"balance":    bal.Balance + shortfall,
+			"updated_at": now,
+		}
+		if reason == models.ReasonMonthlyGrant || reason == models.ReasonSignupGrant {
+			updates["last_grant_at"] = now
+		}
+		return tx.Model(bal).Updates(updates).Error
+	})
+}
+
+// isDuplicateRef recognises a unique-violation on external_ref, which is a
+// concurrent delivery of the same event rather than a failure.
+func isDuplicateRef(err error) bool {
+	return err != nil && strings.Contains(strings.ToLower(err.Error()), "duplicate key")
+}
+
+// SpentByUserSince is one person's consumption within an org since a moment.
+//
+// Grants have no user, so they are excluded by the same reason filter that keeps
+// corrections out of usage figures — a member must not appear to have "spent" the
+// org's monthly allowance.
+func SpentByUserSince(db *gorm.DB, orgID, userID string, since time.Time) (int64, error) {
+	if userID == "" {
+		return 0, nil
+	}
+	var total int64
+	err := db.Model(&models.CreditLedger{}).
+		Where(`organization_id = ? AND user_id = ? AND created_at >= ?
+			AND reason IN ? AND delta < 0`, orgID, userID, since, spendReasons).
+		Select("COALESCE(-SUM(delta), 0)").Scan(&total).Error
+	return total, err
+}
+
+// SpendByUser is the per-person breakdown for a period, for the usage report.
+type SpendByUser struct {
+	UserID  string `json:"user_id"`
+	Credits int64  `json:"credits"`
+	Calls   int64  `json:"calls"`
+	Tokens  int64  `json:"tokens"`
+}
+
+// SpendPerUserSince aggregates an org's consumption by person.
+//
+// Rows with no user are returned under an empty id rather than dropped: spend that
+// cannot be attributed still has to appear somewhere, or the per-person figures
+// silently fail to add up to the org total.
+func SpendPerUserSince(db *gorm.DB, orgID string, since time.Time) ([]SpendByUser, error) {
+	var rows []SpendByUser
+	err := db.Model(&models.CreditLedger{}).
+		Select(`COALESCE(user_id::text, '') AS user_id, -SUM(delta) AS credits, COUNT(*) AS calls,
+			COALESCE(SUM(input_tokens + output_tokens + cached_tokens + cache_write_tokens),0) AS tokens`).
+		Where(`organization_id = ? AND created_at >= ? AND reason IN ? AND delta < 0`,
+			orgID, since, spendReasons).
+		Group("user_id").Order("credits DESC").Scan(&rows).Error
+	return rows, err
 }

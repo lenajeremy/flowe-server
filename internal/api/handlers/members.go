@@ -37,6 +37,17 @@ type memberView struct {
 	Role     string `json:"role"`
 	JoinedAt string `json:"joined_at"`
 	IsYou    bool   `json:"is_you"`
+	// Allocation is this person's credit share and what they have used of it.
+	// Present only for viewers allowed to see it — an admin, or yourself.
+	Allocation *allocationView `json:"allocation,omitempty"`
+}
+
+type allocationView struct {
+	Limit     int64 `json:"limit"`
+	Spent     int64 `json:"spent"`
+	Remaining int64 `json:"remaining"`
+	Percent   int   `json:"percent"`
+	Custom    bool  `json:"custom"`
 }
 
 type inviteView struct {
@@ -79,12 +90,23 @@ func (h *WorkflowHandler) ListMembers(c *gin.Context) {
 		return
 	}
 	me := auth.UserID(c)
+	canManage := tenancy.CanManageMembers(h.db.DB, orgID, me)
 	members := make([]memberView, 0, len(rows))
 	for _, r := range rows {
-		members = append(members, memberView{
+		m := memberView{
 			UserID: r.UserID, Email: r.Email, Name: r.Name, Avatar: r.AvatarURL,
 			Role: r.Role, JoinedAt: r.CreatedAt.Format(time.RFC3339), IsYou: r.UserID == me,
-		})
+		}
+		// Everyone sees their own number; only an admin sees everyone else's.
+		if canManage || m.IsYou {
+			if a, err := h.bill.AllocationFor(org, r.UserID); err == nil && a.Limit > 0 {
+				m.Allocation = &allocationView{
+					Limit: a.Limit, Spent: a.Spent, Remaining: a.Remaining(),
+					Percent: a.UsedPercent(), Custom: a.Custom,
+				}
+			}
+		}
+		members = append(members, m)
 	}
 
 	var pending []models.OrgInvite
@@ -132,7 +154,7 @@ func (h *WorkflowHandler) ListMembers(c *gin.Context) {
 		},
 		"plan_name":  planDisplayName(plan),
 		"plan":       string(plan),
-		"can_manage": tenancy.CanManageMembers(h.db.DB, orgID, me),
+		"can_manage": canManage,
 		"can_add":    lim.MaxMembers == 0 || usage.Available() > 0,
 		"unlimited":  lim.MaxMembers == 0,
 	})
@@ -389,4 +411,145 @@ func seatsInUse(db *gorm.DB, orgID string, paid int) tenancy.SeatUsage {
 		return tenancy.SeatUsage{Paid: paid}
 	}
 	return u
+}
+
+// SetSeats — POST /api/org/seats {"seats":4}
+//
+// Seat count is set explicitly by an admin rather than tracked from membership.
+// Removing someone frees their seat but keeps paying for it until the admin lowers
+// the count, which is deliberate: a seat held open for a replacement hire is a
+// normal thing to want, and silently giving it up on a removal would mean losing it
+// at whatever price applies when they come to re-add it.
+//
+// The ordering is enforced here: a reduction is refused while the org still holds
+// more people than the new count would allow, naming how many have to go. Doing it
+// the other way round — cutting the seats and leaving people stranded — is the
+// state the over-cap warning exists to describe, and it should not be reachable
+// through our own UI.
+func (h *WorkflowHandler) SetSeats(c *gin.Context) {
+	var body struct {
+		Seats int `json:"seats"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
+		return
+	}
+	orgID := currentOrgID(c)
+	if !tenancy.CanManageMembers(h.db.DB, orgID, auth.UserID(c)) {
+		c.JSON(http.StatusForbidden, gin.H{
+			"error": "your plan is managed by your organization's owner — ask them to change it"})
+		return
+	}
+
+	org, err := h.bill.Org(orgID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not load your organization"})
+		return
+	}
+	plan := billing.EffectivePlan(org)
+	if !billing.LimitsFor(plan).PerSeat {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": fmt.Sprintf("the %s plan is not billed per seat", plan)})
+		return
+	}
+	if body.Seats < billing.MinSeats {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": fmt.Sprintf("the smallest team is %d seats", billing.MinSeats)})
+		return
+	}
+
+	// Pending invitations count: each one is holding a seat for someone who has been
+	// promised one, and cutting it out from under them would be worse than refusing.
+	usage, err := tenancy.Seats(h.db.DB, orgID, body.Seats)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not count seats"})
+		return
+	}
+	if body.Seats < usage.Committed() {
+		excess := usage.Committed() - body.Seats
+		noun := "people"
+		if excess == 1 {
+			noun = "person"
+		}
+		c.JSON(http.StatusConflict, gin.H{
+			"error": fmt.Sprintf("you have %d %s in this organization, including pending "+
+				"invitations. Remove %d %s before dropping to %d seats.",
+				usage.Committed(), pluralPeople(usage.Committed()), excess, noun, body.Seats),
+			"committed": usage.Committed(),
+			"requested": body.Seats,
+			"remove":    excess,
+		})
+		return
+	}
+
+	if err := h.bill.SetSeats(c.Request.Context(), org, body.Seats); err != nil {
+		if errors.Is(err, billing.ErrStripeNotConfigured) {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "billing is not available yet"})
+			return
+		}
+		slog.ErrorContext(c.Request.Context(), "seats: update failed", "error", err, "org_id", orgID)
+		c.JSON(http.StatusBadGateway, gin.H{"error": "could not update your seats — nothing was charged"})
+		return
+	}
+
+	slog.InfoContext(c.Request.Context(), "seats changed",
+		"org_id", orgID, "from", org.Seats, "to", body.Seats, "by", auth.UserID(c))
+
+	// Stripe's webhook is what actually updates the stored seat count, and it can
+	// land a moment later. Reporting the requested value with a flag saying it is
+	// settling is more honest than echoing the stale one.
+	c.JSON(http.StatusOK, gin.H{
+		"seats":     body.Seats,
+		"previous":  org.Seats,
+		"increase":  body.Seats > org.Seats,
+		"effective": effectiveWhen(body.Seats > org.Seats, org.CurrentPeriodEnd),
+	})
+}
+
+func pluralPeople(n int) string {
+	if n == 1 {
+		return "person"
+	}
+	return "people"
+}
+
+// effectiveWhen says when a seat change takes hold: an increase now, a reduction at
+// the end of the period the customer already paid for.
+func effectiveWhen(increase bool, periodEnd *time.Time) string {
+	if increase {
+		return "now"
+	}
+	if periodEnd != nil {
+		return periodEnd.Format(time.RFC3339)
+	}
+	return "period_end"
+}
+
+// SetMemberLimit — POST /api/org/members/:userId/limit {"limit":200000}
+//
+// An admin raising or lowering one person's share. Zero restores the equal split,
+// which is why it is not spelled "unlimited": going back to the default should
+// track seat changes automatically rather than freezing at whatever the split
+// happened to be on the day.
+func (h *WorkflowHandler) SetMemberLimit(c *gin.Context) {
+	var body struct {
+		Limit int64 `json:"limit"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
+		return
+	}
+	orgID := currentOrgID(c)
+	if !tenancy.CanManageMembers(h.db.DB, orgID, auth.UserID(c)) {
+		c.JSON(http.StatusForbidden, gin.H{
+			"error": "only owners and admins can change credit limits"})
+		return
+	}
+	if err := h.bill.SetMemberLimit(orgID, c.Param("userId"), body.Limit); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	slog.InfoContext(c.Request.Context(), "member credit limit changed",
+		"org_id", orgID, "member", c.Param("userId"), "limit", body.Limit, "by", auth.UserID(c))
+	c.JSON(http.StatusOK, gin.H{"limit": body.Limit})
 }

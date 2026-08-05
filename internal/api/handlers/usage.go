@@ -10,10 +10,13 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
 
+	"workflow-ai/server/internal/auth"
 	"workflow-ai/server/internal/billing"
 	"workflow-ai/server/internal/billing/credits"
 	"workflow-ai/server/internal/database/models"
+	"workflow-ai/server/internal/tenancy"
 )
 
 // The usage report: every charge, itemised.
@@ -41,6 +44,8 @@ type usageRow struct {
 	// ledger's own sign convention rather than inventing a second one.
 	Credits int64 `json:"credits"`
 
+	UserID       string `json:"user_id,omitempty"`
+	UserName     string `json:"user_name,omitempty"`
 	WorkflowID   string `json:"workflow_id,omitempty"`
 	WorkflowName string `json:"workflow_name,omitempty"`
 	RunID        string `json:"run_id,omitempty"`
@@ -113,8 +118,18 @@ func (h *WorkflowHandler) usagePeriod(orgID, period string) (from, to time.Time,
 
 // GetUsage — GET /api/usage?period=current|previous|all&kind=&limit=&offset=
 func (h *WorkflowHandler) GetUsage(c *gin.Context) {
-	orgID := currentOrgID(c)
+	orgID, me := currentOrgID(c), auth.UserID(c)
 	from, to, periodLabel := h.usagePeriod(orgID, c.Query("period"))
+
+	// Who may see whose spend. An admin sees the whole organization and can filter
+	// to one person; everybody else sees only themselves. Enforced here rather than
+	// by hiding a control, because "what is my colleague spending" is exactly the
+	// question a plain member should not be able to answer.
+	admin := tenancy.CanManageMembers(h.db.DB, orgID, me)
+	scopeUser := me
+	if admin {
+		scopeUser = strings.TrimSpace(c.Query("user_id")) // empty means everyone
+	}
 
 	limit := 100
 	if v, err := strconv.Atoi(c.Query("limit")); err == nil && v > 0 && v <= 500 {
@@ -141,6 +156,12 @@ func (h *WorkflowHandler) GetUsage(c *gin.Context) {
 	if run := strings.TrimSpace(c.Query("run_id")); run != "" {
 		q = q.Where("run_id = ?", run)
 	}
+	if scopeUser != "" {
+		// Grants belong to the org rather than to a person, so a per-person view
+		// shows charges only — otherwise everyone would appear to have been handed
+		// the whole monthly allowance.
+		q = q.Where("user_id = ?", scopeUser)
+	}
 
 	var total int64
 	if err := q.Count(&total).Error; err != nil {
@@ -156,12 +177,18 @@ func (h *WorkflowHandler) GetUsage(c *gin.Context) {
 		return
 	}
 
+	names := h.userNames(orgID)
 	rows := make([]usageRow, 0, len(entries))
 	for _, e := range entries {
-		rows = append(rows, toUsageRow(e))
+		r := toUsageRow(e)
+		if e.UserID != nil {
+			r.UserID = *e.UserID
+			r.UserName = names[r.UserID]
+		}
+		rows = append(rows, r)
 	}
 
-	summary, err := h.usageSummary(orgID, from, to)
+	summary, err := h.usageSummary(orgID, from, to, scopeUser, admin)
 	if err != nil {
 		slog.ErrorContext(c.Request.Context(), "usage: summary failed", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not summarise your usage"})
@@ -169,11 +196,21 @@ func (h *WorkflowHandler) GetUsage(c *gin.Context) {
 	}
 
 	org, _ := h.bill.Org(orgID)
+	alloc, _ := h.bill.AllocationFor(org, me)
 	c.JSON(http.StatusOK, gin.H{
 		"period": gin.H{
 			"label": periodLabel,
 			"from":  timeOrNil(from),
 			"to":    to.Format(time.RFC3339),
+		},
+		"is_admin":     admin,
+		"viewing_user": scopeUser,
+		"my_allocation": gin.H{
+			"limit":     alloc.Limit,
+			"spent":     alloc.Spent,
+			"remaining": alloc.Remaining(),
+			"percent":   alloc.UsedPercent(),
+			"custom":    alloc.Custom,
 		},
 		"included_credits": billing.LimitsForOrg(org).MonthlyCredits,
 		"rows":             rows,
@@ -239,14 +276,18 @@ type usageBreakdown struct {
 // usageSummary aggregates the same window three ways, because "what did this cost"
 // has three different useful answers: by type of work, by which workflow, and by
 // which model.
-func (h *WorkflowHandler) usageSummary(orgID string, from, to time.Time) (gin.H, error) {
+func (h *WorkflowHandler) usageSummary(orgID string, from, to time.Time, scopeUser string, admin bool) (gin.H, error) {
 	type agg struct {
 		Key     string
 		Credits int64
 		Calls   int64
 		Tokens  int64
 	}
-	scan := func(groupBy, keyExpr string) ([]usageBreakdown, error) {
+	// Grouped by the SAME expression that produces the label. Grouping by the raw
+	// columns instead splits NULL from empty string, which shows up as two rows with
+	// the identical label and figures that look like they should have been added
+	// together — and, since they are, a reader has no way to tell which is which.
+	scan := func(keyExpr string) ([]usageBreakdown, error) {
 		var rows []agg
 		err := h.db.DB.Model(&models.CreditLedger{}).
 			Select(keyExpr+" AS key, -SUM(delta) AS credits, COUNT(*) AS calls, "+
@@ -258,7 +299,13 @@ func (h *WorkflowHandler) usageSummary(orgID string, from, to time.Time) (gin.H,
 			// number to trust. Corrections are still visible as individual rows.
 			Where(`organization_id = ? AND created_at >= ? AND created_at < ?
 				AND delta < 0 AND reason IN ?`, orgID, from, to, spendReasonList()).
-			Group(groupBy).Order("credits DESC").Scan(&rows).Error
+			Scopes(func(d *gorm.DB) *gorm.DB {
+				if scopeUser == "" {
+					return d
+				}
+				return d.Where("user_id = ?", scopeUser)
+			}).
+			Group(keyExpr).Order("credits DESC").Scan(&rows).Error
 		if err != nil {
 			return nil, err
 		}
@@ -275,7 +322,7 @@ func (h *WorkflowHandler) usageSummary(orgID string, from, to time.Time) (gin.H,
 		return out, nil
 	}
 
-	byReason, err := scan("reason", "reason")
+	byReason, err := scan("reason")
 	if err != nil {
 		return nil, err
 	}
@@ -284,33 +331,87 @@ func (h *WorkflowHandler) usageSummary(orgID string, from, to time.Time) (gin.H,
 	}
 	// COALESCE so uncredited work groups under one visible bucket instead of
 	// vanishing into a NULL key.
-	byWorkflow, err := scan("workflow_id, workflow_name",
-		"COALESCE(NULLIF(workflow_name, ''), 'Outside a workflow')")
+	byWorkflow, err := scan("COALESCE(NULLIF(workflow_name, ''), 'Outside a workflow')")
 	if err != nil {
 		return nil, err
 	}
-	byModel, err := scan("provider, model",
-		"COALESCE(NULLIF(model, ''), NULLIF(provider, ''), 'None')")
+	byModel, err := scan("COALESCE(NULLIF(model, ''), NULLIF(provider, ''), 'None')")
 	if err != nil {
 		return nil, err
 	}
 
 	var spent, granted int64
-	h.db.DB.Model(&models.CreditLedger{}).
+	spentQ := h.db.DB.Model(&models.CreditLedger{}).
 		Where(`organization_id = ? AND created_at >= ? AND created_at < ? AND delta < 0
-			AND reason IN ?`, orgID, from, to, spendReasonList()).
-		Select("COALESCE(-SUM(delta),0)").Scan(&spent)
+			AND reason IN ?`, orgID, from, to, spendReasonList())
+	if scopeUser != "" {
+		spentQ = spentQ.Where("user_id = ?", scopeUser)
+	}
+	spentQ.Select("COALESCE(-SUM(delta),0)").Scan(&spent)
 	h.db.DB.Model(&models.CreditLedger{}).
 		Where("organization_id = ? AND created_at >= ? AND created_at < ? AND delta > 0", orgID, from, to).
 		Select("COALESCE(SUM(delta),0)").Scan(&granted)
 
-	return gin.H{
+	out := gin.H{
 		"spent":       spent,
 		"granted":     granted,
 		"by_reason":   byReason,
 		"by_workflow": byWorkflow,
 		"by_model":    byModel,
-	}, nil
+	}
+
+	// Who spent what — the whole point of the per-person view, and admin-only. A
+	// plain member can already see their own total; showing them the breakdown by
+	// colleague would be a different thing entirely.
+	if admin {
+		perUser, err := credits.SpendPerUserSince(h.db.DB, orgID, from)
+		if err != nil {
+			return nil, err
+		}
+		org, _ := h.bill.Org(orgID)
+		names := h.userNames(orgID)
+		people := make([]gin.H, 0, len(perUser))
+		for _, u := range perUser {
+			label := names[u.UserID]
+			if label == "" {
+				// Spend that predates per-person attribution, or work by someone who
+				// has since left. Shown rather than dropped so the parts still add up
+				// to the org total.
+				label = "Unattributed"
+			}
+			row := gin.H{
+				"user_id": u.UserID, "name": label,
+				"credits": u.Credits, "calls": u.Calls, "tokens": u.Tokens,
+			}
+			if u.UserID != "" && org != nil {
+				if a, err := h.bill.AllocationFor(org, u.UserID); err == nil {
+					row["limit"] = a.Limit
+					row["percent"] = a.UsedPercent()
+					row["custom_limit"] = a.Custom
+				}
+			}
+			people = append(people, row)
+		}
+		out["by_user"] = people
+	}
+	return out, nil
+}
+
+// userNames maps org member ids to a display name, for labelling usage rows.
+func (h *WorkflowHandler) userNames(orgID string) map[string]string {
+	var rows []struct{ UserID, Name, Email string }
+	h.db.DB.Raw(`
+		SELECT m.user_id, u.name, u.email FROM org_members m
+		JOIN users u ON u.id = m.user_id WHERE m.organization_id = ?`, orgID).Scan(&rows)
+	out := make(map[string]string, len(rows))
+	for _, r := range rows {
+		if r.Name != "" {
+			out[r.UserID] = r.Name
+		} else {
+			out[r.UserID] = r.Email
+		}
+	}
+	return out
 }
 
 // spendReasonList mirrors credits.SpentSince's definition of consumption, so the
@@ -331,12 +432,23 @@ func spendReasonList() []models.LedgerReason {
 // someone forwards to whoever asks about the bill. Columns are stable and the raw
 // ids are included, so a row can be traced back to a specific run.
 func (h *WorkflowHandler) ExportUsage(c *gin.Context) {
-	orgID := currentOrgID(c)
+	orgID, me := currentOrgID(c), auth.UserID(c)
 	from, to, label := h.usagePeriod(orgID, c.Query("period"))
 
+	// Same scoping as the page. An export that ignored it would be the easy way
+	// around a permission the UI enforces.
+	scopeUser := me
+	if tenancy.CanManageMembers(h.db.DB, orgID, me) {
+		scopeUser = strings.TrimSpace(c.Query("user_id"))
+	}
+
+	q := h.db.DB.
+		Where("organization_id = ? AND created_at >= ? AND created_at < ?", orgID, from, to)
+	if scopeUser != "" {
+		q = q.Where("user_id = ?", scopeUser)
+	}
 	var entries []models.CreditLedger
-	if err := h.db.DB.
-		Where("organization_id = ? AND created_at >= ? AND created_at < ?", orgID, from, to).
+	if err := q.
 		Order("created_at DESC").
 		// Bounded: an unbounded export on a busy org would build the whole ledger in
 		// memory. 50k rows is far more than anyone reconciles by hand and still a
@@ -353,8 +465,10 @@ func (h *WorkflowHandler) ExportUsage(c *gin.Context) {
 
 	w := csv.NewWriter(c.Writer)
 	defer w.Flush()
+	names := h.userNames(orgID)
 	_ = w.Write([]string{
 		"timestamp", "type", "description", "credits",
+		"member", "member_id",
 		"workflow", "workflow_id", "run_id", "node", "node_id", "operation",
 		"surface", "provider", "model",
 		"input_tokens", "output_tokens", "cached_tokens", "cache_write_tokens",
@@ -371,11 +485,16 @@ func (h *WorkflowHandler) ExportUsage(c *gin.Context) {
 		if e.Delta > 0 {
 			kind = "credit"
 		}
+		userID := ""
+		if e.UserID != nil {
+			userID = *e.UserID
+		}
 		_ = w.Write([]string{
 			e.CreatedAt.UTC().Format(time.RFC3339),
 			kind,
 			labelFor(e.Reason),
 			strconv.FormatInt(e.Delta, 10),
+			names[userID], userID,
 			e.WorkflowName, wfID, runID, e.NodeLabel, e.NodeID, e.Op,
 			e.Surface, e.Provider, e.Model,
 			itoaZero(e.InputTokens), itoaZero(e.OutputTokens),

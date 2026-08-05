@@ -64,6 +64,17 @@ type Organization struct {
 	// counted from org_members, so a team that has not finished inviting people
 	// still gets the allowance it paid for.
 	Seats int `json:"seats" gorm:"not null;default:1"`
+	// PendingPlan and PendingPlanAt describe a change the customer has already asked
+	// for that has not taken effect yet.
+	//
+	// A downgrade is scheduled for the end of the period they already paid for, so
+	// between the request and that date the org is STILL on its current plan with its
+	// full allowance. Recording the pending state is what lets the app say so —
+	// otherwise the customer clicks "switch to Pro", sees Team everywhere, and
+	// reasonably concludes it did not work.
+	PendingPlan   Plan       `json:"pending_plan,omitempty" gorm:"type:varchar(20)"`
+	PendingSeats  int        `json:"pending_seats,omitempty"`
+	PendingPlanAt *time.Time `json:"pending_plan_at,omitempty"`
 }
 
 // OrgRole is a member's authority within one org. Only Owner is issued today;
@@ -83,4 +94,14 @@ type OrgMember struct {
 	OrganizationID string  `json:"organization_id" gorm:"type:uuid;not null;uniqueIndex:idx_org_member,priority:1"`
 	UserID         string  `json:"user_id"         gorm:"type:uuid;not null;uniqueIndex:idx_org_member,priority:2;index"`
 	Role           OrgRole `json:"role"            gorm:"type:varchar(20);not null;default:'member'"`
+	// CreditLimit caps what this person may spend of the org's allowance in one
+	// period. Zero means "use the equal share" — the org's allowance divided by its
+	// seats — so the common case needs no per-member row maintenance and a seat
+	// change re-splits automatically.
+	//
+	// A cap rather than a sub-balance: the org keeps ONE balance and one ledger, so
+	// the invariant that balance equals sum(delta) still holds and there is nothing
+	// to reconcile between wallets. Spend is checked against the person's total for
+	// the period, which the ledger already records.
+	CreditLimit int64 `json:"credit_limit" gorm:"not null;default:0"`
 }

@@ -460,3 +460,76 @@ func TestUsageIsScopedToThePeriod(t *testing.T) {
 		t.Fatalf("all-time usage = %d, want 7000", all)
 	}
 }
+
+func TestSeatIncreasesTopUpRatherThanMintCredit(t *testing.T) {
+	db := dbForTest(t)
+	org := newOrg(t, db)
+	const perSeat = 80_000
+	ref := "sub:sub_test:period:1788594498"
+
+	// The exact path that minted credit: a period granted at 2 seats, then raised to
+	// 5. Granting afresh each time gave 160,000 + 400,000 for a period worth 400,000,
+	// and stepping 2→3→4→5 would have produced 1,120,000.
+	for _, seats := range []int64{2, 3, 4, 5} {
+		if err := GrantPeriodTo(db, org, perSeat*seats, models.ReasonMonthlyGrant, ref); err != nil {
+			t.Fatalf("grant to %d seats: %v", seats, err)
+		}
+	}
+	bal := mustBalance(t, db, org)
+	if bal.Balance != perSeat*5 {
+		t.Fatalf("balance = %d after stepping 2→3→4→5 seats, want %d (5 seats' worth)",
+			bal.Balance, perSeat*5)
+	}
+	assertDerivable(t, db, org)
+}
+
+func TestReachingTheSameTargetTwiceGrantsNothingExtra(t *testing.T) {
+	db := dbForTest(t)
+	org := newOrg(t, db)
+	ref := "sub:sub_test:period:1788594498"
+	for i := 0; i < 5; i++ {
+		if err := GrantPeriodTo(db, org, 240_000, models.ReasonMonthlyGrant, ref); err != nil {
+			t.Fatalf("delivery %d: %v", i, err)
+		}
+	}
+	// Stripe redelivers webhooks routinely; each redelivery must be a no-op.
+	if bal := mustBalance(t, db, org); bal.Balance != 240_000 {
+		t.Fatalf("balance = %d after 5 deliveries of one period, want 240000", bal.Balance)
+	}
+}
+
+func TestSeatReductionDoesNotClawBackCredit(t *testing.T) {
+	db := dbForTest(t)
+	org := newOrg(t, db)
+	ref := "sub:sub_test:period:1788594498"
+	if err := GrantPeriodTo(db, org, 400_000, models.ReasonMonthlyGrant, ref); err != nil {
+		t.Fatalf("grant: %v", err)
+	}
+	// Dropping to 2 seats. They paid for five and the reduction only takes effect at
+	// the period boundary, so taking the credit back now would be charging them for
+	// something and then removing it.
+	if err := GrantPeriodTo(db, org, 160_000, models.ReasonMonthlyGrant, ref); err != nil {
+		t.Fatalf("reduce: %v", err)
+	}
+	if bal := mustBalance(t, db, org); bal.Balance != 400_000 {
+		t.Fatalf("balance = %d after a mid-period reduction, want 400000 kept", bal.Balance)
+	}
+}
+
+func TestEachPeriodGetsItsOwnAllowance(t *testing.T) {
+	db := dbForTest(t)
+	org := newOrg(t, db)
+	// Consecutive periods must NOT be treated as one target, or the second month
+	// would grant nothing.
+	if err := GrantPeriodTo(db, org, 240_000, models.ReasonMonthlyGrant,
+		"sub:sub_test:period:1788594498"); err != nil {
+		t.Fatalf("period 1: %v", err)
+	}
+	if err := GrantPeriodTo(db, org, 240_000, models.ReasonMonthlyGrant,
+		"sub:sub_test:period:1791186498"); err != nil {
+		t.Fatalf("period 2: %v", err)
+	}
+	if bal := mustBalance(t, db, org); bal.Balance != 480_000 {
+		t.Fatalf("balance = %d after two periods, want 480000", bal.Balance)
+	}
+}

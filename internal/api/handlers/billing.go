@@ -15,6 +15,7 @@ import (
 	"workflow-ai/server/internal/billing"
 	"workflow-ai/server/internal/billing/credits"
 	"workflow-ai/server/internal/database/models"
+	"workflow-ai/server/internal/tenancy"
 )
 
 // Billing endpoints: what plan am I on, take me to checkout, take me to the
@@ -256,6 +257,7 @@ func (h *WorkflowHandler) GetBilling(c *gin.Context) {
 		"status":               org.PlanStatus,
 		"cancel_at_period_end": org.CancelAtPeriodEnd,
 		"personal":             org.Personal,
+		"can_manage_billing":   tenancy.CanManageMembers(h.db.DB, orgID, auth.UserID(c)),
 		"seats":                org.Seats,
 		"seats_used":           seatsInUse(h.db.DB, orgID, org.Seats).Committed(),
 		"per_seat":             billing.LimitsFor(plan).PerSeat,
@@ -281,6 +283,17 @@ func (h *WorkflowHandler) GetBilling(c *gin.Context) {
 	if org.CurrentPeriodEnd != nil {
 		out["current_period_end"] = org.CurrentPeriodEnd
 	}
+	// A change the customer already asked for that has not happened yet. Until it
+	// does they keep the plan and the allowance they paid for, and saying so is the
+	// difference between "scheduled" and "apparently ignored".
+	if org.PendingPlan != "" && org.PendingPlanAt != nil {
+		out["pending"] = gin.H{
+			"plan":      string(org.PendingPlan),
+			"plan_name": planDisplayName(org.PendingPlan),
+			"seats":     org.PendingSeats,
+			"at":        org.PendingPlanAt,
+		}
+	}
 	c.JSON(http.StatusOK, out)
 }
 
@@ -299,8 +312,31 @@ func planDisplayName(p models.Plan) string {
 
 // ── Checkout and portal ──────────────────────────────────────────
 
+// requireBillingAdmin refuses anyone who is not an owner or admin of the org.
+//
+// A member of someone else's team must not be able to start a subscription: the
+// org already has one, managed by whoever runs it, and a second Checkout would
+// create a second subscription billed to a different card for the same
+// organization. Nor should they reach the portal, which exposes the admin's
+// invoices and payment method.
+//
+// Returns false having already written the response.
+func (h *WorkflowHandler) requireBillingAdmin(c *gin.Context) bool {
+	if tenancy.CanManageMembers(h.db.DB, currentOrgID(c), auth.UserID(c)) {
+		return true
+	}
+	c.JSON(http.StatusForbidden, gin.H{
+		"error":   "your plan is managed by your organization's owner — ask them to change it",
+		"managed": true,
+	})
+	return false
+}
+
 // StartCheckout — POST /api/billing/checkout {"plan":"pro"}
 func (h *WorkflowHandler) StartCheckout(c *gin.Context) {
+	if !h.requireBillingAdmin(c) {
+		return
+	}
 	var body struct {
 		Plan  string `json:"plan"`
 		Seats int    `json:"seats"`
@@ -371,6 +407,9 @@ func (h *WorkflowHandler) StartCheckout(c *gin.Context) {
 
 // OpenPortal — POST /api/billing/portal
 func (h *WorkflowHandler) OpenPortal(c *gin.Context) {
+	if !h.requireBillingAdmin(c) {
+		return
+	}
 	org, err := h.bill.Org(currentOrgID(c))
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not load your account"})

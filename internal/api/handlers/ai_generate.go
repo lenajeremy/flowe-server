@@ -926,7 +926,7 @@ func (h *WorkflowHandler) AIGenerate(c *gin.Context) {
 	// metered like any other surface. Left free it would be both the largest
 	// zero-revenue cost and an open invitation to farm our provider quota through
 	// the free tier. The free grant is sized to allow genuine evaluation instead.
-	plan, err := h.bill.CheckBalance(currentOrgID(c))
+	plan, err := h.bill.CheckBalance(currentOrgID(c), auth.UserID(c))
 	if err != nil {
 		if errors.Is(err, billing.ErrOverCap) {
 			c.JSON(http.StatusPaymentRequired, gin.H{"error": err.Error()})
@@ -940,7 +940,7 @@ func (h *WorkflowHandler) AIGenerate(c *gin.Context) {
 	// Tag the surface once, here, so every LLM call this request makes — including
 	// the ones inside the tool loop — bills as builder usage rather than "unknown".
 	ctx := telemetry.WithSurface(c.Request.Context(), telemetry.SurfaceBuilder)
-	ctx = telemetry.WithBilling(ctx, billing.BillingContextFor(currentOrgID(c), plan))
+	ctx = telemetry.WithBilling(ctx, billing.BillingContextFor(currentOrgID(c), auth.UserID(c), plan))
 	c.Request = c.Request.WithContext(ctx)
 
 	model := resolveChatModel(req.Model)

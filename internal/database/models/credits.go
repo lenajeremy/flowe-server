@@ -36,7 +36,7 @@ const (
 // deleted — a correction is a new compensating row, so history stays auditable.
 type CreditLedger struct {
 	BaseModel
-	OrganizationID string `json:"organization_id" gorm:"type:uuid;not null;index:idx_ledger_org_time,priority:1"`
+	OrganizationID string `json:"organization_id" gorm:"type:uuid;not null;index:idx_ledger_org_time,priority:1;index:idx_ledger_org_user,priority:1"`
 	// Delta is signed: positive grants, negative spends. Credits are integers
 	// (millicredits, see credits.PerThousandTokens) so no float ever touches a
 	// balance.
@@ -49,7 +49,16 @@ type CreditLedger struct {
 	// has no run: an empty string is not a valid uuid, so the alternatives are NULL
 	// or giving up type checking on the column. Set it through credits.Record,
 	// which does the conversion in one place.
-	RunID *string `json:"run_id,omitempty"    gorm:"type:uuid;index"`
+	// UserID is whose allocation this spend came out of.
+	//
+	// For interactive work it is the signed-in person. For an unattended run —
+	// scheduled or webhook — it is the workflow's OWNER, because they are who set it
+	// running; attributing it to nobody would make a team's biggest cost invisible in
+	// the per-person view.
+	//
+	// Nullable: grants belong to the org, not to a person.
+	UserID *string `json:"user_id,omitempty"   gorm:"type:uuid;index:idx_ledger_org_user,priority:2"`
+	RunID  *string `json:"run_id,omitempty"    gorm:"type:uuid;index"`
 	// WorkflowID and WorkflowName are DENORMALIZED rather than joined through
 	// run_id. An audit row has to stay readable on its own: run history is pruned
 	// on a per-plan retention window, so a join would silently lose the attribution

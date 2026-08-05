@@ -60,7 +60,7 @@ func (h *WorkflowHandler) TriggerWorkflow(c *gin.Context) {
 
 	// Create run record
 	runIDPre := uuid.New()
-	res, admitErr := h.bill.AdmitRun(workflow.OrganizationID, runIDPre.String())
+	res, admitErr := h.bill.AdmitRun(workflow.OrganizationID, workflow.UserID, runIDPre.String())
 	run := models.WorkflowRun{
 		BaseModel:      models.BaseModel{ID: runIDPre},
 		UserID:         workflow.UserID,

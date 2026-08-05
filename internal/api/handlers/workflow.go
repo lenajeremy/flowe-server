@@ -61,7 +61,7 @@ func (h *WorkflowHandler) Run(c *gin.Context) {
 	// half-finished workflow that has already sent the email or charged the card,
 	// so the run id is minted here and the budget reserved against it first.
 	runIDPre := uuid.New()
-	res, err := h.bill.AdmitRun(currentOrgID(c), runIDPre.String())
+	res, err := h.bill.AdmitRun(currentOrgID(c), uid, runIDPre.String())
 	if err != nil {
 		if errors.Is(err, billing.ErrOverCap) {
 			c.JSON(http.StatusPaymentRequired, gin.H{"error": err.Error()})

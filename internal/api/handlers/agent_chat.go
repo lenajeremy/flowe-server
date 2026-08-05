@@ -289,7 +289,7 @@ func (h *WorkflowHandler) AgentChatTurn(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
 		return
 	}
-	plan, err := h.bill.CheckBalance(currentOrgID(c))
+	plan, err := h.bill.CheckBalance(currentOrgID(c), auth.UserID(c))
 	if err != nil {
 		if errors.Is(err, billing.ErrOverCap) {
 			c.JSON(http.StatusPaymentRequired, gin.H{"error": err.Error()})
@@ -300,7 +300,7 @@ func (h *WorkflowHandler) AgentChatTurn(c *gin.Context) {
 		return
 	}
 	ctx := telemetry.WithSurface(c.Request.Context(), telemetry.SurfaceAgent)
-	ctx = telemetry.WithBilling(ctx, billing.BillingContextFor(currentOrgID(c), plan))
+	ctx = telemetry.WithBilling(ctx, billing.BillingContextFor(currentOrgID(c), auth.UserID(c), plan))
 	c.Request = c.Request.WithContext(ctx)
 
 	uid := auth.UserID(c)

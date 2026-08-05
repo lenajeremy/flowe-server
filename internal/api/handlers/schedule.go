@@ -159,7 +159,7 @@ func (h *WorkflowHandler) runWorkflowByID(workflowID string, nextRun *time.Time)
 	// nobody is watching. Refusing here — and recording WHY on the run — is what
 	// makes the stop visible instead of looking like the schedule silently died.
 	runIDPre := uuid.New()
-	res, admitErr := h.bill.AdmitRun(workflow.OrganizationID, runIDPre.String())
+	res, admitErr := h.bill.AdmitRun(workflow.OrganizationID, workflow.UserID, runIDPre.String())
 	run := models.WorkflowRun{BaseModel: models.BaseModel{ID: runIDPre},
 		UserID: workflow.UserID, OrganizationID: workflow.OrganizationID,
 		WorkflowID: workflowID, WorkflowName: workflow.Name, Status: models.RunStatusRunning}
