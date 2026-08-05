@@ -63,6 +63,7 @@ func (c *DBClient) Setup() error {
 		&models.LoginCode{},
 		&models.Organization{},
 		&models.OrgMember{},
+		&models.OrgInvite{},
 		&models.CreditLedger{},
 		&models.CreditBalance{},
 		&models.CreditHold{},

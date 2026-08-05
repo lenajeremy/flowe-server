@@ -308,9 +308,18 @@ func (h *WorkflowHandler) findOrCreateUserByEmail(email string) (*models.User, e
 // interrupted between the two writes repairs itself instead of staying orphaned.
 func (h *WorkflowHandler) startSession(c *gin.Context, user *models.User) (string, error) {
 	ctx := c.Request.Context()
-	org, err := tenancy.Provision(h.db.DB, user)
-	if err != nil {
+	// Two steps, and both are needed. Provision guarantees the personal org exists
+	// (idempotent, so it also repairs an interrupted signup). OrgForUser then picks
+	// which org this session acts in, which is NOT necessarily that one — a member of
+	// a team acts in the team. Using Provision's return value directly would pin
+	// every session to the personal org and make team membership inert.
+	if _, err := tenancy.Provision(h.db.DB, user); err != nil {
 		slog.ErrorContext(ctx, "auth: provision org failed", "error", err, "user_id", user.ID.String())
+		return "", err
+	}
+	org, err := tenancy.OrgForUser(h.db.DB, user.ID.String())
+	if err != nil {
+		slog.ErrorContext(ctx, "auth: resolve org failed", "error", err, "user_id", user.ID.String())
 		return "", err
 	}
 	token, err := auth.CreateSession(ctx, h.redis, user.ID.String(), org.ID.String())

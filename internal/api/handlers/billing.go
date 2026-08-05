@@ -117,17 +117,17 @@ func planCatalog() []planView {
 			Interval: "month",
 			PerSeat:  true,
 			MinSeats: billing.MinSeats,
-			CTA:      "Contact us",
-			// Not self-serve YET. The seat count is fully wired through checkout,
-			// the webhook and the allowance — but member invites do not exist, so
-			// selling five seats today would sell four nobody can fill. Flipping
-			// this to true is the only change needed once invites ship.
-			SelfServe: false,
+			CTA:      "Upgrade to Team",
+			// Self-serve now that invites exist: a buyer can actually fill the seats
+			// they pay for. Seat count flows through checkout quantity, the webhook,
+			// the allowance and the invite seat cap.
+			SelfServe: true,
 			Features: []string{
 				countPhrase(team.MaxWorkflows, "workflow", "workflows"),
 				schedulePhrase(team),
 				retentionPhrase(team),
 				"Every seat brings its own AI allowance",
+				"Invite teammates by email",
 				"Shared integration connections",
 				"Delegated approvals",
 			},
@@ -251,6 +251,7 @@ func (h *WorkflowHandler) GetBilling(c *gin.Context) {
 		"cancel_at_period_end": org.CancelAtPeriodEnd,
 		"personal":             org.Personal,
 		"seats":                org.Seats,
+		"seats_used":           seatsInUse(h.db.DB, orgID, org.Seats).Committed(),
 		"per_seat":             billing.LimitsFor(plan).PerSeat,
 		"has_billing_account":  org.StripeCustomerID != "",
 		"usage": gin.H{

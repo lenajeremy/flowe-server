@@ -145,6 +145,17 @@ func grantOpening(tx *gorm.DB, orgID string, plan models.Plan) error {
 
 // OrgForUser resolves the org a request acts within.
 //
+// A TEAM org wins over the personal one. Everybody has a personal org by default
+// and nobody chooses it; joining a team is a deliberate act, and it is where the
+// shared workflows, connections and paid seat live. Preferring the personal org —
+// which this did originally — makes accepting an invitation do nothing observable,
+// because there is no org switcher to get out of it. That was caught by joining a
+// team and finding the new member still on the free plan.
+//
+// The real answer eventually is an explicit switcher, at which point this becomes
+// the default rather than the only option. Until then, most recently joined team
+// wins, so someone added to a second team lands in the one they just accepted.
+//
 // Falls back to provisioning rather than failing: a user who predates the tenancy
 // migration, or whose signup was interrupted between the two writes, should get an
 // org on their next request instead of a 500 they cannot clear.
@@ -157,7 +168,7 @@ func OrgForUser(db *gorm.DB, userID string) (*models.Organization, error) {
 		SELECT o.* FROM organizations o
 		JOIN org_members m ON m.organization_id = o.id
 		WHERE m.user_id = ? AND o.deleted_at IS NULL
-		ORDER BY o.personal DESC, o.created_at ASC
+		ORDER BY o.personal ASC, m.created_at DESC
 		LIMIT 1`, userID).Scan(&org).Error
 	if err != nil {
 		return nil, err

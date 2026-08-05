@@ -71,6 +71,10 @@ func InitServer(port int, db *database.DBClient, rdb *redis.Client) {
 		// The pricing page is public, and it renders from the same limits table the
 		// server enforces so it cannot advertise something a handler will refuse.
 		public.GET("/billing/plans", wh.PublicPlans)
+		// The invite landing page must be able to say who invited you and to which
+		// org BEFORE you sign in — otherwise the flow reads as "log in to discover
+		// what this link does". Returns only the org name, role and invited address.
+		public.GET("/org/invites/info", wh.InviteInfo)
 		// Authenticated by Stripe's signature over the raw body, not by a session.
 		public.POST("/billing/stripe/webhook", wh.StripeWebhook)
 	}
@@ -79,6 +83,14 @@ func InitServer(port int, db *database.DBClient, rdb *redis.Client) {
 	api := r.Group("/api", auth.RequireAuth(rdb))
 	{
 		api.POST("/run", wh.Run)
+
+		// Organization members and invitations. Seats are the Team billing unit, so
+		// these are billing endpoints in all but name.
+		api.GET("/org/members", wh.ListMembers)
+		api.DELETE("/org/members/:userId", wh.RemoveMember)
+		api.POST("/org/invites", wh.InviteMember)
+		api.DELETE("/org/invites/:id", wh.RevokeInvite)
+		api.POST("/org/invites/accept", wh.AcceptInvite)
 
 		// Billing
 		api.GET("/billing", wh.GetBilling)
