@@ -219,19 +219,25 @@ func (h *WorkflowHandler) GetBilling(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not load your usage"})
 		return
 	}
-	remaining := credits.Spendable(bal)
-	if remaining < 0 {
-		remaining = 0
+	remaining := max(credits.Spendable(bal), 0)
+
+	// Usage comes from the LEDGER, not from the balance. The balance is cumulative —
+	// it carries unspent credit between periods and includes every grant ever made —
+	// while the allowance is per-period, so "included minus balance" is not usage. It
+	// goes negative the moment any credit carries over, which is how this previously
+	// reported 0% used to an account that had really spent 11,556 credits.
+	used, err := credits.SpentSince(h.db.DB, orgID, credits.PeriodStart(bal))
+	if err != nil {
+		slog.ErrorContext(c.Request.Context(), "billing: usage lookup failed", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not load your usage"})
+		return
 	}
 	var usedPct int
 	if lim.MonthlyCredits > 0 {
-		usedPct = int((lim.MonthlyCredits - remaining) * 100 / lim.MonthlyCredits)
-		if usedPct < 0 {
-			usedPct = 0
-		}
-		if usedPct > 100 {
-			usedPct = 100
-		}
+		usedPct = int(used * 100 / lim.MonthlyCredits)
+		// Capped for the bar only. Going over an allowance is possible when credit
+		// has carried over from a previous period, and that is not an error state.
+		usedPct = min(usedPct, 100)
 	}
 
 	// Counts that back the limit displays, so the UI can show "2 of 3 workflows"
@@ -256,6 +262,7 @@ func (h *WorkflowHandler) GetBilling(c *gin.Context) {
 		"has_billing_account":  org.StripeCustomerID != "",
 		"usage": gin.H{
 			"included_credits":  lim.MonthlyCredits,
+			"used_credits":      used,
 			"remaining_credits": remaining,
 			"used_percent":      usedPct,
 			"workflows":         workflows,

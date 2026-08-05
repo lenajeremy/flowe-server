@@ -366,3 +366,97 @@ func TestReconcileReportsDriftRatherThanHidingIt(t *testing.T) {
 		t.Fatal("reconcile did not notice a balance that disagrees with its ledger")
 	}
 }
+
+func TestUsageComesFromTheLedgerNotTheBalance(t *testing.T) {
+	db := dbForTest(t)
+	org := newOrg(t, db)
+
+	// The exact shape that produced the bug: credit carried over, so the balance
+	// ends up ABOVE one period's allowance even though real spending happened.
+	if err := Grant(db, org, 25_000, models.ReasonSignupGrant, "signup:"+org); err != nil {
+		t.Fatalf("signup grant: %v", err)
+	}
+	if err := Grant(db, org, 90_000, models.ReasonMonthlyGrant, "period1:"+org); err != nil {
+		t.Fatalf("monthly grant: %v", err)
+	}
+	if err := Record(db, Spend{OrgID: org, Amount: 11_556, Reason: models.ReasonLLMUsage,
+		Provider: "openai", Model: "gpt-5.5"}); err != nil {
+		t.Fatalf("spend: %v", err)
+	}
+
+	bal, _ := Balance(db, org)
+	const allowance = 90_000
+	if bal.Balance <= allowance {
+		t.Fatalf("balance %d should exceed one allowance for this test to mean anything", bal.Balance)
+	}
+	// The old formula, kept here to show what it produced.
+	oldFormula := (allowance - Spendable(bal)) * 100 / allowance
+	if oldFormula > 0 {
+		t.Fatalf("expected the balance-based formula to go non-positive, got %d", oldFormula)
+	}
+
+	spent, err := SpentSince(db, org, time.Time{})
+	if err != nil {
+		t.Fatalf("spent: %v", err)
+	}
+	if spent != 11_556 {
+		t.Fatalf("usage = %d, want 11556 — the ledger is the only honest source", spent)
+	}
+}
+
+func TestGrantsAndCorrectionsAreNotCountedAsUsage(t *testing.T) {
+	db := dbForTest(t)
+	org := newOrg(t, db)
+
+	if err := Grant(db, org, 100_000, models.ReasonMonthlyGrant, "g:"+org); err != nil {
+		t.Fatalf("grant: %v", err)
+	}
+	if err := Record(db, Spend{OrgID: org, Amount: 500, Reason: models.ReasonLLMUsage}); err != nil {
+		t.Fatalf("llm: %v", err)
+	}
+	if err := Record(db, Spend{OrgID: org, Amount: 40, Reason: models.ReasonIntegration}); err != nil {
+		t.Fatalf("integration: %v", err)
+	}
+	// A compensating correction is NEGATIVE but is not the customer's consumption.
+	// Counting it would report a fix to our own bug as their usage — which is
+	// exactly what a naive "sum every negative delta" would do.
+	if err := Record(db, Spend{OrgID: org, Amount: 90_000, Reason: models.ReasonAdjustment}); err != nil {
+		t.Fatalf("adjustment: %v", err)
+	}
+
+	spent, err := SpentSince(db, org, time.Time{})
+	if err != nil {
+		t.Fatalf("spent: %v", err)
+	}
+	if spent != 540 {
+		t.Fatalf("usage = %d, want 540 (500 llm + 40 integration, excluding the correction)", spent)
+	}
+}
+
+func TestUsageIsScopedToThePeriod(t *testing.T) {
+	db := dbForTest(t)
+	org := newOrg(t, db)
+	if err := Grant(db, org, 90_000, models.ReasonMonthlyGrant, "g:"+org); err != nil {
+		t.Fatalf("grant: %v", err)
+	}
+	if err := Record(db, Spend{OrgID: org, Amount: 7_000, Reason: models.ReasonLLMUsage}); err != nil {
+		t.Fatalf("spend: %v", err)
+	}
+	// Backdate that spend to before the period started — last month's consumption
+	// must not appear in this month's figure.
+	db.Exec(`UPDATE credit_ledger SET created_at = now() - interval '40 days'
+		WHERE organization_id = ? AND reason = ?`, org, models.ReasonLLMUsage)
+
+	bal, _ := Balance(db, org)
+	spent, err := SpentSince(db, org, PeriodStart(bal))
+	if err != nil {
+		t.Fatalf("spent: %v", err)
+	}
+	if spent != 0 {
+		t.Fatalf("usage = %d, want 0 — spend from a previous period leaked in", spent)
+	}
+	// Whereas an all-time query still sees it.
+	if all, _ := SpentSince(db, org, time.Time{}); all != 7_000 {
+		t.Fatalf("all-time usage = %d, want 7000", all)
+	}
+}

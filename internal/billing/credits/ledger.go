@@ -392,3 +392,47 @@ func Reconcile(db *gorm.DB) ([]Drift, error) {
 		WHERE b.balance <> COALESCE(l.total, 0)`).Scan(&rows).Error
 	return rows, err
 }
+
+// spendReasons are the ledger reasons that represent a customer consuming their
+// allowance. Grants, top-ups, refunds and corrections are all excluded: a
+// compensating adjustment is negative but is not usage, and counting it would
+// report a correction to our own bug as the customer's consumption.
+var spendReasons = []models.LedgerReason{
+	models.ReasonLLMUsage,
+	models.ReasonIntegration,
+	models.ReasonEmail,
+	models.ReasonWebTool,
+}
+
+// SpentSince is what an org has consumed since a moment, from the ledger.
+//
+// This exists because the BALANCE cannot answer "how much of this period have I
+// used". The balance is cumulative — it carries unspent credit across periods and
+// includes every grant ever made — while an allowance is per-period. Subtracting
+// one from the other produces a number that is meaningless and, whenever credit
+// has carried over, negative.
+//
+// That is not hypothetical: it reported 0% used to an account that had genuinely
+// spent 11,556 credits, because its balance still exceeded one period's allowance.
+func SpentSince(db *gorm.DB, orgID string, since time.Time) (int64, error) {
+	var total int64
+	err := db.Model(&models.CreditLedger{}).
+		Where("organization_id = ? AND created_at >= ? AND reason IN ? AND delta < 0",
+			orgID, since, spendReasons).
+		Select("COALESCE(-SUM(delta), 0)").Scan(&total).Error
+	return total, err
+}
+
+// PeriodStart is when the current allowance period began, for usage reporting.
+//
+// LastGrantAt rather than the Stripe period start, because the grant is the event
+// that actually refreshed the allowance — if a webhook was late, the allowance and
+// the reporting window should be late together rather than disagreeing.
+func PeriodStart(bal models.CreditBalance) time.Time {
+	if bal.LastGrantAt != nil {
+		return *bal.LastGrantAt
+	}
+	// No grant recorded: report against everything we know about rather than
+	// silently showing zero usage.
+	return time.Time{}
+}
