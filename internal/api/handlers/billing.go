@@ -28,11 +28,15 @@ import (
 // produces bill anxiety, and on an unattended product that quietly stops people
 // publishing schedules.
 type planView struct {
-	ID       string   `json:"id"`
-	Name     string   `json:"name"`
-	Tagline  string   `json:"tagline"`
-	Price    int      `json:"price_usd"` // 0 for free, -1 for "contact us"
-	Interval string   `json:"interval"`  // "month" | ""
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	Tagline string `json:"tagline"`
+	// Price is 0 for free and -1 for "contact us".
+	Price    int      `json:"price"`
+	Currency string   `json:"currency"`
+	Interval string   `json:"interval"` // "month" | ""
+	PerSeat  bool     `json:"per_seat"`
+	MinSeats int      `json:"min_seats,omitempty"`
 	CTA      string   `json:"cta"`
 	Features []string `json:"features"`
 	// Highlight marks the plan the page leads with.
@@ -41,12 +45,19 @@ type planView struct {
 	SelfServe bool `json:"self_serve"`
 }
 
-// Prices are stated in USD because that is the currency the Stripe prices are
-// created in. What a customer actually sees is converted by Adaptive Pricing at
-// checkout, so this is the reference figure, not necessarily the charged one.
+// Prices are stated in EUR because that is the currency the Stripe prices are
+// created in, and Adaptive Pricing only converts FROM the account's settlement
+// currency — which for this account is the euro. A price in any other currency
+// falls outside the mechanism entirely and every customer would just see euros.
+//
+// What a customer actually pays is converted at checkout, so these are reference
+// figures, not necessarily the charged ones.
 const (
-	priceProUSD  = 29
-	priceTeamUSD = 99
+	planCurrency = "EUR"
+	priceProEUR  = 29
+	// Team is per seat. Seats meter nothing we spend, so the credit allowance
+	// scales with them too — see credits.GrantTeamPerSeat.
+	priceTeamPerSeatEUR = 25
 )
 
 // PublicPlans — GET /api/billing/plans
@@ -69,6 +80,7 @@ func planCatalog() []planView {
 			ID: string(models.PlanFree), Name: "Free",
 			Tagline:   "Build an agent and see it work.",
 			Price:     0,
+			Currency:  planCurrency,
 			CTA:       "Start free",
 			SelfServe: true,
 			Features: []string{
@@ -83,7 +95,8 @@ func planCatalog() []planView {
 		{
 			ID: string(models.PlanPro), Name: "Pro",
 			Tagline:   "Put agents to work on a schedule.",
-			Price:     priceProUSD,
+			Price:     priceProEUR,
+			Currency:  planCurrency,
 			Interval:  "month",
 			CTA:       "Upgrade to Pro",
 			Highlight: true,
@@ -98,16 +111,23 @@ func planCatalog() []planView {
 		},
 		{
 			ID: string(models.PlanTeam), Name: "Team",
-			Tagline:   "Share agents and credentials with your team.",
-			Price:     priceTeamUSD,
-			Interval:  "month",
-			CTA:       "Upgrade to Team",
-			SelfServe: true,
+			Tagline:  "Share agents and credentials with your team.",
+			Price:    priceTeamPerSeatEUR,
+			Currency: planCurrency,
+			Interval: "month",
+			PerSeat:  true,
+			MinSeats: billing.MinSeats,
+			CTA:      "Contact us",
+			// Not self-serve YET. The seat count is fully wired through checkout,
+			// the webhook and the allowance — but member invites do not exist, so
+			// selling five seats today would sell four nobody can fill. Flipping
+			// this to true is the only change needed once invites ship.
+			SelfServe: false,
 			Features: []string{
 				countPhrase(team.MaxWorkflows, "workflow", "workflows"),
 				schedulePhrase(team),
 				retentionPhrase(team),
-				countPhrase(team.MaxMembers, "team member", "team members"),
+				"Every seat brings its own AI allowance",
 				"Shared integration connections",
 				"Delegated approvals",
 			},
@@ -116,6 +136,7 @@ func planCatalog() []planView {
 			ID: string(models.PlanBusiness), Name: "Business",
 			Tagline:   "Controls for agents that touch money.",
 			Price:     -1,
+			Currency:  planCurrency,
 			CTA:       "Contact us",
 			SelfServe: false,
 			Features: []string{
@@ -188,7 +209,9 @@ func (h *WorkflowHandler) GetBilling(c *gin.Context) {
 		return
 	}
 	plan := billing.EffectivePlan(org)
-	lim := billing.LimitsFor(plan)
+	// Scaled by the seats the org pays for — the per-seat base figures would
+	// under-report a team's real allowance.
+	lim := billing.LimitsForOrg(org)
 
 	bal, err := credits.Balance(h.db.DB, orgID)
 	if err != nil {
@@ -227,6 +250,8 @@ func (h *WorkflowHandler) GetBilling(c *gin.Context) {
 		"status":               org.PlanStatus,
 		"cancel_at_period_end": org.CancelAtPeriodEnd,
 		"personal":             org.Personal,
+		"seats":                org.Seats,
+		"per_seat":             billing.LimitsFor(plan).PerSeat,
 		"has_billing_account":  org.StripeCustomerID != "",
 		"usage": gin.H{
 			"included_credits":  lim.MonthlyCredits,
@@ -269,13 +294,25 @@ func planDisplayName(p models.Plan) string {
 // StartCheckout — POST /api/billing/checkout {"plan":"pro"}
 func (h *WorkflowHandler) StartCheckout(c *gin.Context) {
 	var body struct {
-		Plan string `json:"plan"`
+		Plan  string `json:"plan"`
+		Seats int    `json:"seats"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
 		return
 	}
 	plan := models.Plan(strings.ToLower(strings.TrimSpace(body.Plan)))
+
+	// Refuse tiers we do not sell self-serve, before touching Stripe. Team is
+	// per-seat and fully wired, but gated until invites exist — selling seats
+	// nobody can fill is a refund, not revenue.
+	for _, p := range planCatalog() {
+		if p.ID == string(plan) && !p.SelfServe {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error": "this plan is set up with us directly — get in touch and we'll take it from there"})
+			return
+		}
+	}
 
 	org, err := h.bill.Org(currentOrgID(c))
 	if err != nil {
@@ -290,7 +327,7 @@ func (h *WorkflowHandler) StartCheckout(c *gin.Context) {
 	h.db.DB.Where("id = ?", auth.UserID(c)).First(&user)
 
 	base := frontendURL()
-	session, err := h.bill.StartCheckout(c.Request.Context(), org, user.Email, plan,
+	session, err := h.bill.StartCheckout(c.Request.Context(), org, user.Email, plan, body.Seats,
 		base+"/settings/billing?checkout=success",
 		base+"/pricing?checkout=cancelled")
 	if err != nil {

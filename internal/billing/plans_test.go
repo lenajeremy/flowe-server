@@ -21,9 +21,21 @@ func TestUnknownPlanGetsFreeLimits(t *testing.T) {
 func TestLimitsLoosenMonotonicallyUpTheTiers(t *testing.T) {
 	// A tier that is worse than the one below it at anything is a packaging bug
 	// that would show up as a customer downgrading to get a feature back.
+	//
+	// Compared at each tier's SMALLEST SELLABLE size. Team's per-seat figures are
+	// below Pro's on purpose — a one-seat Team is not something we sell, the
+	// two-seat minimum is — so the per-seat base would be comparing a unit price
+	// against a total.
+	seatsFor := func(p models.Plan) int {
+		if LimitsFor(p).PerSeat {
+			return MinSeats
+		}
+		return 1
+	}
 	order := []models.Plan{models.PlanFree, models.PlanPro, models.PlanTeam, models.PlanBusiness}
 	for i := 1; i < len(order); i++ {
-		lo, hi := LimitsFor(order[i-1]), LimitsFor(order[i])
+		lo := Scale(LimitsFor(order[i-1]), seatsFor(order[i-1]))
+		hi := Scale(LimitsFor(order[i]), seatsFor(order[i]))
 
 		if hi.MinScheduleInterval > lo.MinScheduleInterval {
 			t.Fatalf("%s schedules less often than %s", order[i], order[i-1])

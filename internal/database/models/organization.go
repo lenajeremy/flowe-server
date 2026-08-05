@@ -54,6 +54,16 @@ type Organization struct {
 	// BillingCountry is the two-letter country Stripe resolved at Checkout. Kept
 	// for reporting only; the price the customer actually paid comes from Stripe.
 	BillingCountry string `json:"billing_country" gorm:"type:varchar(2)"`
+	// Seats is the subscription quantity, for plans billed per seat. It drives both
+	// the member cap and the credit allowance, which is what keeps revenue coupled
+	// to cost: seats alone meter nothing we actually spend, so an allowance that
+	// did not scale with them would make a small team running many agents our most
+	// expensive customer and our cheapest.
+	//
+	// Always at least 1. Read from the Stripe subscription's quantity rather than
+	// counted from org_members, so a team that has not finished inviting people
+	// still gets the allowance it paid for.
+	Seats int `json:"seats" gorm:"not null;default:1"`
 }
 
 // OrgRole is a member's authority within one org. Only Owner is issued today;

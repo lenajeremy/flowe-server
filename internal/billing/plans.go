@@ -45,8 +45,13 @@ type Limits struct {
 	// MaxMembers caps org membership. One means personal-only.
 	MaxMembers int
 	// MonthlyCredits is the allowance, restated here so one lookup answers
-	// "what does this plan give me".
+	// "what does this plan give me". On a per-seat plan this is the PER-SEAT
+	// figure until Scale is applied.
 	MonthlyCredits int64
+	// PerSeat means this plan is billed by seat, so MaxMembers and MonthlyCredits
+	// are per-seat figures that Scale multiplies out. Without it, a per-seat price
+	// with a flat allowance would decouple revenue from cost entirely.
+	PerSeat bool
 	// MaxTokensPerCall bounds a single LLM call.
 	MaxTokensPerCall int
 	// SharedConnections allows granting an integration credential to the org.
@@ -84,13 +89,15 @@ var planLimits = map[models.Plan]Limits{
 		MonthlyCredits:        credits.GrantPro,
 		MaxTokensPerCall:      credits.MaxTokensCeiling(models.PlanPro),
 	},
+	// Team is per seat. The figures below are PER SEAT and must go through Scale.
 	models.PlanTeam: {
 		MaxWorkflows:          unlimited,
 		MaxPublishedSchedules: 50,
 		MinScheduleInterval:   time.Minute,
 		RunHistoryRetention:   90 * 24 * time.Hour,
-		MaxMembers:            10,
-		MonthlyCredits:        credits.GrantTeam,
+		PerSeat:               true,
+		MaxMembers:            1,
+		MonthlyCredits:        credits.GrantTeamPerSeat,
 		MaxTokensPerCall:      credits.MaxTokensCeiling(models.PlanTeam),
 		SharedConnections:     true,
 	},
@@ -111,11 +118,48 @@ var planLimits = map[models.Plan]Limits{
 // LimitsFor returns a plan's entitlements, defaulting to free for anything
 // unrecognised. An unknown plan string must never unlock more than the cheapest
 // tier.
+//
+// For a per-seat plan the result is PER SEAT. Anything showing a customer their
+// actual entitlement wants LimitsForOrg.
 func LimitsFor(p models.Plan) Limits {
 	if l, ok := planLimits[p]; ok {
 		return l
 	}
 	return planLimits[models.PlanFree]
+}
+
+// MinSeats is the smallest Team subscription we sell.
+//
+// A one-seat "team" is just Pro with extra steps, and pricing it per seat below
+// Pro would make Team the cheaper way to buy a single user — an arbitrage against
+// our own tiers.
+const MinSeats = 2
+
+// Scale multiplies a per-seat plan's entitlements out to a seat count. A flat plan
+// is returned unchanged, so callers never need to ask which kind they have.
+func Scale(l Limits, seats int) Limits {
+	if !l.PerSeat {
+		return l
+	}
+	if seats < 1 {
+		// A subscription whose quantity never arrived still gets one seat rather
+		// than zero entitlement, which would lock out a paying customer.
+		seats = 1
+	}
+	l.MonthlyCredits *= int64(seats)
+	if l.MaxMembers != unlimited {
+		l.MaxMembers *= seats
+	}
+	return l
+}
+
+// LimitsForOrg is what an org is actually entitled to right now: its effective
+// plan, scaled by the seats it pays for.
+func LimitsForOrg(org *models.Organization) Limits {
+	if org == nil {
+		return planLimits[models.PlanFree]
+	}
+	return Scale(LimitsFor(EffectivePlan(org)), org.Seats)
 }
 
 // ── Enforcement ──────────────────────────────────────────────────

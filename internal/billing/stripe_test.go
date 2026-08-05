@@ -188,10 +188,12 @@ func newSub(priceID string, metadata map[string]any) subscriptionObject {
 	sub.Metadata = metadata
 	if priceID != "" || metadata == nil {
 		item := struct {
-			Price struct {
+			Quantity int `json:"quantity"`
+			Price    struct {
 				ID string `json:"id"`
 			} `json:"price"`
 		}{}
+		item.Quantity = 1
 		item.Price.ID = priceID
 		sub.Items.Data = append(sub.Items.Data, item)
 	}

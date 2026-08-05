@@ -108,10 +108,19 @@ func TestUnknownPlansGetTheCheapestEntitlements(t *testing.T) {
 }
 
 func TestPaidPlansGrantMoreThanFree(t *testing.T) {
-	if !(PlanGrant(models.PlanFree) < PlanGrant(models.PlanPro) &&
-		PlanGrant(models.PlanPro) < PlanGrant(models.PlanTeam) &&
-		PlanGrant(models.PlanTeam) < PlanGrant(models.PlanBusiness)) {
-		t.Fatal("grants must increase monotonically with the plan tier")
+	// Compared at each plan's SMALLEST SELLABLE size, not per seat. Team's per-seat
+	// grant is deliberately below Pro's — one seat of Team is not a product, the
+	// two-seat minimum is — so comparing the raw per-seat figure would be comparing
+	// a unit price against a total.
+	const minTeamSeats = 2
+	free := PlanGrantForSeats(models.PlanFree, 1)
+	pro := PlanGrantForSeats(models.PlanPro, 1)
+	team := PlanGrantForSeats(models.PlanTeam, minTeamSeats)
+	business := PlanGrantForSeats(models.PlanBusiness, 1)
+	if !(free < pro && pro < team && team < business) {
+		t.Fatalf("grants must increase with the tier at their smallest sellable size: "+
+			"free=%d pro=%d team(%d seats)=%d business=%d",
+			free, pro, minTeamSeats, team, business)
 	}
 	if !(MaxTokensCeiling(models.PlanFree) < MaxTokensCeiling(models.PlanPro) &&
 		MaxTokensCeiling(models.PlanPro) < MaxTokensCeiling(models.PlanTeam)) {
@@ -135,34 +144,43 @@ func TestRunHoldIsAffordableOnItsOwnPlansGrant(t *testing.T) {
 // revenue in provider cost, so every paid plan lost money when the customer used
 // what they bought. Nothing in the code says a plan's price, so the check has to
 // state it here.
+//
+// Prices are in EUR (the Stripe account settles in euros) while provider costs are
+// in USD, so every case crosses that boundary explicitly through EURUSD rather
+// than pretending the units are the same.
 func TestGrantsKeepCOGSBelowRevenue(t *testing.T) {
-	// Kept in step with the pricing page's figures by hand; there is no shared
-	// constant because prices live in Stripe, not in the binary.
 	const (
-		proMonthlyUSD  = 29.0
-		teamMonthlyUSD = 99.0
-		// Business is contract-priced; this is the floor we would ever sign at.
-		businessFloorUSD = 500.0
+		proMonthlyEUR    = 29.0
+		teamPerSeatEUR   = 25.0
+		businessFloorEUR = 500.0
 		// Above this the plan is not viable once Stripe's ~4% and support are
 		// counted. Well clear of a target of about 30%.
 		maxCOGSFraction = 0.45
 	)
 
 	cases := []struct {
-		plan    models.Plan
-		revenue float64
+		name       string
+		plan       models.Plan
+		seats      int
+		revenueEUR float64
 	}{
-		{models.PlanPro, proMonthlyUSD},
-		{models.PlanTeam, teamMonthlyUSD},
-		{models.PlanBusiness, businessFloorUSD},
+		{"pro", models.PlanPro, 1, proMonthlyEUR},
+		// Per-seat Team has to hold its margin at EVERY size, which is the entire
+		// reason the allowance scales with seats rather than being flat.
+		{"team/2 seats", models.PlanTeam, 2, teamPerSeatEUR * 2},
+		{"team/5 seats", models.PlanTeam, 5, teamPerSeatEUR * 5},
+		{"team/25 seats", models.PlanTeam, 25, teamPerSeatEUR * 25},
+		{"team/200 seats", models.PlanTeam, 200, teamPerSeatEUR * 200},
+		{"business", models.PlanBusiness, 1, businessFloorEUR},
 	}
 	for _, tc := range cases {
-		costUSD := float64(PlanGrant(tc.plan)) / CreditsPerDollar
-		fraction := costUSD / tc.revenue
+		costUSD := float64(PlanGrantForSeats(tc.plan, tc.seats)) / CreditsPerDollar
+		revenueUSD := tc.revenueEUR * EURUSD
+		fraction := costUSD / revenueUSD
 		if fraction > maxCOGSFraction {
-			t.Fatalf("plan %s: a fully-used allowance costs $%.2f against $%.2f revenue "+
+			t.Fatalf("%s: a fully-used allowance costs $%.2f against \u20ac%.2f (~$%.2f) revenue "+
 				"(%.0f%% COGS, limit %.0f%%) — this plan loses money when the customer "+
-				"uses what they paid for", tc.plan, costUSD, tc.revenue,
+				"uses what they paid for", tc.name, costUSD, tc.revenueEUR, revenueUSD,
 				fraction*100, maxCOGSFraction*100)
 		}
 	}
@@ -174,6 +192,35 @@ func TestGrantsKeepCOGSBelowRevenue(t *testing.T) {
 	if freeCost > 5.0 {
 		t.Fatalf("the free grant costs $%.2f of provider spend per signup, which is "+
 			"worth farming", freeCost)
+	}
+}
+
+func TestPerSeatAllowanceScalesLinearly(t *testing.T) {
+	// The property that keeps per-seat pricing honest. If the allowance were flat, a
+	// three-person team running forty schedules would be our most expensive customer
+	// and our cheapest at the same time.
+	one := PlanGrantForSeats(models.PlanTeam, 1)
+	for _, seats := range []int{2, 3, 10, 50} {
+		if got, want := PlanGrantForSeats(models.PlanTeam, seats), one*int64(seats); got != want {
+			t.Fatalf("%d seats granted %d, want %d", seats, got, want)
+		}
+	}
+	// Flat plans must ignore seats entirely — a Pro subscription with a stray
+	// quantity of 5 must not quintuple its allowance.
+	for _, p := range []models.Plan{models.PlanFree, models.PlanPro, models.PlanBusiness} {
+		if PlanGrantForSeats(p, 7) != PlanGrantForSeats(p, 1) {
+			t.Fatalf("plan %s scaled with seats but is not per-seat", p)
+		}
+	}
+}
+
+func TestMissingSeatCountStillGrantsOneSeat(t *testing.T) {
+	// A webhook that arrives without a quantity must not leave a paying customer at
+	// zero allowance.
+	for _, seats := range []int{0, -1} {
+		if got := PlanGrantForSeats(models.PlanTeam, seats); got != GrantTeamPerSeat {
+			t.Fatalf("seats=%d granted %d, want one seat's worth (%d)", seats, got, GrantTeamPerSeat)
+		}
 	}
 }
 

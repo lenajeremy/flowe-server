@@ -157,17 +157,31 @@ type CheckoutSession struct {
 
 // StartCheckout creates a subscription Checkout Session for a plan.
 func (g *Gate) StartCheckout(ctx context.Context, org *models.Organization, email string,
-	plan models.Plan, successURL, cancelURL string) (*CheckoutSession, error) {
+	plan models.Plan, seats int, successURL, cancelURL string) (*CheckoutSession, error) {
 
 	price, err := PriceIDFor(plan)
 	if err != nil {
 		return nil, err
 	}
 
+	// Per-seat plans bill by quantity, with a floor so a "team" of one cannot
+	// undercut Pro.
+	quantity := 1
+	if LimitsFor(plan).PerSeat {
+		quantity = max(seats, MinSeats)
+	}
+
 	form := url.Values{}
 	form.Set("mode", "subscription")
 	form.Set("line_items[0][price]", price)
-	form.Set("line_items[0][quantity]", "1")
+	form.Set("line_items[0][quantity]", strconv.Itoa(quantity))
+	if LimitsFor(plan).PerSeat {
+		// Let the customer change seat count on the Checkout page itself, rather than
+		// forcing them back to pick a number before they have seen the price.
+		form.Set("line_items[0][adjustable_quantity][enabled]", "true")
+		form.Set("line_items[0][adjustable_quantity][minimum]", strconv.Itoa(MinSeats))
+		form.Set("line_items[0][adjustable_quantity][maximum]", "200")
+	}
 	form.Set("success_url", successURL)
 	form.Set("cancel_url", cancelURL)
 	// Let Stripe collect the address it needs to localise and to compute tax.
@@ -195,7 +209,7 @@ func (g *Gate) StartCheckout(ctx context.Context, org *models.Organization, emai
 	// the point, but a key with no time component is worse than none: Stripe keeps a
 	// key for 24 hours and a Checkout Session also expires in 24 hours, so a retry
 	// the next day would get a cached response pointing at a dead URL.
-	idem := fmt.Sprintf("checkout:%s:%s:%d", org.ID.String(), plan, time.Now().Unix()/3600)
+	idem := fmt.Sprintf("checkout:%s:%s:%d:%d", org.ID.String(), plan, quantity, time.Now().Unix()/3600)
 	raw, err := stripePost(ctx, "/v1/checkout/sessions", form, idem)
 	if err != nil {
 		return nil, err
@@ -325,7 +339,11 @@ type subscriptionObject struct {
 	} `json:"presentment_details"`
 	Items struct {
 		Data []struct {
-			Price struct {
+			// Quantity is the seat count on a per-seat plan. Read from Stripe rather
+			// than counted from org_members, so a team that has not finished inviting
+			// people still gets the allowance it is paying for.
+			Quantity int `json:"quantity"`
+			Price    struct {
 				ID string `json:"id"`
 			} `json:"price"`
 		} `json:"data"`
@@ -450,11 +468,13 @@ func (g *Gate) onSubscriptionChanged(ev stripeEvent) error {
 // credits for the new period.
 func (g *Gate) applySubscription(orgID string, sub subscriptionObject, eventID string) error {
 	plan := planFromSubscription(sub)
+	seats := seatsFromSubscription(sub)
 
 	updates := map[string]any{
 		"stripe_subscription_id": sub.ID,
 		"plan_status":            sub.Status,
 		"cancel_at_period_end":   sub.CancelAtPeriodEnd,
+		"seats":                  seats,
 	}
 	if sub.Customer != "" {
 		updates["stripe_customer_id"] = sub.Customer
@@ -474,12 +494,28 @@ func (g *Gate) applySubscription(orgID string, sub subscriptionObject, eventID s
 	// the event id, so the several events that can describe one period (created,
 	// then updated) grant exactly once.
 	if plan != "" && (sub.Status == "active" || sub.Status == "trialing") {
-		ref := fmt.Sprintf("sub:%s:period:%d", sub.ID, sub.CurrentPeriodEnd)
-		if err := credits.Grant(g.db, orgID, planGrant(plan), models.ReasonMonthlyGrant, ref); err != nil {
+		// The seat count is part of the reference, so ADDING seats mid-period grants
+		// the difference rather than being swallowed as a duplicate of the original
+		// period's grant. Stripe prorates the charge; the allowance has to follow.
+		ref := fmt.Sprintf("sub:%s:period:%d:seats:%d", sub.ID, sub.CurrentPeriodEnd, seats)
+		if err := credits.Grant(g.db, orgID, planGrantForSeats(plan, seats),
+			models.ReasonMonthlyGrant, ref); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// seatsFromSubscription reads the billed quantity, defaulting to one.
+//
+// A subscription with no quantity — a flat plan, or a hand-made one — is a single
+// seat rather than zero, because zero would leave a paying customer with no
+// allowance at all.
+func seatsFromSubscription(sub subscriptionObject) int {
+	if len(sub.Items.Data) > 0 && sub.Items.Data[0].Quantity > 0 {
+		return sub.Items.Data[0].Quantity
+	}
+	return 1
 }
 
 // onInvoicePaid grants the next period's credits on renewal.
@@ -518,8 +554,10 @@ func (g *Gate) onInvoicePaid(ev stripeEvent) error {
 	if len(inv.Lines.Data) > 0 {
 		periodEnd = inv.Lines.Data[0].Period.End
 	}
-	ref := fmt.Sprintf("sub:%s:period:%d", inv.Subscription, periodEnd)
-	return credits.Grant(g.db, org.ID.String(), planGrant(plan), models.ReasonMonthlyGrant, ref)
+	seats := max(org.Seats, 1)
+	ref := fmt.Sprintf("sub:%s:period:%d:seats:%d", inv.Subscription, periodEnd, seats)
+	return credits.Grant(g.db, org.ID.String(), planGrantForSeats(plan, seats),
+		models.ReasonMonthlyGrant, ref)
 }
 
 // planFromSubscription resolves which plan a subscription represents.
@@ -545,8 +583,8 @@ func planFromSubscription(sub subscriptionObject) models.Plan {
 	return ""
 }
 
-// planGrant is the credit allowance for a plan, indirected through the limits
-// table so the pricing page and the grant cannot disagree.
-func planGrant(plan models.Plan) int64 {
-	return LimitsFor(plan).MonthlyCredits
+// planGrantForSeats is the credit allowance for a plan at a seat count, indirected
+// through the limits table so the pricing page and the grant cannot disagree.
+func planGrantForSeats(plan models.Plan, seats int) int64 {
+	return Scale(LimitsFor(plan), seats).MonthlyCredits
 }

@@ -157,6 +157,11 @@ func ForTokens(model string, inputTokens, outputTokens, cachedTokens, cacheWrite
 // CreditsPerDollar pegs a credit to real money, which is what makes every number
 // below auditable instead of a vibe.
 //
+// Deliberately in DOLLARS even though plans are priced in euros: provider bills
+// arrive in USD, so cost is a dollar figure and revenue is a euro one. Every
+// margin calculation has to cross that boundary explicitly rather than pretending
+// the two units are interchangeable — see EURUSD.
+//
 // It falls out of the rates above rather than being chosen separately: a
 // haiku-class model (multiplier 1) costs about $1 per million input tokens, so 1k
 // input tokens is $0.001 and is priced at InputPer1k = 10 credits. That fixes one
@@ -166,6 +171,14 @@ func ForTokens(model string, inputTokens, outputTokens, cachedTokens, cacheWrite
 // grants below are derived from it, and a stale peg turns every plan's margin into
 // a guess.
 const CreditsPerDollar = 10_000
+
+// EURUSD converts plan revenue to the currency our costs are in.
+//
+// A deliberately conservative figure: understating what a euro is worth overstates
+// our COGS fraction, so a margin check errs toward flagging a problem that is not
+// there rather than missing one that is. Not fetched live — a pricing decision
+// should not silently change with the exchange rate.
+const EURUSD = 1.05
 
 // Monthly grant per plan, sized so provider cost is a KNOWN fraction of revenue.
 //
@@ -183,26 +196,50 @@ const (
 	// spend per signup. Small enough that farming our managed keys is not worth
 	// the effort, which is cheaper than building signup friction.
 	GrantFree = 25_000
-	// $9.00 of provider cost against $29 revenue.
+	// $9.00 of provider cost against €29 revenue.
 	GrantPro = 90_000
-	// $30.00 against $99.
-	GrantTeam = 300_000
+	// GrantTeamPerSeat is charged PER SEAT, because Team is billed per seat.
+	//
+	// This is the part that keeps the pricing honest. Seats meter nothing we
+	// actually spend — our variable cost is tokens burned by unattended agents,
+	// which tracks scheduled agents rather than headcount. A flat allowance on a
+	// per-seat price would make a three-person team running forty schedules our
+	// most expensive customer AND our cheapest. Scaling the allowance with seats
+	// keeps COGS at roughly the same fraction of revenue at every team size.
+	//
+	// $8.00 of provider cost against €25 of revenue per seat.
+	GrantTeamPerSeat = 80_000
 	// $150.00, against a contract that starts well above that.
 	GrantBusiness = 1_500_000
 )
 
-// PlanGrant is the credit allowance for one billing period.
+// PlanGrant is the credit allowance for one billing period, for a single seat.
+//
+// Callers with a seat count should use PlanGrantForSeats instead; this exists for
+// the paths that only know the plan.
 func PlanGrant(p models.Plan) int64 {
+	return PlanGrantForSeats(p, 1)
+}
+
+// PlanGrantForSeats is the allowance for one billing period at a given seat count.
+//
+// Seats are clamped to at least one: a subscription with a missing or zero
+// quantity must still grant something, or a webhook that arrives without it would
+// silently leave a paying customer at zero.
+func PlanGrantForSeats(p models.Plan, seats int) int64 {
+	if seats < 1 {
+		seats = 1
+	}
 	switch p {
 	case models.PlanPro:
 		return GrantPro
 	case models.PlanTeam:
-		return GrantTeam
+		return GrantTeamPerSeat * int64(seats)
 	case models.PlanBusiness:
 		return GrantBusiness
 	default:
 		// Anything unrecognised is treated as free. An unknown plan string must
-		// never grant more than the cheapest tier.
+		// never grant more than the cheapest tier, and never scales with seats.
 		return GrantFree
 	}
 }
