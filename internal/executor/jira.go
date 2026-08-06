@@ -102,6 +102,10 @@ func atlassianError(product string, status int, raw []byte) error {
 	}
 	if len(parts) > 0 {
 		msg := strings.Join(parts, "; ")
+		if product == "Confluence" && strings.Contains(strings.ToLower(msg), "scope does not match") {
+			return fmt.Errorf("this Confluence connection was authorized with older permissions — " +
+				"disconnect and reconnect to grant the ones this operation needs")
+		}
 		if status == http.StatusForbidden || status == http.StatusUnauthorized {
 			msg += " — the connected account may lack permission, or the connection needs reauthorizing"
 		}

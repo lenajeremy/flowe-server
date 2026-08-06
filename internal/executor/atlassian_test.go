@@ -93,6 +93,17 @@ func TestAtlassianErrorHintsAtPermissionsOn403(t *testing.T) {
 	}
 }
 
+func TestConfluenceScopeMismatchTellsUserToReconnect(t *testing.T) {
+	err := atlassianError("Confluence", http.StatusUnauthorized,
+		[]byte(`{"code":401,"message":"Unauthorized; scope does not match"}`))
+	if strings.Contains(err.Error(), "scope does not match") {
+		t.Errorf("raw Atlassian wording reached the user: %v", err)
+	}
+	if !strings.Contains(err.Error(), "disconnect and reconnect") {
+		t.Errorf("scope mismatch should explain the required recovery: %v", err)
+	}
+}
+
 func TestConfluenceSpaceIDPassesNumericKeysThrough(t *testing.T) {
 	// A numeric input is already a space id, so it must not cost a lookup.
 	id, err := confluenceSpaceID(context.Background(), "tok", "cloud", "98765")
