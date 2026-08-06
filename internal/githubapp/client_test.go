@@ -148,13 +148,13 @@ func TestSuspendedInstallationCannotCoverRepository(t *testing.T) {
 	}
 }
 
-func TestAppRegistrationReportsMissingPermissionsAndEvents(t *testing.T) {
+func TestAppRegistrationUsesTheUserTokenAndReportsMissingPermissionsAndEvents(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/apps/fernary-ai" {
 			t.Fatalf("unexpected app path: %s", r.URL.Path)
 		}
-		if got := r.Header.Get("Authorization"); got != "" {
-			t.Fatalf("public app request sent an empty authorization credential: %q", got)
+		if got := r.Header.Get("Authorization"); got != "Bearer github-user-token" {
+			t.Fatalf("app registration request was not authenticated: %q", got)
 		}
 		writeJSON(t, w, map[string]any{
 			"slug":        "fernary-ai",
@@ -163,7 +163,7 @@ func TestAppRegistrationReportsMissingPermissionsAndEvents(t *testing.T) {
 		})
 	}))
 	t.Cleanup(server.Close)
-	client := NewClient("", server.Client())
+	client := NewClient("github-user-token", server.Client())
 	client.BaseURL = server.URL
 
 	app, err := client.GetAppRegistration(context.Background(), "fernary-ai")

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
@@ -88,17 +89,6 @@ func (h *WorkflowHandler) GitHubIntegrationSetup(c *gin.Context) {
 		Installations:        []githubSetupInstallation{},
 		Repositories:         []githubSetupRepository{},
 	}
-	if configured {
-		app, appErr := githubapp.NewClient("", &http.Client{Timeout: 15 * time.Second}).
-			GetAppRegistration(c.Request.Context(), response.AppSlug)
-		if appErr != nil {
-			response.WebhookEventsError = "GitHub App Permissions & events settings could not be verified"
-		} else {
-			response.WebhookEventsMissing = app.MissingWebhookRequirements()
-			response.WebhookEventsConfigured = len(response.WebhookEventsMissing) == 0
-		}
-	}
-
 	var connection models.IntegrationConnection
 	err := h.db.DB.Where("organization_id = ? AND user_id = ? AND provider = ?",
 		currentOrgID(c), currentUserID(c), "github").First(&connection).Error
@@ -120,6 +110,22 @@ func (h *WorkflowHandler) GitHubIntegrationSetup(c *gin.Context) {
 	}
 
 	client := githubapp.NewClient(token, &http.Client{Timeout: 30 * time.Second})
+	// Authenticate this lookup with the GitHub App user token we already have.
+	// The endpoint is public, but anonymous requests share GitHub's much smaller
+	// IP-based rate limit. Treating a 403 from that limit as "events missing"
+	// made a correctly configured App look broken in production.
+	if configured {
+		app, appErr := client.GetAppRegistration(c.Request.Context(), response.AppSlug)
+		if appErr != nil {
+			slog.WarnContext(c.Request.Context(), "could not verify GitHub App event subscriptions",
+				"app_slug", response.AppSlug, "error", appErr)
+			response.WebhookEventsError = "Fernary could not verify the GitHub App’s event subscriptions. Retry in a moment."
+		} else {
+			response.WebhookEventsMissing = app.MissingWebhookRequirements()
+			response.WebhookEventsConfigured = len(response.WebhookEventsMissing) == 0
+		}
+	}
+
 	installations, err := client.ListInstallations(c.Request.Context())
 	if err != nil {
 		var apiErr *githubapp.APIError
