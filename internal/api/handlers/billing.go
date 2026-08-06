@@ -79,7 +79,7 @@ func planCatalog() []planView {
 	return []planView{
 		{
 			ID: string(models.PlanFree), Name: "Free",
-			Tagline:   "Build an agent and see it work.",
+			Tagline:   "Build one and watch it run.",
 			Price:     0,
 			Currency:  planCurrency,
 			CTA:       "Start free",
@@ -95,7 +95,7 @@ func planCatalog() []planView {
 		},
 		{
 			ID: string(models.PlanPro), Name: "Pro",
-			Tagline:   "Put agents to work on a schedule.",
+			Tagline:   "Put it to work while you sleep.",
 			Price:     priceProEUR,
 			Currency:  planCurrency,
 			Interval:  "month",
@@ -112,7 +112,7 @@ func planCatalog() []planView {
 		},
 		{
 			ID: string(models.PlanTeam), Name: "Team",
-			Tagline:  "Share agents and credentials with your team.",
+			Tagline:  "Your whole team, the same agents.",
 			Price:    priceTeamPerSeatEUR,
 			Currency: planCurrency,
 			Interval: "month",
@@ -135,7 +135,7 @@ func planCatalog() []planView {
 		},
 		{
 			ID: string(models.PlanBusiness), Name: "Business",
-			Tagline:   "Controls for agents that touch money.",
+			Tagline:   "For agents that touch money.",
 			Price:     -1,
 			Currency:  planCurrency,
 			CTA:       "Contact us",
