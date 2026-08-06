@@ -50,16 +50,77 @@ type Account struct {
 }
 
 type Installation struct {
-	ID                  int64      `json:"id"`
-	Account             Account    `json:"account"`
-	RepositorySelection string     `json:"repository_selection"`
-	SuspendedAt         *time.Time `json:"suspended_at"`
+	ID                  int64             `json:"id"`
+	Account             Account           `json:"account"`
+	HTMLURL             string            `json:"html_url"`
+	RepositorySelection string            `json:"repository_selection"`
+	Permissions         map[string]string `json:"permissions"`
+	Events              []string          `json:"events"`
+	SuspendedAt         *time.Time        `json:"suspended_at"`
+}
+
+func (i Installation) MissingWebhookRequirements() []string {
+	return missingWebhookRequirements(i.Permissions, i.Events)
 }
 
 type Repository struct {
 	ID       int64  `json:"id"`
 	FullName string `json:"full_name"`
 	Private  bool   `json:"private"`
+}
+
+// AppRegistration is the public portion of a GitHub App registration that
+// determines which webhook deliveries GitHub will send. A configured webhook
+// URL and secret are insufficient when the App subscribes to no events.
+type AppRegistration struct {
+	Slug        string            `json:"slug"`
+	Permissions map[string]string `json:"permissions"`
+	Events      []string          `json:"events"`
+}
+
+// MissingWebhookRequirements reports the GitHub App settings required by the
+// trigger catalog implemented by Fernary. Write permission also satisfies a
+// read requirement, though the App should use read-only permissions in normal
+// operation.
+func (a AppRegistration) MissingWebhookRequirements() []string {
+	return missingWebhookRequirements(a.Permissions, a.Events)
+}
+
+func missingWebhookRequirements(permissions map[string]string, events []string) []string {
+	missing := make([]string, 0)
+	for _, requirement := range []struct {
+		key   string
+		label string
+	}{
+		{key: "contents", label: "Contents permission (read-only)"},
+		{key: "issues", label: "Issues permission (read-only)"},
+		{key: "pull_requests", label: "Pull requests permission (read-only)"},
+	} {
+		level := strings.ToLower(strings.TrimSpace(permissions[requirement.key]))
+		if level != "read" && level != "write" && level != "admin" {
+			missing = append(missing, requirement.label)
+		}
+	}
+
+	subscribed := make(map[string]bool, len(events))
+	for _, event := range events {
+		subscribed[strings.ToLower(strings.TrimSpace(event))] = true
+	}
+	for _, requirement := range []struct {
+		key   string
+		label string
+	}{
+		{key: "issues", label: "Issues event"},
+		{key: "issue_comment", label: "Issue comment event"},
+		{key: "pull_request", label: "Pull request event"},
+		{key: "push", label: "Push event"},
+		{key: "release", label: "Release event"},
+	} {
+		if !subscribed[requirement.key] {
+			missing = append(missing, requirement.label)
+		}
+	}
+	return missing
 }
 
 // APIError preserves the status because a 403 from /user/installations has a
@@ -114,6 +175,21 @@ func (c *Client) ListInstallationRepositories(ctx context.Context, installationI
 	}
 }
 
+// GetAppRegistration reads the App's public permissions and event
+// subscriptions. GitHub exposes this endpoint without App-owner credentials,
+// which lets Fernary fail closed instead of claiming webhook readiness based
+// only on the presence of a local signing secret.
+func (c *Client) GetAppRegistration(ctx context.Context, slug string) (*AppRegistration, error) {
+	if !validAppSlug(slug) {
+		return nil, fmt.Errorf("github: invalid app slug")
+	}
+	var app AppRegistration
+	if err := c.get(ctx, "/apps/"+slug, &app); err != nil {
+		return nil, err
+	}
+	return &app, nil
+}
+
 // InstallationForRepository returns the installation that covers the exact
 // owner/name repository. Owner matching alone is deliberately insufficient:
 // an installation can be limited to selected repositories.
@@ -149,6 +225,19 @@ func validRepositoryName(fullName string) bool {
 	return ok && owner != "" && name != "" && !strings.Contains(name, "/")
 }
 
+func validAppSlug(slug string) bool {
+	if len(slug) == 0 || len(slug) > 100 || slug[0] == '-' || slug[len(slug)-1] == '-' {
+		return false
+	}
+	for i := 0; i < len(slug); i++ {
+		b := slug[i]
+		if (b < 'a' || b > 'z') && (b < 'A' || b > 'Z') && (b < '0' || b > '9') && b != '-' {
+			return false
+		}
+	}
+	return true
+}
+
 func (c *Client) get(ctx context.Context, path string, out any) error {
 	base := strings.TrimRight(c.BaseURL, "/")
 	if _, err := url.ParseRequestURI(base + path); err != nil {
@@ -158,7 +247,9 @@ func (c *Client) get(ctx context.Context, path string, out any) error {
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Authorization", "Bearer "+c.Token)
+	if strings.TrimSpace(c.Token) != "" {
+		req.Header.Set("Authorization", "Bearer "+c.Token)
+	}
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
 	resp, err := c.HTTP.Do(req)

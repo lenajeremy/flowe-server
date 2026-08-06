@@ -282,8 +282,8 @@ func (h *WorkflowHandler) GetOne(c *gin.Context) {
 }
 
 // SetPublished — POST /api/workflows/:id/publish and /unpublish.
-// Publishing only affects the background scheduler: manual runs, webhooks, and
-// API-key triggers work either way.
+// Publishing enables unattended schedule and integration-event runs. Manual
+// runs, direct webhooks, and API-key triggers work either way.
 func (h *WorkflowHandler) SetPublished(published bool) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		wf, ok := h.loadOwnedWorkflow(c, c.Param("id"))

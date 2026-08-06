@@ -148,6 +148,54 @@ func TestSuspendedInstallationCannotCoverRepository(t *testing.T) {
 	}
 }
 
+func TestAppRegistrationReportsMissingPermissionsAndEvents(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/apps/fernary-ai" {
+			t.Fatalf("unexpected app path: %s", r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "" {
+			t.Fatalf("public app request sent an empty authorization credential: %q", got)
+		}
+		writeJSON(t, w, map[string]any{
+			"slug":        "fernary-ai",
+			"permissions": map[string]string{"metadata": "read"},
+			"events":      []string{},
+		})
+	}))
+	t.Cleanup(server.Close)
+	client := NewClient("", server.Client())
+	client.BaseURL = server.URL
+
+	app, err := client.GetAppRegistration(context.Background(), "fernary-ai")
+	if err != nil {
+		t.Fatal(err)
+	}
+	missing := strings.Join(app.MissingWebhookRequirements(), ", ")
+	for _, want := range []string{
+		"Contents permission", "Issues permission", "Pull requests permission",
+		"Issues event", "Issue comment event", "Pull request event", "Push event", "Release event",
+	} {
+		if !strings.Contains(missing, want) {
+			t.Errorf("missing requirements %q did not include %q", missing, want)
+		}
+	}
+}
+
+func TestAppRegistrationAcceptsReadOnlyTriggerConfiguration(t *testing.T) {
+	app := AppRegistration{
+		Permissions: map[string]string{
+			"metadata": "read", "contents": "read", "issues": "read", "pull_requests": "read",
+		},
+		Events: []string{"issues", "issue_comment", "pull_request", "push", "release"},
+	}
+	if missing := app.MissingWebhookRequirements(); len(missing) != 0 {
+		t.Fatalf("complete read-only configuration reported missing settings: %v", missing)
+	}
+	if _, err := NewClient("", nil).GetAppRegistration(context.Background(), "../unsafe"); err == nil {
+		t.Fatal("unsafe app slug was accepted")
+	}
+}
+
 func writeJSON(t *testing.T, w http.ResponseWriter, value any) {
 	t.Helper()
 	w.Header().Set("Content-Type", "application/json")

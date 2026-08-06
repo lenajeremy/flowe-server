@@ -19,7 +19,11 @@ import (
 	"gorm.io/gorm"
 )
 
-var githubAppSlugPattern = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9-]{0,98}[A-Za-z0-9])?$`)
+var (
+	githubAppSlugPattern                  = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9-]{0,98}[A-Za-z0-9])?$`)
+	githubInstallationSettingsPathPattern = regexp.MustCompile(
+		`^/(?:settings/installations|organizations/[A-Za-z0-9-]+/settings/installations)/[1-9][0-9]*$`)
+)
 
 type githubSetupRepository struct {
 	ID             string `json:"id"`
@@ -36,26 +40,32 @@ type githubInstallationRepository struct {
 }
 
 type githubSetupInstallation struct {
-	ID                  string                         `json:"id"`
-	AccountLogin        string                         `json:"account_login"`
-	AccountType         string                         `json:"account_type"`
-	AvatarURL           string                         `json:"avatar_url,omitempty"`
-	RepositorySelection string                         `json:"repository_selection"`
-	Suspended           bool                           `json:"suspended"`
-	Repositories        []githubInstallationRepository `json:"repositories"`
+	ID                    string                         `json:"id"`
+	AccountLogin          string                         `json:"account_login"`
+	AccountType           string                         `json:"account_type"`
+	AvatarURL             string                         `json:"avatar_url,omitempty"`
+	SettingsURL           string                         `json:"settings_url,omitempty"`
+	RepositorySelection   string                         `json:"repository_selection"`
+	Suspended             bool                           `json:"suspended"`
+	PermissionsConfigured bool                           `json:"permissions_configured"`
+	PermissionsMissing    []string                       `json:"permissions_missing"`
+	Repositories          []githubInstallationRepository `json:"repositories"`
 }
 
 type githubSetupResponse struct {
-	Connected         bool                      `json:"connected"`
-	Installed         bool                      `json:"installed"`
-	AppConfigured     bool                      `json:"app_configured"`
-	AppSlug           string                    `json:"app_slug,omitempty"`
-	WebhookConfigured bool                      `json:"webhook_configured"`
-	TokenKind         string                    `json:"token_kind,omitempty"`
-	ReconnectRequired bool                      `json:"reconnect_required,omitempty"`
-	InstallURL        string                    `json:"install_url,omitempty"`
-	Installations     []githubSetupInstallation `json:"installations"`
-	Repositories      []githubSetupRepository   `json:"repositories"`
+	Connected               bool                      `json:"connected"`
+	Installed               bool                      `json:"installed"`
+	AppConfigured           bool                      `json:"app_configured"`
+	AppSlug                 string                    `json:"app_slug,omitempty"`
+	WebhookConfigured       bool                      `json:"webhook_configured"`
+	WebhookEventsConfigured bool                      `json:"webhook_events_configured"`
+	WebhookEventsMissing    []string                  `json:"webhook_events_missing"`
+	WebhookEventsError      string                    `json:"webhook_events_error,omitempty"`
+	TokenKind               string                    `json:"token_kind,omitempty"`
+	ReconnectRequired       bool                      `json:"reconnect_required,omitempty"`
+	InstallURL              string                    `json:"install_url,omitempty"`
+	Installations           []githubSetupInstallation `json:"installations"`
+	Repositories            []githubSetupRepository   `json:"repositories"`
 }
 
 // GitHubIntegrationSetup is the frontend's single source of truth for GitHub
@@ -70,12 +80,23 @@ func (h *WorkflowHandler) GitHubIntegrationSetup(c *gin.Context) {
 		installURL, _ = githubAppInstallURL(state)
 	}
 	response := githubSetupResponse{
-		AppConfigured:     configured,
-		AppSlug:           validGitHubAppSlug(),
-		WebhookConfigured: os.Getenv("GITHUB_WEBHOOK_SECRET") != "",
-		InstallURL:        installURL,
-		Installations:     []githubSetupInstallation{},
-		Repositories:      []githubSetupRepository{},
+		AppConfigured:        configured,
+		AppSlug:              validGitHubAppSlug(),
+		WebhookConfigured:    os.Getenv("GITHUB_WEBHOOK_SECRET") != "",
+		WebhookEventsMissing: []string{},
+		InstallURL:           installURL,
+		Installations:        []githubSetupInstallation{},
+		Repositories:         []githubSetupRepository{},
+	}
+	if configured {
+		app, appErr := githubapp.NewClient("", &http.Client{Timeout: 15 * time.Second}).
+			GetAppRegistration(c.Request.Context(), response.AppSlug)
+		if appErr != nil {
+			response.WebhookEventsError = "GitHub App Permissions & events settings could not be verified"
+		} else {
+			response.WebhookEventsMissing = app.MissingWebhookRequirements()
+			response.WebhookEventsConfigured = len(response.WebhookEventsMissing) == 0
+		}
 	}
 
 	var connection models.IntegrationConnection
@@ -127,10 +148,13 @@ func (h *WorkflowHandler) GitHubIntegrationSetup(c *gin.Context) {
 			AccountLogin:        installation.Account.Login,
 			AccountType:         installation.Account.Type,
 			AvatarURL:           installation.Account.AvatarURL,
+			SettingsURL:         safeGitHubInstallationSettingsURL(installation.HTMLURL),
 			RepositorySelection: installation.RepositorySelection,
 			Suspended:           installation.SuspendedAt != nil,
+			PermissionsMissing:  installation.MissingWebhookRequirements(),
 			Repositories:        []githubInstallationRepository{},
 		}
+		item.PermissionsConfigured = len(item.PermissionsMissing) == 0
 		if installation.SuspendedAt == nil {
 			response.Installed = true
 			repositories, listErr := client.ListInstallationRepositories(c.Request.Context(), installation.ID)
@@ -155,6 +179,16 @@ func (h *WorkflowHandler) GitHubIntegrationSetup(c *gin.Context) {
 		response.Installations = append(response.Installations, item)
 	}
 	c.JSON(http.StatusOK, response)
+}
+
+func safeGitHubInstallationSettingsURL(raw string) string {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || u.Scheme != "https" || !strings.EqualFold(u.Hostname(), "github.com") ||
+		u.Port() != "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" ||
+		!githubInstallationSettingsPathPattern.MatchString(u.EscapedPath()) {
+		return ""
+	}
+	return u.String()
 }
 
 // GitHubSetupCallback is used when the GitHub App's Setup URL points here. The

@@ -109,6 +109,15 @@ func (a githubAdapter) Register(ctx context.Context, conn Conn, t *models.Integr
 	if t.ResourceID == "" {
 		return Registration{}, fmt.Errorf("github: no repository selected")
 	}
+	client := githubapp.NewClient(conn.AccessToken, httpClient)
+	app, err := client.GetAppRegistration(ctx, strings.TrimSpace(os.Getenv("GITHUB_APP_SLUG")))
+	if err != nil {
+		return Registration{}, fmt.Errorf("github: could not verify the App's Permissions & events settings: %w", err)
+	}
+	if missing := app.MissingWebhookRequirements(); len(missing) > 0 {
+		return Registration{}, fmt.Errorf("github: the Fernary App is missing required Permissions & events settings: %s",
+			strings.Join(missing, ", "))
+	}
 	// Resolve which installation these events will arrive under, and refuse the
 	// trigger if we cannot. A trigger with no installation id would match nothing
 	// at delivery time, and a trigger that never fires with no explanation is
@@ -117,10 +126,15 @@ func (a githubAdapter) Register(ctx context.Context, conn Conn, t *models.Integr
 	if err != nil {
 		return Registration{}, err
 	}
+	if missing := installation.MissingWebhookRequirements(); len(missing) > 0 {
+		return Registration{}, fmt.Errorf(
+			"github: the installation on %s has not approved the App's updated permissions: %s",
+			installation.Account.Login, strings.Join(missing, ", "))
+	}
 
 	// No RemoteID and no per-trigger Secret: there is no remote object to track,
 	// and signatures are checked against the App's one shared secret.
-	return Registration{ScopeID: installation}, nil
+	return Registration{ScopeID: strconv.FormatInt(installation.ID, 10)}, nil
 }
 
 // installationFor finds the App installation that covers a repository.
@@ -128,12 +142,12 @@ func (a githubAdapter) Register(ctx context.Context, conn Conn, t *models.Integr
 // This enumerates the repositories exposed by every accessible installation.
 // It intentionally does not infer coverage from the owner: an installation on
 // acme can be limited to acme/website and must not admit acme/payments.
-func (a githubAdapter) installationFor(ctx context.Context, conn Conn, repo string) (string, error) {
+func (a githubAdapter) installationFor(ctx context.Context, conn Conn, repo string) (*githubapp.Installation, error) {
 	installation, err := githubapp.NewClient(conn.AccessToken, httpClient).InstallationForRepository(ctx, repo)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	return strconv.FormatInt(installation.ID, 10), nil
+	return installation, nil
 }
 
 // Unregister is a no-op for the same reason: nothing was created, and the App's

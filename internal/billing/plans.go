@@ -229,14 +229,27 @@ func (g *Gate) CheckPublishSchedule(orgID, workflowID string, plan models.Plan) 
 	if lim.MaxPublishedSchedules == unlimited {
 		return nil
 	}
+	// Publishing is also the lifecycle switch for non-schedule triggers. Those
+	// workflows do not consume a scheduled-workflow slot, so an organization at
+	// its schedule cap must still be able to publish an integration-only flow.
+	// Check the workflow being published before counting the other live schedules.
+	var hasLiveSchedule int64
+	if err := g.db.Model(&models.ScheduledTrigger{}).
+		Where("organization_id = ? AND workflow_id = ? AND enabled = true", orgID, workflowID).
+		Count(&hasLiveSchedule).Error; err != nil {
+		return err
+	}
+	if hasLiveSchedule == 0 {
+		return nil
+	}
 	var n int64
 	// Counts workflows that are published AND actually have a live schedule; a
 	// published workflow with no schedule costs nothing and should not count.
 	err := g.db.Table("workflows").
-		Joins("JOIN scheduled_triggers st ON st.workflow_id = workflows.id::text").
+		Joins("JOIN scheduled_triggers st ON st.workflow_id = CAST(workflows.id AS TEXT)").
 		Where(`workflows.organization_id = ? AND workflows.deleted_at IS NULL
 			AND workflows.published = true AND st.enabled = true
-			AND workflows.id::text <> ?`, orgID, workflowID).
+			AND CAST(workflows.id AS TEXT) <> ?`, orgID, workflowID).
 		Count(&n).Error
 	if err != nil {
 		return err

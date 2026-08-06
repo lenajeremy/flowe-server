@@ -35,6 +35,28 @@ func TestGitHubInstallURLUsesOnlyAValidatedAppSlug(t *testing.T) {
 	}
 }
 
+func TestGitHubInstallationSettingsURLIsRestrictedToGitHub(t *testing.T) {
+	for _, valid := range []string{
+		"https://github.com/settings/installations/151704344",
+		"https://github.com/organizations/acme-inc/settings/installations/42",
+	} {
+		if got := safeGitHubInstallationSettingsURL(valid); got != valid {
+			t.Errorf("valid settings URL %q became %q", valid, got)
+		}
+	}
+	for _, invalid := range []string{
+		"http://github.com/settings/installations/42",
+		"https://evil.example/settings/installations/42",
+		"https://github.com/settings/installations/0",
+		"https://github.com/settings/installations/42?next=https://evil.example",
+		"https://github.com/apps/fernary-ai/installations/new",
+	} {
+		if got := safeGitHubInstallationSettingsURL(invalid); got != "" {
+			t.Errorf("unsafe settings URL %q was accepted as %q", invalid, got)
+		}
+	}
+}
+
 func TestGitHubInstallStateIsBoundAndSingleUse(t *testing.T) {
 	state := newGitHubInstallState("user-1", "org-1", "https://app.fernary.com")
 	entry, ok := consumeOAuthState(state)
