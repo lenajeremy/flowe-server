@@ -65,12 +65,38 @@ var atlassianScopes = map[string][]string{
 		"read:board-scope:jira-software",
 		"read:sprint:jira-software", "write:sprint:jira-software",
 	},
+	// Confluence is GRANULAR throughout, because the code calls the v2 API
+	// (/wiki/api/v2) for almost everything and v2 does not accept classic scopes
+	// at all — a classic grant against a v2 endpoint returns
+	// `401 {"code":401,"message":"Unauthorized; scope does not match"}`, which is
+	// exactly the failure this set replaces.
+	//
+	// The three operations still on v1 (CQL search, add_label, upload_attachment)
+	// each document granular scopes too, so the grant can match every endpoint
+	// without retaining any of the classic scopes that failed against v2.
+	//
+	// Every scope below is required by an operation the code actually performs;
+	// the mapping is asserted in the tests so an endpoint cannot be added without
+	// its scope. Read as: <what> → <where it is needed>.
 	"confluence": {
 		"offline_access",
-		"read:confluence-space.summary", "read:confluence-content.all",
-		"write:confluence-content", "read:confluence-content.summary",
-		"read:confluence-props", "write:confluence-props",
-		"read:confluence-user", "search:confluence",
+		// v2 spaces — list_spaces, get_space, and the resource picker's dropdown.
+		"read:space:confluence",
+		// v2 page reads, including blogposts (whose endpoint documents the page
+		// scope) — list_pages, get_page, find_page_by_title, list_child_pages,
+		// and list_blog_posts.
+		"read:page:confluence",
+		// v2 page writes, including create_blog_post for the same reason.
+		"write:page:confluence", "delete:page:confluence",
+		// v2 footer comments — list_comments, add_comment.
+		"read:comment:confluence", "write:comment:confluence",
+		// v2 labels for list_labels; the v1 add_label needs BOTH of these.
+		"read:label:confluence", "write:label:confluence",
+		// v2 list_attachments, and the v1 multipart upload_attachment.
+		"read:attachment:confluence", "write:attachment:confluence",
+		// The granular scope the v1 endpoints ask for: CQL search_pages,
+		// get_current_user, and (alongside write:attachment) upload_attachment.
+		"read:content-details:confluence",
 	},
 }
 
@@ -277,5 +303,25 @@ func atlassianGet(token, url string) ([]byte, error) {
 	req, _ := http.NewRequest(http.MethodGet, url, nil)
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Accept", "application/json")
-	return doOAuthRequest(req)
+	raw, err := doOAuthRequest(req)
+	if err != nil {
+		return nil, translateAtlassianScopeError(err)
+	}
+	return raw, nil
+}
+
+// translateAtlassianScopeError turns Atlassian's own wording into an instruction.
+//
+// "Unauthorized; scope does not match" means the stored token was granted under
+// a different scope set from the one this call needs — which, after the scopes
+// above changed, is true of every connection made before that change. The token
+// is valid and the request is well-formed, so nothing retries its way out of it:
+// the only fix is a fresh authorization. Saying so beats showing the user a raw
+// 401 they cannot act on.
+func translateAtlassianScopeError(err error) error {
+	if err == nil || !strings.Contains(err.Error(), "scope does not match") {
+		return err
+	}
+	return fmt.Errorf("this connection was authorized with older permissions — " +
+		"disconnect and reconnect to grant the ones this needs")
 }
