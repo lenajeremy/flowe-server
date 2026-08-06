@@ -22,7 +22,7 @@ import (
 // Managing integration triggers.
 //
 // Creating one is not a local write: it registers a real webhook inside the
-// user's GitHub repository (or Shopify store, or Slack workspace). That makes
+// user's GitLab project (or verifies a GitHub App installation). That makes
 // the create and delete paths the interesting ones — they have to leave the
 // provider and our database agreed with each other even when one of them fails.
 
@@ -326,7 +326,7 @@ func (h *WorkflowHandler) DeleteTrigger(c *gin.Context) {
 // unregisterTrigger removes the hook at the provider, best effort.
 //
 // A failure here is logged and swallowed on purpose: the user asked to delete
-// the trigger, and refusing because GitHub is down would leave them with a
+// the trigger, and refusing because GitLab is down would leave them with a
 // trigger they cannot get rid of. The cost is an orphaned hook at the provider,
 // which the inbound handler already tolerates — it acknowledges deliveries for
 // triggers that no longer exist rather than erroring.
@@ -345,4 +345,23 @@ func (h *WorkflowHandler) unregisterTrigger(ctx context.Context, t *models.Integ
 		slog.WarnContext(ctx, "could not remove the hook at the provider",
 			"trigger_id", t.ID.String(), "provider", t.Provider, "error", err.Error())
 	}
+}
+
+// retireIntegrationTriggers removes remote subscriptions first, then soft
+// deletes their local rows. Remote cleanup is best effort per trigger (the
+// callback becomes an acknowledged no-op once the row is gone), while a local
+// query/delete failure is returned so the owning connection or workflow is not
+// removed underneath state we failed to retire.
+func (h *WorkflowHandler) retireIntegrationTriggers(ctx context.Context, query *gorm.DB) error {
+	var list []models.IntegrationTrigger
+	if err := query.Find(&list).Error; err != nil {
+		return err
+	}
+	for i := range list {
+		h.unregisterTrigger(ctx, &list[i])
+	}
+	if len(list) == 0 {
+		return nil
+	}
+	return h.db.DB.Delete(&list).Error
 }

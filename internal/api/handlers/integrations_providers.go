@@ -189,6 +189,8 @@ func githubCollaboratorResources(token, repo string) ([]integrationResource, err
 
 // ── GitLab ────────────────────────────────────────────────────
 
+var gitlabAPIBase = "https://gitlab.com/api/v4"
+
 func exchangeGitlabCode(code string) (*models.IntegrationConnection, error) {
 	form := url.Values{}
 	form.Set("grant_type", "authorization_code")
@@ -232,7 +234,7 @@ func exchangeGitlabCode(code string) (*models.IntegrationConnection, error) {
 }
 
 func gitlabUsername(token string) string {
-	req, _ := http.NewRequest(http.MethodGet, "https://gitlab.com/api/v4/user", nil)
+	req, _ := http.NewRequest(http.MethodGet, gitlabAPIBase+"/user", nil)
 	req.Header.Set("Authorization", "Bearer "+token)
 	raw, err := doOAuthRequest(req)
 	if err != nil {
@@ -248,7 +250,7 @@ func gitlabUsername(token string) string {
 }
 
 func gitlabResources(token string) ([]integrationResource, error) {
-	req, _ := http.NewRequest(http.MethodGet, "https://gitlab.com/api/v4/projects?membership=true&per_page=100&order_by=last_activity_at", nil)
+	req, _ := http.NewRequest(http.MethodGet, gitlabAPIBase+"/projects?membership=true&per_page=100&order_by=last_activity_at", nil)
 	req.Header.Set("Authorization", "Bearer "+token)
 	raw, err := doOAuthRequest(req)
 	if err != nil {
@@ -266,6 +268,78 @@ func gitlabResources(token string) ([]integrationResource, error) {
 		out = append(out, integrationResource{ID: strconv.FormatInt(p.ID, 10), Name: p.PathWithNamespace, Type: "project"})
 	}
 	return out, nil
+}
+
+func gitlabBranchResources(token, projectID string) ([]integrationResource, error) {
+	projectID, err := gitlabNumericID(projectID)
+	if err != nil {
+		return nil, err
+	}
+	req, _ := http.NewRequest(http.MethodGet,
+		gitlabAPIBase+"/projects/"+projectID+"/repository/branches?per_page=100", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	raw, err := doOAuthRequest(req)
+	if err != nil {
+		return nil, err
+	}
+	var branches []struct {
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal(raw, &branches); err != nil {
+		return nil, fmt.Errorf("parse gitlab branches: %w", err)
+	}
+	out := make([]integrationResource, 0, len(branches))
+	for _, branch := range branches {
+		if name := strings.TrimSpace(branch.Name); name != "" {
+			out = append(out, integrationResource{ID: name, Name: name, Type: "branch"})
+		}
+	}
+	return out, nil
+}
+
+func gitlabMemberResources(token, projectID string) ([]integrationResource, error) {
+	projectID, err := gitlabNumericID(projectID)
+	if err != nil {
+		return nil, err
+	}
+	req, _ := http.NewRequest(http.MethodGet,
+		gitlabAPIBase+"/projects/"+projectID+"/members/all?per_page=100", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	raw, err := doOAuthRequest(req)
+	if err != nil {
+		return nil, err
+	}
+	var members []struct {
+		Name     string `json:"name"`
+		Username string `json:"username"`
+	}
+	if err := json.Unmarshal(raw, &members); err != nil {
+		return nil, fmt.Errorf("parse gitlab members: %w", err)
+	}
+	out := make([]integrationResource, 0, len(members))
+	for _, member := range members {
+		username := strings.TrimSpace(member.Username)
+		if username == "" {
+			continue
+		}
+		label := strings.TrimSpace(member.Name)
+		if label == "" || strings.EqualFold(label, username) {
+			label = username
+		} else {
+			label += " (@" + username + ")"
+		}
+		out = append(out, integrationResource{ID: username, Name: label, Type: "user"})
+	}
+	return out, nil
+}
+
+func gitlabNumericID(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	id, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || id <= 0 {
+		return "", fmt.Errorf("invalid GitLab project id %q", value)
+	}
+	return strconv.FormatInt(id, 10), nil
 }
 
 // ── Gmail (Google) ────────────────────────────────────────────

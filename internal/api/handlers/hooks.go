@@ -84,6 +84,14 @@ func (h *WorkflowHandler) ReceiveProviderHook(c *gin.Context) {
 			c.JSON(http.StatusOK, gin.H{"status": "ignored", "reason": "unknown trigger"})
 			return
 		}
+		if t.Provider != provider {
+			// A per-trigger callback is capability-like: both the UUID and provider
+			// must name the same subscription before its signing key is considered.
+			slog.WarnContext(ctx, "hook provider does not match trigger",
+				"provider", provider, "trigger_provider", t.Provider, "trigger_id", triggerID)
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "signature verification failed"})
+			return
+		}
 		trig = &t
 	}
 
@@ -293,6 +301,14 @@ func (h *WorkflowHandler) dispatch(ctx context.Context, t *models.IntegrationTri
 		log("different installation")
 		return false
 	}
+	// Per-trigger providers such as GitLab bypass triggersFor because their
+	// callback URL already names the trigger. Still compare the project carried
+	// in the signed body: a hook copied to another project must not be able to
+	// wake this trigger merely because it has the same callback and signing key.
+	if !triggerResourceMatches(t, ev) {
+		log("different resource")
+		return false
+	}
 	// Filters run before admission — the point of filtering at the trigger is
 	// that an event nobody wanted costs nothing.
 	if !triggers.Matches(t, ev) {
@@ -351,6 +367,11 @@ func (h *WorkflowHandler) dispatch(ctx context.Context, t *models.IntegrationTri
 
 	go h.executeRun(ctx, p)
 	return true
+}
+
+func triggerResourceMatches(t *models.IntegrationTrigger, ev triggers.Event) bool {
+	return ev.ResourceID == "" || t.ResourceID == "" ||
+		strings.EqualFold(ev.ResourceID, t.ResourceID)
 }
 
 // claimDelivery records that this delivery has been handled, and reports

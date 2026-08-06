@@ -1,9 +1,11 @@
 package handlers
 
 import (
+	"strings"
 	"testing"
 
 	"workflow-ai/server/internal/executor"
+	"workflow-ai/server/internal/triggers"
 )
 
 func TestAgentSkipNodeExcludesTriggerNodes(t *testing.T) {
@@ -21,5 +23,92 @@ func TestAgentSkipNodeExcludesTriggerNodes(t *testing.T) {
 
 	if agentSkipNode(executor.NodeTypeGithub) {
 		t.Error("agentSkipNode(github) = true, want false for an executable integration node")
+	}
+}
+
+func TestBuilderCatalogIncludesLiveGitHubAndGitLabAppTriggers(t *testing.T) {
+	t.Parallel()
+
+	entry := catalogEntry(string(executor.NodeTypeIntegrationTrigger))
+	if entry == nil {
+		t.Fatal("AI builder catalog does not include integrationTrigger")
+	}
+	events, ok := entry["eventCatalog"].(map[string][]triggers.EventSpec)
+	if !ok {
+		t.Fatalf("integrationTrigger eventCatalog has type %T", entry["eventCatalog"])
+	}
+
+	wants := map[string][]string{
+		"github": {"pull_request.opened", "issues.edited", "issue_comment.created", "push"},
+		"gitlab": {"merge_request.opened", "issues.edited", "note.created", "push"},
+	}
+	for provider, eventIDs := range wants {
+		got := map[string]bool{}
+		for _, event := range events[provider] {
+			got[event.ID] = true
+		}
+		for _, eventID := range eventIDs {
+			if !got[eventID] {
+				t.Errorf("AI builder event catalog is missing %s / %s", provider, eventID)
+			}
+		}
+	}
+
+	fields, ok := entry["dataFields"].(map[string]any)
+	if !ok {
+		t.Fatalf("integrationTrigger dataFields has type %T", entry["dataFields"])
+	}
+	for _, field := range []string{
+		"triggerProvider", "triggerEvent", "triggerResourceId",
+		"triggerResourceLabel", "triggerFilters",
+	} {
+		if _, exists := fields[field]; !exists {
+			t.Errorf("AI builder integrationTrigger schema is missing %s", field)
+		}
+	}
+}
+
+func TestAgentChatKnowsAppTriggersButCannotCallThem(t *testing.T) {
+	t.Parallel()
+
+	ast := executor.WorkflowAST{
+		Name: "Repository triage",
+		Nodes: []executor.WorkflowASTNode{
+			{
+				ID: "github-trigger",
+				Data: executor.FlowNodeData{
+					NodeType:          executor.NodeTypeIntegrationTrigger,
+					Label:             "New GitHub issue",
+					TriggerProvider:   "github",
+					TriggerEvent:      "issues.opened",
+					TriggerResourceID: "fernary/quokka",
+				},
+			},
+			{
+				ID: "gitlab-trigger",
+				Data: executor.FlowNodeData{
+					NodeType:          executor.NodeTypeIntegrationTrigger,
+					Label:             "Updated GitLab issue",
+					TriggerProvider:   "gitlab",
+					TriggerEvent:      "issues.edited",
+					TriggerResourceID: "4815162342",
+				},
+			},
+		},
+	}
+
+	tools := buildAgentTools(ast)
+	if len(tools) != 0 {
+		t.Fatalf("App Triggers became callable chat tools: %#v", tools)
+	}
+	prompt := agentSystemPrompt(ast, tools, nil)
+	for _, want := range []string{
+		"New GitHub issue", "provider=\"github\"", "event=\"issues.opened\"", "resource=\"fernary/quokka\"",
+		"Updated GitLab issue", "provider=\"gitlab\"", "event=\"issues.edited\"", "resource=\"4815162342\"",
+		"context only", "not callable chat tools", "not a webhook delivery",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("agent system prompt is missing %q\nprompt: %s", want, prompt)
+		}
 	}
 }

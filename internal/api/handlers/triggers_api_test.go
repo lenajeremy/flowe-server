@@ -7,6 +7,7 @@ import (
 
 	"workflow-ai/server/internal/database/models"
 	"workflow-ai/server/internal/executor"
+	"workflow-ai/server/internal/triggers"
 )
 
 func workflowWithNodes(t *testing.T, nodes ...executor.WorkflowASTNode) *models.Workflow {
@@ -79,5 +80,20 @@ func TestSameTriggerSpec(t *testing.T) {
 	req.Event = "release.published"
 	if sameTriggerSpec(stored, req) {
 		t.Fatal("sameTriggerSpec() = true when the event differs")
+	}
+}
+
+func TestPerTriggerDeliveryMustNameTheConfiguredResource(t *testing.T) {
+	t.Parallel()
+	trigger := &models.IntegrationTrigger{ResourceID: "123"}
+	if triggerResourceMatches(trigger, triggers.Event{ResourceID: "456"}) {
+		t.Fatal("an event from another GitLab project matched this trigger")
+	}
+	if !triggerResourceMatches(trigger, triggers.Event{ResourceID: "123"}) {
+		t.Fatal("the configured GitLab project did not match itself")
+	}
+	// Providers with account-wide events deliberately leave either side blank.
+	if !triggerResourceMatches(trigger, triggers.Event{}) {
+		t.Fatal("an account-wide event was incorrectly rejected")
 	}
 }

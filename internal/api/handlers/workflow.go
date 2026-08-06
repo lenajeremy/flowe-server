@@ -332,6 +332,12 @@ func (h *WorkflowHandler) SetPublished(published bool) gin.HandlerFunc {
 // Delete — DELETE /api/workflows/:id
 func (h *WorkflowHandler) Delete(c *gin.Context) {
 	id := c.Param("id")
+	triggerQuery := h.orgScope(c).Where("workflow_id = ? AND deleted_at IS NULL", id)
+	if err := h.retireIntegrationTriggers(c.Request.Context(), triggerQuery); err != nil {
+		slog.Error("failed to retire workflow triggers", "id", id, "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to delete workflow triggers"})
+		return
+	}
 	if err := h.orgScope(c).
 		Delete(&models.Workflow{}, "id = ?", id).Error; err != nil {
 		slog.Error("failed to delete workflow", "id", id, "error", err)

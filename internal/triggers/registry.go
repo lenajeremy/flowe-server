@@ -1,10 +1,10 @@
 // Package triggers turns "something happened in a connected tool" into a
 // workflow run.
 //
-// Providers disagree about almost everything here. GitHub wants a hook created
-// per repository and signs each delivery; Slack registers nothing at all and
-// posts every workspace's events to one URL; Gmail has no webhook worth the
-// name unless you stand up a Pub/Sub topic, so we ask it instead. The product
+// Providers disagree about almost everything here. GitLab wants a signed hook
+// created per project; GitHub and Slack register nothing per trigger and post
+// app/workspace events to shared URLs; Gmail has no webhook worth the name
+// unless you stand up a Pub/Sub topic, so we ask it instead. The product
 // promise is the same in every case — "run this when X happens" — so the
 // difference is confined to an adapter, and the rest of the system sees one
 // normalized Event whichever way it arrived.

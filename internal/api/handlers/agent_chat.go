@@ -447,6 +447,23 @@ func agentSystemPrompt(ast executor.WorkflowAST, tools []agentTool, state map[st
 	for _, t := range tools {
 		names = append(names, fmt.Sprintf("%s (%s)", t.Node.Data.Label, t.Node.Data.NodeType))
 	}
+	var appTriggers []string
+	for _, node := range ast.Nodes {
+		if node.Data.NodeType != executor.NodeTypeIntegrationTrigger {
+			continue
+		}
+		appTriggers = append(appTriggers, fmt.Sprintf(
+			"%q: provider=%q, event=%q, resource=%q",
+			truncate(node.Data.Label, 120),
+			truncate(node.Data.TriggerProvider, 80),
+			truncate(node.Data.TriggerEvent, 120),
+			truncate(node.Data.TriggerResourceID, 240),
+		))
+	}
+	triggerContext := "none"
+	if len(appTriggers) > 0 {
+		triggerContext = strings.Join(appTriggers, "; ")
+	}
 	var stateKeys []string
 	for k := range state {
 		stateKeys = append(stateKeys, k)
@@ -455,12 +472,14 @@ func agentSystemPrompt(ast executor.WorkflowAST, tools []agentTool, state map[st
 
 Your tools are this workflow's nodes: %s. Each tool's saved configuration is its default behaviour; pass arguments only to adjust a call to the user's current request (e.g. tweak a prompt, change a search query). You NEVER modify the workflow itself. You also have get_current_time, which is not a node — it runs nothing and changes nothing.
 
+This workflow's App Triggers are: %s. They describe which GitHub/GitLab event starts the published automation, but they are context only and are not callable chat tools. A chat message is not a webhook delivery and does not contain an App Trigger payload unless that payload is already present in session state.
+
 Rules:
 - Execute tools only when the user's request needs them — don't run everything preemptively.
 - Prior tool outputs are stored as state (current keys: [%s]) and template tokens like {{nodeId.output.field}} in tool arguments resolve against that state.
 - If the user asks for something no tool can do, say so plainly and describe what this workflow CAN do.
 - Be concise. Summarize tool results in plain language rather than dumping raw JSON, unless asked.`,
-		ast.Name, strings.Join(names, ", "), strings.Join(stateKeys, ", "))
+		ast.Name, strings.Join(names, ", "), triggerContext, strings.Join(stateKeys, ", "))
 }
 
 // ── Provider loops (mirrors the builder-chat loops, different tools) ──

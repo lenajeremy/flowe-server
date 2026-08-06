@@ -18,6 +18,7 @@ import (
 	"workflow-ai/server/internal/billing"
 	"workflow-ai/server/internal/executor"
 	"workflow-ai/server/internal/telemetry"
+	"workflow-ai/server/internal/triggers"
 
 	"github.com/gin-gonic/gin"
 	"go.opentelemetry.io/otel/attribute"
@@ -290,7 +291,7 @@ var toolUpdateWorkflow = map[string]any{
 
 var toolListIntegrationResources = map[string]any{
 	"name":        "list_integration_resources",
-	"description": "Lists the user's connected integrations and the concrete resources each exposes — Notion databases/pages, Linear teams/projects, GitHub repos, GitLab projects, Gmail labels, Stripe prices, Shopify products — with their IDs and names. ALWAYS call this before configuring an integration node so you can set real IDs (notionDatabaseId, linearTeamId, githubRepo, gitlabProjectId, stripePriceId, …) instead of placeholders. If a provider is not connected, leave the ID empty and tell the user to hit Connect in the node settings. Never ask the user to paste API tokens — OAuth connections are used automatically.",
+	"description": "Lists the user's connected integrations and the concrete resources each exposes — Notion databases/pages, Linear teams/projects, GitHub repos, GitLab projects, Gmail labels, Stripe prices, Shopify products — with their IDs and names. ALWAYS call this before configuring an integration action or App Trigger so you can set real IDs (notionDatabaseId, linearTeamId, githubRepo, gitlabProjectId, triggerResourceId, stripePriceId, …) instead of placeholders. If a provider is not connected, leave the ID empty and tell the user to hit Connect in the node settings. Never ask the user to paste API tokens — OAuth connections are used automatically.",
 	"input_schema": map[string]any{
 		"type": "object",
 		"properties": map[string]any{
@@ -457,6 +458,29 @@ func builderTools() []map[string]any {
 	return []map[string]any{toolGetNodes, toolGetCurrentWorkflow, toolCreateWorkflow, toolUpdateWorkflow, toolListIntegrationResources, toolListDataStores, toolCreateDataStore, toolSetSchedule, toolListRuns, toolGetRunLogs, toolGetCurrentTime}
 }
 
+// integrationTriggerCatalogEntry is built from the trigger adapters rather
+// than a second handwritten list. That keeps the AI builder on the same event
+// ids, filters and sample payloads as the sidebar and webhook dispatcher.
+// Adding an event to an adapter therefore teaches the builder about it in the
+// same deploy instead of leaving it to invent an unsupported event name.
+func integrationTriggerCatalogEntry() map[string]any {
+	return map[string]any{
+		"type": "integrationTrigger", "label": "App Trigger", "category": "Triggers",
+		"description": "Starts the published workflow when an event arrives from a connected app. GitHub uses the Fernary GitHub App installation; GitLab creates a signed project webhook. The normalized event is this node's output: provider, event, resource, occurred_at and data.",
+		"dataFields": map[string]any{
+			"triggerProvider":      "'github'|'gitlab' – required; use the exact provider key from eventCatalog",
+			"triggerEvent":         "string – required; use an exact event id from eventCatalog[triggerProvider]",
+			"triggerResourceId":    "string – required for GitHub/GitLab; REAL repository/project id from list_integration_resources (GitHub owner/repo, GitLab numeric project id)",
+			"triggerResourceLabel": "string – the selected resource's human-readable name from list_integration_resources",
+			"triggerFilters":       "object – optional event filters using only keys declared by that event in eventCatalog (for example branch, base, author or label)",
+		},
+		"eventCatalog": triggers.Catalog(),
+		"auth":         "OAuth connection used automatically — never set integrationToken. GitHub also requires the Fernary GitHub App to be installed on the exact repository. GitLab requires Maintainer or Owner access to the exact project.",
+		"handles":      map[string]any{"inputs": []string{}, "outputs": []string{"source (right)"}},
+		"notes":        "Call list_integration_resources for the chosen provider before placing this node. Configure the canvas fields, then tell the user to open App Trigger and click Start listening; the workflow must be saved before registration and Published before events start runs. Downstream templates read event fields through {{nodeId.output.data.field}}.",
+	}
+}
+
 // nodeCatalog documents every node type (fields, semantics) — shared by the
 // builder's get_available_nodes tool and agent-chat tool-schema generation.
 func nodeCatalog() []map[string]any {
@@ -530,6 +554,7 @@ func nodeCatalog() []map[string]any {
 			"dataFields":  map[string]any{"label": "string – display name"},
 			"handles":     map[string]any{"inputs": []string{}, "outputs": []string{"source (right)"}},
 		},
+		integrationTriggerCatalogEntry(),
 		{
 			"type": "data", "label": "Data Store", "category": "Data",
 			"description": "Reads/writes persistent memory (a Data store). This is how workflows remember things across runs: counters ('email #N'), dedup lists ('orders already handled'), cursors, accumulating digests. Ops by store kind — kv: get/set/increment/delete · collection: append/query/update/delete/count/clear · text: get/set/append. Output is the op result as JSON (increment returns the new number). A kv/text get on something never written yields an EMPTY string (not 'null'), so first-run branches should test for empty; prefer increment over get+set for counters since it is atomic and starts at 0.",
@@ -890,6 +915,13 @@ Integrations (notion, linear, github, gitlab, gmail, stripe, shopify, jira, conf
 - Before placing or editing an integration node, call list_integration_resources and use the REAL resource IDs (notionDatabaseId, notionPageId, linearTeamId, linearProjectId, githubRepo, gitlabProjectId, stripePriceId) from the response. Mention the resource by name when you explain the workflow.
 - If the provider is not connected, still build the node but leave the resource ID empty and tell the user to click Connect in the node's settings panel, then ask you to fill in the target resource.
 - Prefer the gmail node over emailSend when the user wants mail sent from their own address or wants to read/search their inbox.
+
+App Triggers (integrationTrigger):
+- Use integrationTrigger — not a github/gitlab action node — when the user says the workflow should start when something happens in GitHub or GitLab.
+- Call get_available_nodes for the live eventCatalog, then list_integration_resources for the chosen provider. Set triggerProvider, an EXACT supported triggerEvent, the REAL triggerResourceId, its triggerResourceLabel, and only supported triggerFilters. Never invent event ids or repository/project ids.
+- GitHub repository ids are owner/repo; GitLab project ids are numeric. If the provider is disconnected, leave the resource fields empty and explain that it must be connected before the target can be selected.
+- The builder configures the node on the canvas but does not register external webhooks. After building, tell the user to save the workflow, open the App Trigger, click Start listening, and Publish. GitHub requires the Fernary App installed on that exact repository; GitLab requires Maintainer or Owner access to the exact project.
+- The normalized payload is the trigger node output. Downstream nodes access event fields as {{nodeId.output.data.title}}, {{nodeId.output.data.body}}, and so on, using the selected event's sample payload as the shape.
 
 Persistence (Data stores):
 - Trigger outputs carry NO memory — a scheduled run knows nothing about previous runs. For anything that must survive across runs (counters like "email #3 of 10", dedup like "skip orders already handled", cursors, accumulating digests), use a data node backed by a Data store. Do not fake state with LLM prompts.

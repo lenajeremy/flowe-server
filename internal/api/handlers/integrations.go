@@ -587,8 +587,10 @@ func (h *WorkflowHandler) ListIntegrations(c *gin.Context) {
 }
 
 // providerWorkflowCounts counts, per provider, how many of the org's workflows
-// contain at least one node of that provider's type. Node type is the provider
-// key, so a jsonb containment test finds them without loading every graph.
+// contain either an action node of that provider's type or an App Trigger whose
+// triggerProvider names it. JSONB containment finds both without loading every
+// graph; omitting the second shape would let disconnect claim that no workflow
+// uses GitLab immediately before removing its project hooks.
 //
 // Counted per ORG because workflows are org-owned: disconnecting a credential
 // should warn about everything it would break, including a teammate's workflow.
@@ -598,7 +600,9 @@ func (h *WorkflowHandler) providerWorkflowCounts(orgID string) map[string]int {
 		var n int64
 		h.db.DB.Model(&models.Workflow{}).
 			Where("organization_id = ? AND deleted_at IS NULL", orgID).
-			Where(`nodes @> ?`, fmt.Sprintf(`[{"data":{"nodeType":%q}}]`, p)).
+			Where(`(nodes @> ? OR nodes @> ?)`,
+				fmt.Sprintf(`[{"data":{"nodeType":%q}}]`, p),
+				fmt.Sprintf(`[{"data":{"nodeType":"integrationTrigger","triggerProvider":%q}}]`, p)).
 			Count(&n)
 		counts[p] = int(n)
 	}
@@ -791,6 +795,18 @@ func (h *WorkflowHandler) DisconnectIntegration(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "unknown provider"})
 		return
 	}
+	// GitLab creates real project hooks with this OAuth token. Remove them while
+	// the credential still exists; deleting the connection first would strand
+	// remote hooks and leave reconnecting unable to clean them up.
+	if provider == "gitlab" {
+		query := h.db.DB.Where("organization_id = ? AND user_id = ? AND provider = ? AND deleted_at IS NULL",
+			currentOrgID(c), currentUserID(c), provider)
+		if err := h.retireIntegrationTriggers(c.Request.Context(), query); err != nil {
+			slog.ErrorContext(c.Request.Context(), "could not retire GitLab webhooks on disconnect", "error", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "could not remove GitLab webhooks"})
+			return
+		}
+	}
 	h.db.DB.Unscoped().Where("organization_id = ? AND user_id = ? AND provider = ?",
 		currentOrgID(c), currentUserID(c), provider).Delete(&models.IntegrationConnection{})
 	slog.InfoContext(c.Request.Context(), "integration disconnected", "provider", provider, "user_id", currentUserID(c))
@@ -890,6 +906,18 @@ func (h *WorkflowHandler) listChildResources(orgID, userID, provider, parent str
 		if err != nil {
 			// Collaborators need push access to read; a repo the user can only
 			// read still has usable branches, so return those rather than nothing.
+			return branches, nil
+		}
+		return append(branches, people...), nil
+	case "gitlab":
+		branches, err := gitlabBranchResources(token, parent)
+		if err != nil {
+			return nil, err
+		}
+		people, err := gitlabMemberResources(token, parent)
+		if err != nil {
+			// Branch filters remain useful when the connected user cannot enumerate
+			// every inherited project member.
 			return branches, nil
 		}
 		return append(branches, people...), nil
