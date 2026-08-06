@@ -66,7 +66,19 @@ func InitServer(port int, db *database.DBClient, rdb *redis.Client) {
 		public.GET("/webhooks/:token", wh.WebhookInfo)
 		public.POST("/webhooks/:token", wh.ReceiveWebhook)
 
+		// Integration triggers. Two shapes because providers disagree about who
+		// owns the URL: a hook registered per subscription carries its trigger id,
+		// while an app-level provider (Slack) posts every workspace's events to
+		// the bare path and is routed from the payload. Authenticated by the
+		// provider's signature over the raw body — see hooks.go.
+		public.POST("/hooks/:provider", wh.ReceiveProviderHook)
+		public.POST("/hooks/:provider/:triggerID", wh.ReceiveProviderHook)
+
 		public.GET("/integrations/:provider/callback", wh.CallbackIntegration)
+		// GitHub sends installation completion here when the App uses a Setup
+		// URL. One-time state authenticates it; the handler then chains into the
+		// ordinary user OAuth callback above.
+		public.GET("/integrations/github/setup/callback", wh.GitHubSetupCallback)
 
 		// The pricing page is public, and it renders from the same limits table the
 		// server enforces so it cannot advertise something a handler will refuse.
@@ -129,6 +141,12 @@ func InitServer(port int, db *database.DBClient, rdb *redis.Client) {
 		api.POST("/workflows/:id/publish", wh.SetPublished(true))
 		api.POST("/workflows/:id/unpublish", wh.SetPublished(false))
 
+		// Integration triggers (provider events)
+		api.GET("/trigger-catalog", wh.TriggerCatalog)
+		api.GET("/workflows/:id/triggers", wh.ListTriggers)
+		api.POST("/workflows/:id/triggers", wh.CreateTrigger)
+		api.DELETE("/triggers/:id", wh.DeleteTrigger)
+
 		// Scheduled triggers
 		api.GET("/workflows/:id/schedule", wh.GetSchedule)
 		api.POST("/workflows/:id/schedule", wh.SetSchedule)
@@ -171,6 +189,7 @@ func InitServer(port int, db *database.DBClient, rdb *redis.Client) {
 		api.GET("/integrations", wh.ListIntegrations)
 		api.GET("/integrations/:provider/connect", wh.ConnectIntegration)
 		api.GET("/integrations/:provider/resources", wh.IntegrationResources)
+		api.GET("/integrations/github/setup", wh.GitHubIntegrationSetup)
 		api.PUT("/integrations/:provider/key", wh.SetIntegrationKey)
 		api.DELETE("/integrations/:provider", wh.DisconnectIntegration)
 	}

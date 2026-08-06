@@ -1120,7 +1120,7 @@ func (h *WorkflowHandler) execChatTool(c *gin.Context, flusher http.Flusher, req
 	case "list_integration_resources":
 		m, _ := input.(map[string]any)
 		provider, _ := m["provider"].(string)
-		return h.integrationResourcesForAI(currentUserID(c), provider)
+		return h.integrationResourcesForAI(currentOrgID(c), currentUserID(c), provider)
 
 	case "list_data_stores":
 		return h.dataStoresForAI(currentOrgID(c), req.WorkflowID)

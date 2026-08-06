@@ -817,6 +817,17 @@ func runNodeInner(ctx context.Context, node WorkflowASTNode, outputs map[string]
 	case NodeTypeScheduledTrigger:
 		return `{"trigger":"scheduled","time":"` + time.Now().Format(time.RFC3339) + `"}`, nil
 
+	case NodeTypeIntegrationTrigger:
+		// The hooks handler injects the normalized event here. The placeholder
+		// describes the shape a real event will have rather than being an empty
+		// object, so a manual run on the canvas can still exercise the nodes
+		// downstream instead of failing on a missing field.
+		if d.DefaultValue != nil && *d.DefaultValue != "" && *d.DefaultValue != "null" {
+			return *d.DefaultValue, nil
+		}
+		return `{"provider":"` + d.TriggerProvider + `","event":"` + d.TriggerEvent +
+			`","resource":"` + d.TriggerResourceID + `","data":{},"test":true}`, nil
+
 	case NodeTypeData:
 		return runDataNode(ctx, d, outputs, ownerID)
 

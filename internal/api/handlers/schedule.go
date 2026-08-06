@@ -6,18 +6,15 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"os"
 	"sync"
 	"time"
 
 	"workflow-ai/server/internal/billing"
 	"workflow-ai/server/internal/database/models"
 	"workflow-ai/server/internal/executor"
-	"workflow-ai/server/internal/hub"
 	"workflow-ai/server/internal/telemetry"
 
 	"github.com/gin-gonic/gin"
-	"github.com/google/uuid"
 )
 
 var schedulerOnce sync.Once
@@ -29,12 +26,21 @@ func (h *WorkflowHandler) StartScheduler() {
 	})
 }
 
+// scheduleLoop drives everything that fires on its own: due schedules, due
+// polls, and subscriptions about to lapse.
+//
+// One ticker for all three because they share the same constraint — exactly one
+// instance may run them — and a single loop makes that impossible to forget.
+// Each sweep is independent, so a provider outage inside one cannot stop the
+// others from running on the next tick.
 func (h *WorkflowHandler) scheduleLoop() {
 	ticker := time.NewTicker(1 * time.Minute)
 	defer ticker.Stop()
 	for {
 		<-ticker.C
 		h.runDueSchedules()
+		h.pollDueTriggers()
+		h.renewExpiringSubscriptions()
 	}
 }
 
@@ -152,60 +158,25 @@ func (h *WorkflowHandler) runWorkflowByID(workflowID string, nextRun *time.Time)
 		return
 	}
 
-	ast := executor.WorkflowAST{Version: "1.0", Name: workflow.Name, Nodes: nodes, Edges: edges}
-	keys := executor.APIKeys{Anthropic: os.Getenv("ANTHROPIC_API_KEY"), OpenAI: os.Getenv("OPENAI_API_KEY"), Brave: os.Getenv("BRAVE_API_KEY"), Jina: os.Getenv("JINA_API_KEY")}
-
 	// A scheduled run is the case the credit cap exists for: it spends money while
-	// nobody is watching. Refusing here — and recording WHY on the run — is what
-	// makes the stop visible instead of looking like the schedule silently died.
-	runIDPre := uuid.New()
-	res, admitErr := h.bill.AdmitRun(workflow.OrganizationID, workflow.UserID, runIDPre.String())
-	run := models.WorkflowRun{BaseModel: models.BaseModel{ID: runIDPre},
-		UserID: workflow.UserID, OrganizationID: workflow.OrganizationID,
-		WorkflowID: workflowID, WorkflowName: workflow.Name, Status: models.RunStatusRunning}
-	if admitErr != nil {
-		run.Status = models.RunStatusError
-		run.ErrorMessage = admitErr.Error()
-		h.db.DB.Create(&run)
-		slog.WarnContext(ctx, "scheduler: run refused", "workflow_id", workflowID,
-			"reason", admitErr.Error())
+	// nobody is watching. admitRun refuses — and records WHY on the run — which is
+	// what makes the stop visible instead of looking like the schedule died.
+	p, err := h.admitRun(ctx, workflowID, "schedule", nil)
+	if err != nil {
 		telemetry.ScheduleFire(ctx, "error")
 		return
 	}
-	defer h.bill.Finish(res)
-	h.db.DB.Create(&run)
-	runID := run.ID.String()
 
-	fireAttrs := []any{"workflow_id", workflowID, "workflow_name", workflow.Name, "run_id", runID}
+	fireAttrs := []any{"workflow_id", workflowID, "workflow_name", workflow.Name, "run_id", p.RunID()}
 	if nextRun != nil {
 		fireAttrs = append(fireAttrs, "next_run", *nextRun)
 	}
 	slog.InfoContext(ctx, "schedule fired", fireAttrs...)
 	telemetry.ScheduleFire(ctx, "ok")
 
-	// Notify any open canvas pages for this workflow so they can attach immediately.
-	hub.Workflow.Publish(workflowID, runID)
-
-	var events []executor.ExecutionEvent
-	startTime := time.Now()
-	finalStatus := models.RunStatusCompleted
 	// The schedule fires with no request context — the loaded workflow's
 	// owner is what routes integration tokens to the right user.
-	runCtx := res.Context(executor.WithWorkflowID(ctx, workflowID), runID)
-	executor.RunWorkflow(executor.WithTrigger(runCtx, "schedule"), ast, keys, runID, workflow.UserID, workflow.OrganizationID, func(ev executor.ExecutionEvent) {
-		ev.Timestamp = time.Since(startTime).Milliseconds()
-		events = append(events, ev)
-		hub.Global.Publish(runID, ev)
-		if ev.Type == executor.EventWorkflowError {
-			finalStatus = models.RunStatusError
-		}
-	})
-	eventsJSON, _ := json.Marshal(events)
-	h.db.DB.Model(&run).Updates(map[string]interface{}{
-		"status": finalStatus,
-		"events": models.JSONB(eventsJSON),
-	})
-	hub.Global.ClearBuffer(runID)
+	h.executeRun(ctx, p)
 }
 
 // GET /api/workflows/:id/schedule

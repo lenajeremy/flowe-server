@@ -59,7 +59,6 @@ var oauthProviders = map[string]oauthProvider{
 		authorizeURL: "https://github.com/login/oauth/authorize",
 		clientIDEnv:  "GITHUB_CLIENT_ID",
 		secretEnv:    "GITHUB_CLIENT_SECRET",
-		extraAuthQ:   url.Values{"scope": {"repo"}},
 	},
 	"gitlab": {
 		name:         "gitlab",
@@ -452,7 +451,12 @@ type oauthStateEntry struct {
 	// challenge goes to the provider, and the verifier is replayed at token
 	// exchange to prove the same client started the flow.
 	verifier string
-	expires  time.Time
+	// githubInstall marks state minted for /apps/{slug}/installations/new.
+	// githubInstallationID is filled by the setup callback before it chains
+	// into OAuth, then verified against the resulting GitHub App user token.
+	githubInstall        bool
+	githubInstallationID string
+	expires              time.Time
 }
 
 var (
@@ -469,6 +473,24 @@ func newOAuthStateShop(userID, orgID, origin, shop string) string {
 }
 
 func newOAuthStateFull(userID, orgID, origin, shop, verifier string) string {
+	return newOAuthStateEntry(oauthStateEntry{
+		userID: userID, orgID: orgID, origin: origin, shop: shop, verifier: verifier,
+	})
+}
+
+func newGitHubInstallState(userID, orgID, origin string) string {
+	return newOAuthStateEntry(oauthStateEntry{
+		userID: userID, orgID: orgID, origin: origin, githubInstall: true,
+	})
+}
+
+func newGitHubInstalledOAuthState(userID, orgID, origin, installationID string) string {
+	return newOAuthStateEntry(oauthStateEntry{
+		userID: userID, orgID: orgID, origin: origin, githubInstallationID: installationID,
+	})
+}
+
+func newOAuthStateEntry(entry oauthStateEntry) string {
 	b := make([]byte, 16)
 	_, _ = rand.Read(b)
 	s := hex.EncodeToString(b)
@@ -479,10 +501,8 @@ func newOAuthStateFull(userID, orgID, origin, shop, verifier string) string {
 			delete(oauthStates, k)
 		}
 	}
-	oauthStates[s] = oauthStateEntry{
-		userID: userID, orgID: orgID, origin: origin, shop: shop, verifier: verifier,
-		expires: time.Now().Add(10 * time.Minute),
-	}
+	entry.expires = time.Now().Add(10 * time.Minute)
+	oauthStates[s] = entry
 	return s
 }
 
@@ -512,10 +532,13 @@ func openerOrigin(c *gin.Context) string {
 // ── Handlers ──────────────────────────────────────────────────
 
 // ListIntegrations returns connection status for every supported provider,
-// scoped to the current user.
+// scoped to the current organization and user. A person can connect the same
+// provider separately in two organizations; showing the other tenant's account
+// here would both leak metadata and send the resource picker down the wrong
+// authorization path.
 func (h *WorkflowHandler) ListIntegrations(c *gin.Context) {
 	var conns []models.IntegrationConnection
-	h.db.DB.Where("user_id = ?", currentUserID(c)).Find(&conns)
+	h.db.DB.Where("organization_id = ? AND user_id = ?", currentOrgID(c), currentUserID(c)).Find(&conns)
 	byProvider := map[string]models.IntegrationConnection{}
 	for _, conn := range conns {
 		byProvider[conn.Provider] = conn
@@ -727,6 +750,21 @@ func (h *WorkflowHandler) CallbackIntegration(c *gin.Context) {
 		oauthResultPage(c, provider, openerOrig, false, err.Error())
 		return
 	}
+	if provider == "github" && (st.githubInstall || st.githubInstallationID != "") {
+		installationID := st.githubInstallationID
+		if st.githubInstall {
+			installationID, err = positiveGitHubID(c.Query("installation_id"))
+		}
+		if err == nil {
+			err = verifyGitHubInstallation(ctx, conn.AccessToken, installationID)
+		}
+		if err != nil {
+			slog.WarnContext(ctx, "github installation verification failed", "reason", truncate(err.Error(), 200))
+			telemetry.AuthEvent(ctx, "integration_oauth", "error")
+			oauthResultPage(c, provider, openerOrig, false, err.Error())
+			return
+		}
+	}
 	conn.UserID = userID
 	conn.OrganizationID = orgID
 
@@ -775,8 +813,8 @@ var errNotConnected = errors.New("is not connected")
 // listProviderResources resolves fresh credentials and returns the concrete
 // resources a connected provider exposes. Every fetch goes through
 // FreshAccessToken so expiring tokens (gmail, gitlab) refresh transparently.
-func (h *WorkflowHandler) listProviderResources(userID, provider string) ([]integrationResource, error) {
-	token, workspace := FreshAccessToken(h.db.DB, userID, provider)
+func (h *WorkflowHandler) listProviderResources(orgID, userID, provider string) ([]integrationResource, error) {
+	token, workspace := FreshAccessTokenForOrg(h.db.DB, orgID, userID, provider)
 	if token == "" {
 		return nil, fmt.Errorf("%s: %w", provider, errNotConnected)
 	}
@@ -802,7 +840,7 @@ func (h *WorkflowHandler) listProviderResources(userID, provider string) ([]inte
 	case "outlook":
 		return outlookResources(token)
 	case "slack":
-		return slackResources(token, UserGrantToken(h.db.DB, userID, "slack"))
+		return slackResources(token, UserGrantTokenForOrg(h.db.DB, orgID, userID, "slack"))
 	case "jira":
 		return jiraResources(token, workspace)
 	case "confluence":
@@ -829,6 +867,36 @@ func (h *WorkflowHandler) listProviderResources(userID, provider string) ([]inte
 	return []integrationResource{}, nil
 }
 
+// listChildResources lists resources that live inside another resource —
+// branches and collaborators of a repository, and later channels of a
+// workspace. Separate from listProviderResources because the parent is not
+// optional here: without it there is nothing to enumerate.
+//
+// Returns an empty list rather than an error for a provider/parent combination
+// nobody has taught it yet, so the picker degrades to its manual-entry field
+// instead of raising a toast at someone who did nothing wrong.
+func (h *WorkflowHandler) listChildResources(orgID, userID, provider, parent string) ([]integrationResource, error) {
+	token, _ := FreshAccessTokenForOrg(h.db.DB, orgID, userID, provider)
+	if token == "" {
+		return nil, fmt.Errorf("%s: %w", provider, errNotConnected)
+	}
+	switch provider {
+	case "github":
+		branches, err := githubBranchResources(token, parent)
+		if err != nil {
+			return nil, err
+		}
+		people, err := githubCollaboratorResources(token, parent)
+		if err != nil {
+			// Collaborators need push access to read; a repo the user can only
+			// read still has usable branches, so return those rather than nothing.
+			return branches, nil
+		}
+		return append(branches, people...), nil
+	}
+	return []integrationResource{}, nil
+}
+
 // IntegrationResources lists what the connected account exposes (databases,
 // pages, repos, projects, labels, prices, products, …) for the resource picker.
 func (h *WorkflowHandler) IntegrationResources(c *gin.Context) {
@@ -837,7 +905,17 @@ func (h *WorkflowHandler) IntegrationResources(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "unknown provider"})
 		return
 	}
-	resources, err := h.listProviderResources(currentUserID(c), provider)
+	// Some resources only exist inside another one: a branch belongs to a
+	// repository, a collaborator to a repository. `parent` names that container.
+	// Without it the picker would have to ask the user to type a branch name,
+	// which is exactly the guesswork the picker exists to remove.
+	var resources []integrationResource
+	var err error
+	if parent := c.Query("parent"); parent != "" {
+		resources, err = h.listChildResources(currentOrgID(c), currentUserID(c), provider, parent)
+	} else {
+		resources, err = h.listProviderResources(currentOrgID(c), currentUserID(c), provider)
+	}
 	if errors.Is(err, errNotConnected) {
 		// 404, not 502 — the resource picker treats this as its quiet
 		// "connect this first" state rather than a failure.
@@ -967,7 +1045,7 @@ func linearResources(token string) ([]integrationResource, error) {
 
 // integrationResourcesForAI returns connection status + resources as JSON for
 // the AI builder's list_integration_resources tool.
-func (h *WorkflowHandler) integrationResourcesForAI(userID, provider string) string {
+func (h *WorkflowHandler) integrationResourcesForAI(orgID, userID, provider string) string {
 	providers := allProviders
 	if _, ok := oauthProviders[provider]; ok {
 		providers = []string{provider}
@@ -975,7 +1053,8 @@ func (h *WorkflowHandler) integrationResourcesForAI(userID, provider string) str
 	out := map[string]any{}
 	for _, p := range providers {
 		var conn models.IntegrationConnection
-		if err := h.db.DB.Where("user_id = ? AND provider = ?", userID, p).First(&conn).Error; err != nil {
+		if err := h.db.DB.Where("organization_id = ? AND user_id = ? AND provider = ?", orgID, userID, p).
+			First(&conn).Error; err != nil {
 			out[p] = map[string]any{
 				"connected": false,
 				"hint":      "Not connected. The user must click Connect " + p + " in the node settings panel.",
@@ -983,7 +1062,7 @@ func (h *WorkflowHandler) integrationResourcesForAI(userID, provider string) str
 			continue
 		}
 		entry := map[string]any{"connected": true, "workspace": conn.WorkspaceName}
-		if resources, err := h.listProviderResources(userID, p); err != nil {
+		if resources, err := h.listProviderResources(orgID, userID, p); err != nil {
 			entry["error"] = err.Error()
 		} else {
 			entry["resources"] = resources
@@ -1146,6 +1225,23 @@ func FreshAccessToken(db *gorm.DB, userID, provider string) (token, workspace st
 	if err := db.Where("user_id = ? AND provider = ?", userID, provider).First(&conn).Error; err != nil {
 		return "", ""
 	}
+	return freshAccessTokenForConnection(db, &conn)
+}
+
+// FreshAccessTokenForOrg is the tenant-safe form for requests that already
+// know their organization. A user can belong to more than one organization and
+// connect the same provider in each; selecting by user/provider alone could
+// refresh and use the credential from the wrong tenant.
+func FreshAccessTokenForOrg(db *gorm.DB, orgID, userID, provider string) (token, workspace string) {
+	var conn models.IntegrationConnection
+	if err := db.Where("organization_id = ? AND user_id = ? AND provider = ?",
+		orgID, userID, provider).First(&conn).Error; err != nil {
+		return "", ""
+	}
+	return freshAccessTokenForConnection(db, &conn)
+}
+
+func freshAccessTokenForConnection(db *gorm.DB, conn *models.IntegrationConnection) (token, workspace string) {
 	// Nothing to do for a token with no recorded expiry (classic OAuth Apps,
 	// Slack, Notion…) or one that is still comfortably valid.
 	if conn.ExpiresAt == nil || time.Until(*conn.ExpiresAt) > 2*time.Minute {
@@ -1155,18 +1251,18 @@ func FreshAccessToken(db *gorm.DB, userID, provider string) (token, workspace st
 	// so say why now — a stale token looks identical to a wrong one in the logs.
 	if conn.RefreshToken == "" {
 		slog.Warn("integration token expired and cannot be refreshed — reconnect required",
-			"provider", provider, "user_id", userID, "expired_at", conn.ExpiresAt)
+			"provider", conn.Provider, "user_id", conn.UserID, "expired_at", conn.ExpiresAt)
 		return conn.AccessToken, conn.WorkspaceID
 	}
-	if refreshed, err := refreshConnection(db, &conn); err == nil {
-		slog.Info("integration token refreshed", "provider", provider, "user_id", userID,
+	if refreshed, err := refreshConnection(db, conn); err == nil {
+		slog.Info("integration token refreshed", "provider", conn.Provider, "user_id", conn.UserID,
 			"expires_at", refreshed.ExpiresAt)
 		return refreshed.AccessToken, refreshed.WorkspaceID
 	} else {
 		// The refresh token itself is spent or revoked — only reconnecting fixes
 		// this, and the user needs to be told rather than left with silent 401s.
 		slog.Error("integration token refresh failed — reconnect required",
-			"provider", provider, "user_id", userID, "error", err.Error())
+			"provider", conn.Provider, "user_id", conn.UserID, "error", err.Error())
 	}
 	return conn.AccessToken, conn.WorkspaceID
 }
@@ -1177,6 +1273,18 @@ func FreshAccessToken(db *gorm.DB, userID, provider string) (token, workspace st
 func UserGrantToken(db *gorm.DB, userID, provider string) string {
 	var conn models.IntegrationConnection
 	if err := db.Where("user_id = ? AND provider = ?", userID, provider).First(&conn).Error; err != nil {
+		return ""
+	}
+	return conn.UserAccessToken
+}
+
+// UserGrantTokenForOrg is the tenant-safe equivalent used by authenticated
+// resource pickers. Slack can be connected to a different workspace in each
+// Fernary organization, so user/provider alone is ambiguous.
+func UserGrantTokenForOrg(db *gorm.DB, orgID, userID, provider string) string {
+	var conn models.IntegrationConnection
+	if err := db.Where("organization_id = ? AND user_id = ? AND provider = ?", orgID, userID, provider).
+		First(&conn).Error; err != nil {
 		return ""
 	}
 	return conn.UserAccessToken

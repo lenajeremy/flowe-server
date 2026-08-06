@@ -136,7 +136,8 @@ func agentToolName(node executor.WorkflowASTNode) string {
 func agentSkipNode(t executor.NodeType) bool {
 	switch t {
 	case executor.NodeTypeBranch, executor.NodeTypeLoop, executor.NodeTypeTextOutput,
-		executor.NodeTypeWebhookTrigger, executor.NodeTypeScheduledTrigger:
+		executor.NodeTypeWebhookTrigger, executor.NodeTypeScheduledTrigger,
+		executor.NodeTypeIntegrationTrigger:
 		return true
 	}
 	return false

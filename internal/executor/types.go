@@ -15,6 +15,7 @@ const (
 	NodeTypeHumanApproval       NodeType = "humanApproval"
 	NodeTypeWebhookTrigger      NodeType = "webhookTrigger"
 	NodeTypeScheduledTrigger    NodeType = "scheduledTrigger"
+	NodeTypeIntegrationTrigger  NodeType = "integrationTrigger"
 	NodeTypeNotion              NodeType = "notion"
 	NodeTypeLinear              NodeType = "linear"
 	NodeTypeGithub              NodeType = "github"
@@ -69,6 +70,15 @@ type FlowNodeData struct {
 	Condition     *string  `json:"condition,omitempty"`
 	LoopOverField *string  `json:"loopOverField,omitempty"`
 	Mode          *string  `json:"mode,omitempty"`
+
+	// integrationTrigger — what this node is subscribed to. The authoritative
+	// copy lives in the integration_triggers row (that is what the provider was
+	// registered against); these are the canvas's view of it, so the node can
+	// render "GitHub · Pull request opened" without a fetch and a manual run can
+	// produce a realistic placeholder payload.
+	TriggerProvider   string `json:"triggerProvider,omitempty"`
+	TriggerEvent      string `json:"triggerEvent,omitempty"`
+	TriggerResourceID string `json:"triggerResourceId,omitempty"`
 
 	// httpRequest
 	URL            string `json:"url"`

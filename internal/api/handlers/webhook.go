@@ -7,16 +7,12 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
-	"os"
-	"time"
 
 	"workflow-ai/server/internal/database/models"
 	"workflow-ai/server/internal/executor"
-	"workflow-ai/server/internal/hub"
 	"workflow-ai/server/internal/telemetry"
 
 	"github.com/gin-gonic/gin"
-	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -101,88 +97,26 @@ func (h *WorkflowHandler) ReceiveWebhook(c *gin.Context) {
 		slog.WarnContext(ctx, "webhook payload invalid", "workflow_id", wh.WorkflowID, "workflow_name", workflow.Name)
 	}
 
-	runIDPre := uuid.New()
-	res, admitErr := h.bill.AdmitRun(workflow.OrganizationID, workflow.UserID, runIDPre.String())
-	run := models.WorkflowRun{
-		BaseModel:      models.BaseModel{ID: runIDPre},
-		UserID:         workflow.UserID,
-		OrganizationID: workflow.OrganizationID,
-		WorkflowID:     wh.WorkflowID,
-		WorkflowName:   workflow.Name,
-		Status:         models.RunStatusRunning,
-	}
+	payloadJSON, _ := json.Marshal(payload)
+	p, admitErr := h.admitRun(ctx, wh.WorkflowID, "webhook",
+		injectInto(executor.NodeTypeWebhookTrigger, "", string(payloadJSON)))
 	if admitErr != nil {
 		// 402 rather than a generic failure: the caller's webhook is fine, the
 		// account is out of credit, and those need different responses at the
 		// sender's end.
-		run.Status = models.RunStatusError
-		run.ErrorMessage = admitErr.Error()
-		h.db.DB.Create(&run)
-		slog.WarnContext(ctx, "webhook run refused", "workflow_id", wh.WorkflowID,
-			"reason", admitErr.Error())
-		c.JSON(http.StatusPaymentRequired, gin.H{"error": admitErr.Error(), "run_id": run.ID.String()})
+		c.JSON(http.StatusPaymentRequired, gin.H{"error": admitErr.Error()})
 		return
 	}
-	h.db.DB.Create(&run)
 
-	var nodes []executor.WorkflowASTNode
-	var edges []executor.WorkflowASTEdge
-	json.Unmarshal(workflow.Nodes, &nodes)
-	json.Unmarshal(workflow.Edges, &edges)
-
-	ast := executor.WorkflowAST{
-		Version: "1.0",
-		Name:    workflow.Name,
-		Nodes:   nodes,
-		Edges:   edges,
-	}
-	keys := executor.APIKeys{
-		Anthropic: os.Getenv("ANTHROPIC_API_KEY"),
-		OpenAI:    os.Getenv("OPENAI_API_KEY"),
-		Brave:     os.Getenv("BRAVE_API_KEY"),
-		Jina:      os.Getenv("JINA_API_KEY"),
-	}
-	runID := run.ID.String()
+	runID := p.RunID()
 	slog.InfoContext(ctx, "webhook received",
 		"run_id", runID, "workflow_id", wh.WorkflowID, "workflow_name", workflow.Name,
 		"payload_bytes", c.Request.ContentLength)
 	telemetry.WebhookReceived(ctx, payloadStatus)
-	hub.Workflow.Publish(wh.WorkflowID, runID)
-
-	// Inject webhook payload into webhookTrigger nodes via DefaultValue
-	payloadJSON, _ := json.Marshal(payload)
-	payloadStr := string(payloadJSON)
-	for i := range ast.Nodes {
-		if ast.Nodes[i].Data.NodeType == executor.NodeTypeWebhookTrigger {
-			ast.Nodes[i].Data.DefaultValue = &payloadStr
-		}
-	}
 
 	// Link the detached background run to the webhook request's trace.
 	bgCtx := trace.ContextWithSpanContext(context.Background(), trace.SpanContextFromContext(c.Request.Context()))
-	go func() {
-		var events []executor.ExecutionEvent
-		startTime := time.Now()
-		finalStatus := models.RunStatusCompleted
-		defer h.bill.Finish(res)
-		runCtx := res.Context(executor.WithWorkflowID(bgCtx, wh.WorkflowID), runID)
-		executor.RunWorkflow(executor.WithTrigger(runCtx, "webhook"), ast, keys, runID, workflow.UserID, workflow.OrganizationID, func(event executor.ExecutionEvent) {
-			event.Timestamp = time.Since(startTime).Milliseconds()
-			events = append(events, event)
-			hub.Global.Publish(runID, event)
-			slog.DebugContext(bgCtx, "webhook run event", "run_id", runID, "type", event.Type, "node_id", event.NodeID)
-			if event.Type == executor.EventWorkflowError {
-				finalStatus = models.RunStatusError
-			}
-		})
-		slog.InfoContext(bgCtx, "webhook run finished", "run_id", runID, "status", finalStatus, "event_count", len(events))
-		eventsJSON, _ := json.Marshal(events)
-		h.db.DB.Model(&run).Updates(map[string]interface{}{
-			"status": finalStatus,
-			"events": models.JSONB(eventsJSON),
-		})
-		hub.Global.ClearBuffer(runID)
-	}()
+	go h.executeRun(bgCtx, p)
 
 	c.JSON(http.StatusAccepted, gin.H{"run_id": runID, "status": "running"})
 }

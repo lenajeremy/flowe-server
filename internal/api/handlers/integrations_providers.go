@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"workflow-ai/server/internal/database/models"
+	"workflow-ai/server/internal/githubapp"
 )
 
 // Provider-specific OAuth code exchange and resource listing for the
@@ -65,47 +67,122 @@ func exchangeGithubCode(code string) (*models.IntegrationConnection, error) {
 		exp := time.Now().Add(time.Duration(tok.ExpiresIn) * time.Second)
 		conn.ExpiresAt = &exp
 	}
-	// Best-effort: resolve the account login for display.
-	if login := githubLogin(tok.AccessToken); login != "" {
+	// Best-effort: resolve both the display login and immutable account id. The
+	// latter lets a github_app_authorization revocation still find this grant
+	// after the user renames their GitHub account.
+	if login, accountID := githubIdentity(tok.AccessToken); login != "" {
 		conn.WorkspaceName = login
+		conn.WorkspaceID = accountID
 	}
 	return conn, nil
 }
 
-func githubLogin(token string) string {
+func githubIdentity(token string) (login, accountID string) {
 	req, _ := http.NewRequest(http.MethodGet, "https://api.github.com/user", nil)
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Accept", "application/vnd.github+json")
 	raw, err := doOAuthRequest(req)
 	if err != nil {
-		return ""
+		return "", ""
 	}
 	var u struct {
+		ID    int64  `json:"id"`
 		Login string `json:"login"`
 	}
 	if json.Unmarshal(raw, &u) != nil {
-		return ""
+		return "", ""
 	}
-	return u.Login
+	if u.ID > 0 {
+		accountID = strconv.FormatInt(u.ID, 10)
+	}
+	return u.Login, accountID
 }
 
 func githubResources(token string) ([]integrationResource, error) {
-	req, _ := http.NewRequest(http.MethodGet, "https://api.github.com/user/repos?per_page=100&sort=updated", nil)
+	client := githubapp.NewClient(token, &http.Client{Timeout: 30 * time.Second})
+	installations, err := client.ListInstallations(context.Background())
+	if err != nil {
+		return nil, err
+	}
+	out := []integrationResource{}
+	seen := make(map[string]bool)
+	for _, installation := range installations {
+		if installation.SuspendedAt != nil {
+			continue
+		}
+		repositories, err := client.ListInstallationRepositories(context.Background(), installation.ID)
+		if err != nil {
+			return nil, err
+		}
+		for _, repository := range repositories {
+			key := strings.ToLower(repository.FullName)
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			out = append(out, integrationResource{ID: repository.FullName, Name: repository.FullName, Type: "repo"})
+		}
+	}
+	return out, nil
+}
+
+// githubBranchResources lists a repository's branches, so "only PRs into main"
+// is a choice from a list rather than a branch name typed from memory.
+func githubBranchResources(token, repo string) ([]integrationResource, error) {
+	req, _ := http.NewRequest(http.MethodGet,
+		"https://api.github.com/repos/"+repo+"/branches?per_page=100", nil)
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Accept", "application/vnd.github+json")
 	raw, err := doOAuthRequest(req)
 	if err != nil {
 		return nil, err
 	}
-	var repos []struct {
-		FullName string `json:"full_name"`
+	var branches []struct {
+		Name string `json:"name"`
 	}
-	if err := json.Unmarshal(raw, &repos); err != nil {
-		return nil, fmt.Errorf("parse github repos: %w", err)
+	if err := json.Unmarshal(raw, &branches); err != nil {
+		return nil, fmt.Errorf("parse github branches: %w", err)
 	}
-	out := make([]integrationResource, 0, len(repos))
-	for _, r := range repos {
-		out = append(out, integrationResource{ID: r.FullName, Name: r.FullName, Type: "repo"})
+	out := make([]integrationResource, 0, len(branches))
+	for _, b := range branches {
+		out = append(out, integrationResource{ID: b.Name, Name: b.Name, Type: "branch"})
+	}
+	return out, nil
+}
+
+// githubCollaboratorResources lists the people associated with a repository,
+// for filters like "only PRs opened by…".
+//
+// Contributors, not collaborators. /collaborators is the more obvious endpoint
+// and it 403s ("Resource not accessible by integration") for a GitHub App
+// without the Members permission — measured against a real connection, on every
+// repository. /contributors needs only repository read, returns actual humans
+// who have touched the code, and is the better list to filter by anyway.
+func githubCollaboratorResources(token, repo string) ([]integrationResource, error) {
+	req, _ := http.NewRequest(http.MethodGet,
+		"https://api.github.com/repos/"+repo+"/contributors?per_page=100", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	raw, err := doOAuthRequest(req)
+	if err != nil {
+		return nil, err
+	}
+	var people []struct {
+		Login string `json:"login"`
+		Name  string `json:"name"`
+	}
+	if err := json.Unmarshal(raw, &people); err != nil {
+		return nil, fmt.Errorf("parse github contributors: %w", err)
+	}
+	out := make([]integrationResource, 0, len(people))
+	for _, p := range people {
+		// The login is what the webhook payload carries, so it has to be the id
+		// even when a friendlier display name exists.
+		label := p.Login
+		if p.Name != "" && p.Name != p.Login {
+			label = p.Name + " (" + p.Login + ")"
+		}
+		out = append(out, integrationResource{ID: p.Login, Name: label, Type: "user"})
 	}
 	return out, nil
 }
