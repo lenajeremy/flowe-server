@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -143,6 +144,128 @@ func TestAnOpenedPullRequestBecomesOneEvent(t *testing.T) {
 	}
 	if ev.Data["title"] != "Fix the retry loop" || ev.Data["base"] != "main" {
 		t.Errorf("payload not flattened for templates: %#v", ev.Data)
+	}
+}
+
+func TestAnEditedIssueIncludesItsCurrentAndPreviousValues(t *testing.T) {
+	body := `{
+		"action":"edited",
+		"installation":{"id":48273901},
+		"repository":{"full_name":"acme/widgets"},
+		"changes":{
+			"title":{"from":"Crash on empty input"},
+			"body":{"from":"Original reproduction steps"}
+		},
+		"issue":{
+			"number":17,"title":"Crash when input is empty","body":"Updated reproduction steps",
+			"html_url":"https://github.com/acme/widgets/issues/17",
+			"user":{"login":"octocat"},"labels":[{"name":"bug"},{"name":"p1"}]
+		}
+	}`
+	events, err := (githubAdapter{}).Parse(signed(t, "issues", body), []byte(body))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("want one event, got %d", len(events))
+	}
+	ev := events[0]
+	if ev.Type != "issues.edited" {
+		t.Errorf("type = %q, want issues.edited", ev.Type)
+	}
+	if ev.ScopeID != "48273901" || ev.ResourceID != "acme/widgets" {
+		t.Errorf("routing keys = scope %q, resource %q", ev.ScopeID, ev.ResourceID)
+	}
+	if ev.Data["title"] != "Crash when input is empty" || ev.Data["body"] != "Updated reproduction steps" {
+		t.Errorf("current issue values missing: %#v", ev.Data)
+	}
+	if ev.Data["previous_title"] != "Crash on empty input" || ev.Data["previous_body"] != "Original reproduction steps" {
+		t.Errorf("previous issue values missing: %#v", ev.Data)
+	}
+	if got := fmt.Sprint(ev.Data["changed_fields"]); got != "[title body]" {
+		t.Errorf("changed fields = %s, want [title body]", got)
+	}
+	if !valueMatches(ev.Data["label"], "p1") {
+		t.Errorf("issue labels are not filterable: %#v", ev.Data["label"])
+	}
+}
+
+func TestACommentAddedToAnIssueIncludesCommentAndIssueContext(t *testing.T) {
+	body := `{
+		"action":"created",
+		"installation":{"id":48273901},
+		"repository":{"full_name":"acme/widgets"},
+		"issue":{
+			"number":17,"title":"Crash on empty input","body":"Steps to reproduce",
+			"html_url":"https://github.com/acme/widgets/issues/17",
+			"user":{"login":"reporter"},"labels":[{"name":"bug"}]
+		},
+		"comment":{
+			"id":991,"body":"I can reproduce this on v2.1.",
+			"html_url":"https://github.com/acme/widgets/issues/17#issuecomment-991",
+			"user":{"login":"octocat"}
+		}
+	}`
+	events, err := (githubAdapter{}).Parse(signed(t, "issue_comment", body), []byte(body))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("want one event, got %d", len(events))
+	}
+	ev := events[0]
+	if ev.Type != "issue_comment.created" {
+		t.Errorf("type = %q, want issue_comment.created", ev.Type)
+	}
+	if ev.Data["comment_id"] != int64(991) || ev.Data["body"] != "I can reproduce this on v2.1." {
+		t.Errorf("comment values missing: %#v", ev.Data)
+	}
+	if ev.Data["number"] != 17 || ev.Data["issue_author"] != "reporter" || ev.Data["issue_body"] != "Steps to reproduce" {
+		t.Errorf("issue context missing: %#v", ev.Data)
+	}
+	if ev.Data["is_pull_request"] != false {
+		t.Errorf("ordinary issue comment marked as pull request: %#v", ev.Data["is_pull_request"])
+	}
+	if !valueMatches(ev.Data["label"], "bug") {
+		t.Errorf("comment's issue labels are not filterable: %#v", ev.Data["label"])
+	}
+}
+
+func TestAConversationCommentOnAPullRequestIsIdentified(t *testing.T) {
+	body := `{
+		"action":"created","repository":{"full_name":"acme/widgets"},
+		"issue":{"number":42,"title":"Fix it","pull_request":{"url":"https://api.github.com/repos/acme/widgets/pulls/42"}},
+		"comment":{"id":992,"body":"Looks good","user":{"login":"reviewer"}}
+	}`
+	events, err := (githubAdapter{}).Parse(signed(t, "issue_comment", body), []byte(body))
+	if err != nil || len(events) != 1 {
+		t.Fatalf("parse: %v, %d events", err, len(events))
+	}
+	if events[0].Data["is_pull_request"] != true {
+		t.Errorf("pull request conversation comment not identified: %#v", events[0].Data)
+	}
+}
+
+func TestUnrequestedIssueActionsProduceNoEvents(t *testing.T) {
+	tests := []struct {
+		hookEvent string
+		action    string
+		object    string
+	}{
+		{hookEvent: "issues", action: "labeled", object: `"issue":{"number":17}`},
+		{hookEvent: "issues", action: "closed", object: `"issue":{"number":17}`},
+		{hookEvent: "issue_comment", action: "edited", object: `"comment":{"id":991}`},
+		{hookEvent: "issue_comment", action: "deleted", object: `"comment":{"id":991}`},
+	}
+	for _, tt := range tests {
+		body := `{"action":"` + tt.action + `","repository":{"full_name":"acme/widgets"},` + tt.object + `}`
+		events, err := (githubAdapter{}).Parse(signed(t, tt.hookEvent, body), []byte(body))
+		if err != nil {
+			t.Fatalf("%s.%s: %v", tt.hookEvent, tt.action, err)
+		}
+		if len(events) != 0 {
+			t.Errorf("%s.%s produced %d events, want 0", tt.hookEvent, tt.action, len(events))
+		}
 	}
 }
 

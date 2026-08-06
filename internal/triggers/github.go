@@ -73,7 +73,25 @@ func (githubAdapter) Events() []EventSpec {
 				"url": "https://github.com/o/r/issues/17",
 			},
 		},
-		{ID: "issue_comment.created", Label: "Comment on an issue or PR", ResourceKind: "repo"},
+		{
+			ID: "issues.edited", Label: "Issue edited", ResourceKind: "repo",
+			Filters: []FilterSpec{{Key: "label", Label: "Has label", Placeholder: "bug"}},
+			Sample: map[string]any{
+				"number": 17, "title": "Crash when input is empty", "body": "Updated reproduction steps",
+				"author": "octocat", "url": "https://github.com/o/r/issues/17",
+				"labels": []string{"bug"}, "changed_fields": []string{"title", "body"},
+				"previous_title": "Crash on empty input", "previous_body": "Original reproduction steps",
+			},
+		},
+		{
+			ID: "issue_comment.created", Label: "Comment added to an issue or PR", ResourceKind: "repo",
+			Filters: []FilterSpec{{Key: "author", Label: "Commented by", Placeholder: "octocat", ResourceKind: "user"}},
+			Sample: map[string]any{
+				"number": 17, "title": "Crash on empty input", "body": "I can reproduce this on v2.1.",
+				"author": "octocat", "url": "https://github.com/o/r/issues/17#issuecomment-1",
+				"issue_url": "https://github.com/o/r/issues/17", "is_pull_request": false,
+			},
+		},
 		{
 			ID: "push", Label: "Commits pushed", ResourceKind: "repo",
 			Filters: []FilterSpec{{Key: "branch", Label: "Branch", Placeholder: "main", ResourceKind: "branch"}},
@@ -88,6 +106,7 @@ var githubHookEvents = map[string]string{
 	"pull_request.opened":   "pull_request",
 	"pull_request.merged":   "pull_request",
 	"issues.opened":         "issues",
+	"issues.edited":         "issues",
 	"issue_comment.created": "issue_comment",
 	"push":                  "push",
 	"release.published":     "release",
@@ -243,14 +262,23 @@ func (githubAdapter) Parse(r *http.Request, body []byte) ([]Event, error) {
 			Title   string `json:"title"`
 			Body    string `json:"body"`
 			HTMLURL string `json:"html_url"`
-			User    struct {
+			// GitHub represents pull requests through the issues API as well. This
+			// marker lets a comment-triggered workflow distinguish an ordinary
+			// issue comment from a conversation comment on a pull request.
+			PullRequest json.RawMessage `json:"pull_request"`
+			User        struct {
 				Login string `json:"login"`
 			} `json:"user"`
 			Labels []struct {
 				Name string `json:"name"`
 			} `json:"labels"`
 		} `json:"issue"`
+		Changes struct {
+			Title *githubStringChange `json:"title"`
+			Body  *githubStringChange `json:"body"`
+		} `json:"changes"`
 		Comment *struct {
+			ID      int64  `json:"id"`
 			Body    string `json:"body"`
 			HTMLURL string `json:"html_url"`
 			User    struct {
@@ -350,14 +378,31 @@ func (githubAdapter) Parse(r *http.Request, body []byte) ([]Event, error) {
 		}
 
 	case hookEvent == "issues" && p.Issue != nil:
-		if p.Action != "opened" {
+		switch p.Action {
+		case "opened":
+			ev.Type = "issues.opened"
+		case "edited":
+			ev.Type = "issues.edited"
+		default:
 			return nil, nil
 		}
-		ev.Type = "issues.opened"
+		labels := labelNames(p.Issue.Labels)
 		ev.Data = map[string]any{
 			"number": p.Issue.Number, "title": p.Issue.Title, "body": p.Issue.Body,
 			"url": p.Issue.HTMLURL, "author": p.Issue.User.Login,
-			"labels": labelNames(p.Issue.Labels), "repo": p.Repo.FullName,
+			"labels": labels, "label": labels, "repo": p.Repo.FullName,
+		}
+		if p.Action == "edited" {
+			changedFields := make([]string, 0, 2)
+			if p.Changes.Title != nil {
+				changedFields = append(changedFields, "title")
+				ev.Data["previous_title"] = p.Changes.Title.From
+			}
+			if p.Changes.Body != nil {
+				changedFields = append(changedFields, "body")
+				ev.Data["previous_body"] = p.Changes.Body.From
+			}
+			ev.Data["changed_fields"] = changedFields
 		}
 
 	case hookEvent == "issue_comment" && p.Comment != nil:
@@ -366,12 +411,19 @@ func (githubAdapter) Parse(r *http.Request, body []byte) ([]Event, error) {
 		}
 		ev.Type = "issue_comment.created"
 		ev.Data = map[string]any{
-			"body": p.Comment.Body, "url": p.Comment.HTMLURL,
+			"comment_id": p.Comment.ID, "body": p.Comment.Body, "url": p.Comment.HTMLURL,
 			"author": p.Comment.User.Login, "repo": p.Repo.FullName,
 		}
 		if p.Issue != nil {
 			ev.Data["number"] = p.Issue.Number
 			ev.Data["title"] = p.Issue.Title
+			ev.Data["issue_body"] = p.Issue.Body
+			ev.Data["issue_url"] = p.Issue.HTMLURL
+			ev.Data["issue_author"] = p.Issue.User.Login
+			labels := labelNames(p.Issue.Labels)
+			ev.Data["labels"] = labels
+			ev.Data["label"] = labels
+			ev.Data["is_pull_request"] = len(p.Issue.PullRequest) > 0 && string(p.Issue.PullRequest) != "null"
 		}
 
 	case hookEvent == "push":
@@ -406,6 +458,13 @@ func (githubAdapter) Parse(r *http.Request, body []byte) ([]Event, error) {
 
 type githubRepository struct {
 	FullName string `json:"full_name"`
+}
+
+// githubStringChange is GitHub's shape for an edited issue field. The outer
+// pointer tells us whether the field changed; From preserves the previous value
+// for workflows that need to compare the before and after state.
+type githubStringChange struct {
+	From any `json:"from"`
 }
 
 func githubRepositoryNames(repositories []githubRepository) []string {
