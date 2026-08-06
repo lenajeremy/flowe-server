@@ -49,13 +49,26 @@ func WithClock(system string) string { return appendClock(system, false) }
 // isn't in the request just invites the model to hallucinate a call.
 func WithClockAndTool(system string) string { return appendClock(system, true) }
 
-func appendClock(system string, hasTool bool) string {
+// ClockBlock is the clock on its own, for call sites that keep it in a
+// separate block instead of concatenating it onto the prompt.
+//
+// The clock carries a Unix second, so it is different on every request. Glued
+// to the end of a system prompt it makes the whole prefix unique each time,
+// and a prompt cache — which matches on that prefix — can never hit. Held
+// apart and placed last, the static instructions in front of it cache and only
+// the clock is re-read per turn.
+func ClockBlock(hasTool bool) string {
 	clock := ClockLine(clockNow()) +
 		"\nTreat this as the authoritative current time — never rely on your training cutoff for the date." +
 		" Times without a stated zone are UTC."
 	if hasTool {
 		clock += " Call " + ClockToolName + " if you need another timezone or a fresher reading."
 	}
+	return clock
+}
+
+func appendClock(system string, hasTool bool) string {
+	clock := ClockBlock(hasTool)
 	if strings.TrimSpace(system) == "" {
 		return clock
 	}

@@ -435,6 +435,12 @@ func (h *WorkflowHandler) AgentChatTurn(c *gin.Context) {
 }
 
 // agentSystemPrompt frames the workflow-as-agent contract.
+//
+// The clock is deliberately NOT stitched on here. It changes every second, and
+// this prompt is the head of the cached prefix — the provider loops below place
+// the clock after the cache breakpoint instead, so the prompt in front of it
+// stays byte-identical from turn to turn. The model still receives both, in the
+// same order.
 func agentSystemPrompt(ast executor.WorkflowAST, tools []agentTool, state map[string]string) string {
 	var names []string
 	for _, t := range tools {
@@ -444,7 +450,7 @@ func agentSystemPrompt(ast executor.WorkflowAST, tools []agentTool, state map[st
 	for k := range state {
 		stateKeys = append(stateKeys, k)
 	}
-	return executor.WithClockAndTool(fmt.Sprintf(`You are the workflow %q, acting as a conversational agent for its owner.
+	return fmt.Sprintf(`You are the workflow %q, acting as a conversational agent for its owner.
 
 Your tools are this workflow's nodes: %s. Each tool's saved configuration is its default behaviour; pass arguments only to adjust a call to the user's current request (e.g. tweak a prompt, change a search query). You NEVER modify the workflow itself. You also have get_current_time, which is not a node — it runs nothing and changes nothing.
 
@@ -453,7 +459,7 @@ Rules:
 - Prior tool outputs are stored as state (current keys: [%s]) and template tokens like {{nodeId.output.field}} in tool arguments resolve against that state.
 - If the user asks for something no tool can do, say so plainly and describe what this workflow CAN do.
 - Be concise. Summarize tool results in plain language rather than dumping raw JSON, unless asked.`,
-		ast.Name, strings.Join(names, ", "), strings.Join(stateKeys, ", ")))
+		ast.Name, strings.Join(names, ", "), strings.Join(stateKeys, ", "))
 }
 
 // ── Provider loops (mirrors the builder-chat loops, different tools) ──
@@ -483,7 +489,7 @@ func (h *WorkflowHandler) agentAnthropicLoop(c *gin.Context, flusher http.Flushe
 			"max_tokens": 8000,
 			"thinking":   model.Thinking,
 			"stream":     true,
-			"system":     system,
+			"system":     cachedSystem(system),
 			"tools":      toolSchemas,
 			"messages":   messages,
 		})
@@ -546,7 +552,7 @@ func (h *WorkflowHandler) agentOpenAILoop(c *gin.Context, flusher http.Flusher, 
 			"parameters":  executor.ClockToolSchema(),
 		},
 	})
-	messages := []map[string]any{{"role": "system", "content": system}}
+	messages := cachedSystemMessages(system)
 	for _, m := range history {
 		if m.Content != "" {
 			messages = append(messages, map[string]any{"role": m.Role, "content": m.Content})

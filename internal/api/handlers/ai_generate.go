@@ -1191,6 +1191,37 @@ func (h *WorkflowHandler) execChatTool(c *gin.Context, flusher http.Flusher, req
 	}
 }
 
+// cachedSystem renders a system prompt as two blocks: the static instructions,
+// marked cacheable, then the clock.
+//
+// Anthropic hashes the prompt in the order tools → system → messages and
+// caches everything up to the breakpoint, so marking the static block also
+// covers the tool schemas sitting in front of it. The clock goes after the
+// breakpoint: it changes every second, and anything past the breakpoint is
+// re-read without invalidating what precedes it. Marked the other way round —
+// or concatenated, as WithClockAndTool does — the prefix is unique per request
+// and nothing caches at all.
+//
+// The saving is the whole builder prompt plus the integration catalogue, re-sent
+// on every turn of a five-round tool loop.
+func cachedSystem(static string) []map[string]any {
+	return []map[string]any{
+		{"type": "text", "text": static, "cache_control": map[string]any{"type": "ephemeral"}},
+		{"type": "text", "text": executor.ClockBlock(true)},
+	}
+}
+
+// cachedSystemMessages is cachedSystem for OpenAI-compatible providers, which
+// have no cache_control: they cache the longest common prefix on their own, so
+// the only thing that matters is that the first message stays byte-identical
+// from turn to turn. Same two pieces, same order, one message each.
+func cachedSystemMessages(static string) []map[string]any {
+	return []map[string]any{
+		{"role": "system", "content": static},
+		{"role": "system", "content": executor.ClockBlock(true)},
+	}
+}
+
 // runAnthropicChat drives the tool loop against the Anthropic Messages API.
 // The returned bool is false when the loop ended on a request/stream error
 // (instrumentation only — the client already got the SSE error event).
@@ -1217,7 +1248,7 @@ func (h *WorkflowHandler) runAnthropicChat(c *gin.Context, flusher http.Flusher,
 			"max_tokens": 16000,
 			"thinking":   model.Thinking,
 			"stream":     true,
-			"system":     executor.WithClockAndTool(workflowSystemPrompt),
+			"system":     cachedSystem(workflowSystemPrompt),
 			"tools":      allTools,
 			"messages":   messages,
 		})
@@ -1270,7 +1301,7 @@ func (h *WorkflowHandler) runAnthropicChat(c *gin.Context, flusher http.Flusher,
 // chat-completions endpoint (OpenAI, Gemini, xAI). The returned bool is false
 // when the loop ended on a request/stream error (instrumentation only).
 func (h *WorkflowHandler) runOpenAIChat(c *gin.Context, flusher http.Flusher, req *aiGenerateRequest, model chatModelSpec, apiKey, url string) bool {
-	messages := []map[string]any{{"role": "system", "content": executor.WithClockAndTool(workflowSystemPrompt)}}
+	messages := cachedSystemMessages(workflowSystemPrompt)
 	for _, h := range req.History {
 		role, _ := h["role"].(string)
 		content, _ := h["content"].(string)
