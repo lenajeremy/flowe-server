@@ -291,13 +291,13 @@ var toolUpdateWorkflow = map[string]any{
 
 var toolListIntegrationResources = map[string]any{
 	"name":        "list_integration_resources",
-	"description": "Lists the user's connected integrations and the concrete resources each exposes — Notion databases/pages, Linear teams/projects, GitHub repos, GitLab projects, Gmail labels, Stripe prices, Shopify products — with their IDs and names. ALWAYS call this before configuring an integration action or App Trigger so you can set real IDs (notionDatabaseId, linearTeamId, githubRepo, gitlabProjectId, triggerResourceId, stripePriceId, …) instead of placeholders. If a provider is not connected, leave the ID empty and tell the user to hit Connect in the node settings. Never ask the user to paste API tokens — OAuth connections are used automatically.",
+	"description": "Lists the user's connected integrations and the concrete resources each exposes — including Notion databases/pages, Linear teams/projects, GitHub repos, GitLab projects, monday.com boards, Asana projects, Gmail labels, Stripe prices and Shopify products — with their IDs and names. ALWAYS call this before configuring an integration action or App Trigger so you can set real IDs instead of placeholders. If a provider is not connected, leave the ID empty and tell the user to hit Connect in the node settings. Never ask the user to paste API tokens — OAuth connections are used automatically.",
 	"input_schema": map[string]any{
 		"type": "object",
 		"properties": map[string]any{
 			"provider": map[string]any{
 				"type":        "string",
-				"enum":        []string{"gmail", "googlecalendar", "googledrive", "googledocs", "googlesheets", "googleslides", "googleforms", "googlemeet", "googlechat", "googletasks", "googlekeep", "outlook", "slack", "notion", "linear", "github", "gitlab", "jira", "confluence", "bitbucket", "stripe", "shopify", "granola", "resend", "sendgrid", "kit", "airtable", "clickup", "typeform", "calendly", "dropbox", "netlify", "supabase", "gumroad", "googlesearchconsole", "googlecontacts", "hubspot", "front"},
+				"enum":        []string{"gmail", "googlecalendar", "googledrive", "googledocs", "googlesheets", "googleslides", "googleforms", "googlemeet", "googlechat", "googletasks", "googlekeep", "outlook", "slack", "notion", "linear", "github", "gitlab", "monday", "asana", "jira", "confluence", "bitbucket", "stripe", "shopify", "granola", "resend", "sendgrid", "kit", "airtable", "clickup", "typeform", "calendly", "dropbox", "netlify", "supabase", "gumroad", "googlesearchconsole", "googlecontacts", "hubspot", "front"},
 				"description": "Which provider to inspect. Omit to list all.",
 			},
 		},
@@ -466,16 +466,16 @@ func builderTools() []map[string]any {
 func integrationTriggerCatalogEntry() map[string]any {
 	return map[string]any{
 		"type": "integrationTrigger", "label": "App Trigger", "category": "Triggers",
-		"description": "Starts the published workflow when an event arrives from a connected app. GitHub uses the Fernary GitHub App installation; GitLab creates a signed project webhook. The normalized event is this node's output: provider, event, resource, occurred_at and data.",
+		"description": "Starts the published workflow when an event arrives from a connected app. The provider registry defines the supported events and webhook registration. The normalized event is this node's output: provider, event, resource, occurred_at and data.",
 		"dataFields": map[string]any{
-			"triggerProvider":      "'github'|'gitlab' – required; use the exact provider key from eventCatalog",
+			"triggerProvider":      "string – required; use an exact provider key from eventCatalog",
 			"triggerEvent":         "string – required; use an exact event id from eventCatalog[triggerProvider]",
-			"triggerResourceId":    "string – required for GitHub/GitLab; REAL repository/project id from list_integration_resources (GitHub owner/repo, GitLab numeric project id)",
+			"triggerResourceId":    "string – required when the event declares resource_kind; use a REAL resource id from list_integration_resources",
 			"triggerResourceLabel": "string – the selected resource's human-readable name from list_integration_resources",
 			"triggerFilters":       "object – optional event filters using only keys declared by that event in eventCatalog (for example branch, base, author or label)",
 		},
 		"eventCatalog": triggers.Catalog(),
-		"auth":         "OAuth connection used automatically — never set integrationToken. GitHub also requires the Fernary GitHub App to be installed on the exact repository. GitLab requires Maintainer or Owner access to the exact project.",
+		"auth":         "OAuth connection used automatically — never set integrationToken. GitHub requires the Fernary GitHub App on the exact repository; GitLab needs Maintainer/Owner project access; monday.com needs its Signing Secret configured; Asana performs a synchronous webhook handshake.",
 		"handles":      map[string]any{"inputs": []string{}, "outputs": []string{"source (right)"}},
 		"notes":        "Call list_integration_resources for the chosen provider before placing this node. Configure the canvas fields, then tell the user to open App Trigger and click Start listening; the workflow must be saved before registration and Published before events start runs. Downstream templates read event fields through {{nodeId.output.data.field}}.",
 	}
@@ -678,8 +678,8 @@ func nodeCatalog() []map[string]any {
 		},
 		{
 			"type": "github", "label": "GitHub", "category": "Integrations",
-			"description": "GitHub API: issues (create/get/update/list/search/comment), pull requests (create/merge/list/inspect/files), repo contents (read/commit files), branches, commits, releases, Actions workflows (trigger/list runs), list repos.",
-			"dataFields":  map[string]any{"integrationOp": "'create_issue'|'get_issue'|'update_issue'|'list_issues'|'search_issues'|'create_comment'|'create_pull_request'|'merge_pull_request'|'list_pull_requests'|'get_pull_request'|'list_pr_files'|'list_commits'|'list_branches'|'get_file'|'create_or_update_file'|'list_releases'|'create_release'|'trigger_workflow'|'list_workflow_runs'|'list_repos'", "githubRepo": "string – 'owner/name', REAL value from list_integration_resources", "githubTitle": "string (templates ok; also PR/release title)", "githubBody": "string (templates ok; also trigger_workflow JSON inputs)", "githubIssueNumber": "string", "githubPrNumber": "string", "githubLabels": "string – comma-separated", "githubState": "'open'|'closed'|'all'", "githubBranch": "string – PR head / commit branch", "githubBase": "string – PR base (default main)", "githubMergeMethod": "'merge'|'squash'|'rebase'", "githubPath": "string – file path", "githubContent": "string – file content (templates ok)", "githubCommitMessage": "string", "githubRef": "string – branch/tag/sha for reads and workflow dispatch (default main)", "githubTag": "string – create_release tag", "githubWorkflowId": "string – workflow file name e.g. deploy.yml", "githubQuery": "string – search_issues query (GitHub search syntax)", "githubSince": "string – ISO 8601 time filter: list_commits since / list_issues updated after / list_workflow_runs created from", "githubUntil": "string – ISO 8601 time filter: list_commits until / list_workflow_runs created to", "githubLimit": "number (default 10)"},
+			"description": "GitHub API: issues (create/get/update/list/search/comment), pull requests (create/merge/list/inspect/files), codebase inspection (repository details, recursive file structure, read file), file commits, branches, commits, releases, Actions workflows (trigger/list runs), list repos. To understand an unfamiliar codebase: call get_repo_details, then list_repo_tree, then get_file for the README, manifests, configuration, and likely entrypoints. Never guess file paths before listing the tree.",
+			"dataFields":  map[string]any{"integrationOp": "'create_issue'|'get_issue'|'update_issue'|'list_issues'|'search_issues'|'create_comment'|'create_pull_request'|'merge_pull_request'|'list_pull_requests'|'get_pull_request'|'list_pr_files'|'list_commits'|'list_branches'|'get_repo_details'|'list_repo_tree'|'get_file'|'create_or_update_file'|'list_releases'|'create_release'|'trigger_workflow'|'list_workflow_runs'|'list_repos'", "githubRepo": "string – 'owner/name', REAL value from list_integration_resources", "githubTitle": "string (templates ok; also PR/release title)", "githubBody": "string (templates ok; also trigger_workflow JSON inputs)", "githubIssueNumber": "string", "githubPrNumber": "string", "githubLabels": "string – comma-separated", "githubState": "'open'|'closed'|'all'", "githubBranch": "string – PR head / commit branch", "githubBase": "string – PR base (default main)", "githubMergeMethod": "'merge'|'squash'|'rebase'", "githubPath": "string – file path; for list_repo_tree, an optional directory prefix used to narrow results", "githubContent": "string – file content (templates ok)", "githubCommitMessage": "string", "githubRef": "string – branch/tag/sha for reads, repository trees, and workflow dispatch; list_repo_tree defaults to the repository's default branch", "githubTag": "string – create_release tag", "githubWorkflowId": "string – workflow file name e.g. deploy.yml", "githubQuery": "string – search_issues query (GitHub search syntax)", "githubSince": "string – ISO 8601 time filter: list_commits since / list_issues updated after / list_workflow_runs created from", "githubUntil": "string – ISO 8601 time filter: list_commits until / list_workflow_runs created to", "githubLimit": "number (default 10)", "githubTreeLimit": "number – list_repo_tree result cap (default 1000, maximum 5000)"},
 			"auth":        "OAuth connection used automatically — never set integrationToken; call list_integration_resources for real repo names",
 			"handles":     map[string]any{"inputs": []string{"target (left)"}, "outputs": []string{"source (right)"}},
 		},
@@ -700,7 +700,7 @@ func nodeCatalog() []map[string]any {
 		{
 			"type": "confluence", "label": "Confluence", "category": "Integrations",
 			"description": "Confluence Cloud: list spaces, read/create/update/delete pages, find pages by title or CQL search, child pages, blog posts, comments, labels and attachments.",
-			"dataFields":  map[string]any{"integrationOp": "'list_spaces'|'get_space'|'list_pages'|'get_page'|'find_page_by_title'|'list_child_pages'|'create_page'|'update_page'|'delete_page'|'search_pages'|'list_blog_posts'|'create_blog_post'|'add_comment'|'list_comments'|'list_labels'|'add_label'|'list_attachments'|'upload_attachment'|'get_current_user'", "confluenceSpaceKey": "string – e.g. ENG (required to create a page or blog post)", "confluencePageId": "string – target page id", "confluenceTitle": "string – page title (templates ok)", "confluenceBody": "string – page content; plain text becomes paragraphs, or pass storage-format XHTML (templates ok)", "confluenceParentId": "string – parent page id, to nest a new page", "confluenceCql": "string – CQL for search_pages, e.g. text ~ \"onboarding\" AND space = ENG", "confluenceComment": "string – comment text", "confluenceLabel": "string – comma-separated labels", "confluenceStatus": "'current'|'draft' (default current)", "confluenceAttachName": "string – attachment file name", "confluenceAttachBody": "string – attachment text content", "confluenceLimit": "number (default 25)"},
+			"dataFields":  map[string]any{"integrationOp": "'list_spaces'|'get_space'|'list_pages'|'get_page'|'find_page_by_title'|'list_child_pages'|'create_page'|'update_page'|'delete_page'|'search_pages'|'list_blog_posts'|'create_blog_post'|'add_comment'|'list_comments'|'list_labels'|'add_label'|'list_attachments'|'upload_attachment'|'get_current_user'", "confluenceSpaceKey": "string – REAL space key from list_integration_resources (required to create a page or blog post)", "confluencePageId": "string – REAL target page id from list_integration_resources", "confluenceTitle": "string – page title (templates ok)", "confluenceBody": "string – page content; plain text becomes paragraphs, or pass storage-format XHTML (templates ok)", "confluenceParentId": "string – REAL parent page id from list_integration_resources, to nest a new page", "confluenceCql": "string – CQL for search_pages, e.g. text ~ \"onboarding\" AND space = ENG", "confluenceComment": "string – comment text", "confluenceLabel": "string – comma-separated labels", "confluenceStatus": "'current'|'draft' (default current)", "confluenceAttachName": "string – attachment file name", "confluenceAttachBody": "string – attachment text content", "confluenceLimit": "number (default 25)"},
 			"auth":        "OAuth connection used automatically — never set integrationToken. The connected Confluence site is used automatically.",
 			"handles":     map[string]any{"inputs": []string{"target (left)"}, "outputs": []string{"source (right)"}},
 		},
@@ -745,6 +745,44 @@ func nodeCatalog() []map[string]any {
 			"dataFields":  map[string]any{"integrationOp": "'list_workspaces'|'list_spaces'|'get_space'|'list_folders'|'list_lists'|'get_list'|'create_list'|'list_tasks'|'search_tasks'|'get_task'|'create_task'|'update_task'|'delete_task'|'list_comments'|'create_comment'|'update_comment'|'delete_comment'|'create_checklist'|'create_checklist_item'|'update_checklist_item'|'delete_checklist'|'list_space_tags'|'add_tag_to_task'|'remove_tag_from_task'|'list_custom_fields'|'set_custom_field_value'|'remove_custom_field_value'|'add_dependency'|'delete_dependency'|'link_tasks'|'unlink_tasks'|'list_time_entries'|'create_time_entry'|'get_running_timer'|'start_timer'|'stop_timer'|'list_attachments'|'list_goals'|'create_goal'|'list_list_members'|'list_task_members'|'list_views'|'list_webhooks'|'create_webhook'|'delete_webhook'|'get_authorized_user'", "clickupWorkspaceId": "string – workspace id from list_integration_resources (ClickUp calls this a team)", "clickupSpaceId": "string", "clickupFolderId": "string – omit to work with lists that sit directly in a space", "clickupListId": "string – list id; comma-separated to scope search_tasks", "clickupTaskId": "string", "clickupCustomTaskIds": "'true' when the task id is a custom one; also needs clickupWorkspaceId", "clickupName": "string – task, list, checklist or goal name (templates ok)", "clickupDescription": "string (templates ok)", "clickupStatus": "string – a status that exists in the target list", "clickupStatuses": "string – comma-separated status filter", "clickupPriority": "string – 1 urgent, 2 high, 3 normal, 4 low", "clickupDueDate": "string – unix timestamp in MILLISECONDS", "clickupTimeEstimate": "string – milliseconds", "clickupAssignees": "string – comma-separated NUMERIC ClickUp user IDs, not emails", "clickupParent": "string – parent task id, making this a subtask", "clickupTagName": "string – tag name; comma-separated on create_task", "clickupSubtasks": "'true' to include subtasks in list_tasks", "clickupIncludeClosed": "'true' to include closed tasks", "clickupOrderBy": "string – e.g. created, updated, due_date", "clickupComment": "string – comment text, or a time-entry description (templates ok)", "clickupCommentId": "string", "clickupChecklistId": "string", "clickupChecklistItemId": "string", "clickupResolved": "'true'|'false' for a checklist item", "clickupFieldId": "string – from list_custom_fields", "clickupFieldValue": "string – JSON for a typed field, plain text otherwise", "clickupDependsOn": "string – the task this one waits for", "clickupDependencyOf": "string – a task that waits for this one", "clickupLinksTo": "string – the other task in a link", "clickupDuration": "string – milliseconds", "clickupStartDate": "string – unix milliseconds", "clickupEndDate": "string – unix milliseconds", "clickupUrl": "string – webhook endpoint", "clickupEvents": "string – comma-separated, e.g. taskCreated,taskUpdated", "clickupWebhookId": "string", "clickupLimit": "number"},
 			"auth":        "OAuth connection used automatically — never set integrationToken. ClickUp has no OAuth scopes: consent is per workspace, so start from list_workspaces. Dates are unix MILLISECONDS, not seconds, and assignees are numeric user IDs rather than emails. Tokens do not expire.",
 			"handles":     map[string]any{"inputs": []string{"target (left)"}, "outputs": []string{"source (right)"}},
+		},
+		{
+			"type": "monday", "label": "monday.com", "category": "Integrations",
+			"description": "monday.com boards: list and inspect boards and items, create/update/move/archive/delete items, add or read updates, and list account users.",
+			"dataFields": map[string]any{
+				"integrationOp":      "'list_boards'|'get_board'|'list_items'|'get_item'|'create_item'|'update_item'|'move_item_to_group'|'archive_item'|'delete_item'|'create_update'|'list_updates'|'list_users'",
+				"mondayBoardId":      "string – REAL board id from list_integration_resources",
+				"mondayItemId":       "string – item id; may come from a trigger or prior node",
+				"mondayGroupId":      "string – group id from the selected board's child resources",
+				"mondayItemName":     "string – new item name (templates ok)",
+				"mondayColumnValues": "string – JSON object keyed by column id, e.g. {\"status\":{\"label\":\"Done\"}}",
+				"mondayUpdateBody":   "string – update/comment body (templates ok)",
+				"mondayCursor":       "string – items_page cursor from a prior list_items response",
+				"mondayLimit":        "number (default 25, max 100)",
+			},
+			"auth":    "OAuth connection used automatically — never set integrationToken. Call list_integration_resources for a real board, group and column id. Column values must use column IDs, not titles.",
+			"handles": map[string]any{"inputs": []string{"target (left)"}, "outputs": []string{"source (right)"}},
+		},
+		{
+			"type": "asana", "label": "Asana", "category": "Integrations",
+			"description": "Asana workspaces and projects: browse projects, sections and tasks; create, update and delete tasks or subtasks; add tasks to projects; and add or read comments.",
+			"dataFields": map[string]any{
+				"integrationOp":     "'list_workspaces'|'list_projects'|'list_sections'|'list_tasks'|'get_task'|'create_task'|'create_subtask'|'update_task'|'delete_task'|'add_comment'|'list_comments'|'add_task_to_project'",
+				"asanaWorkspaceId":  "string – REAL workspace id from list_integration_resources",
+				"asanaProjectId":    "string – REAL project id from list_integration_resources",
+				"asanaSectionId":    "string – section id from the selected project's child resources",
+				"asanaTaskId":       "string – target task id",
+				"asanaParentTaskId": "string – parent task for create_subtask",
+				"asanaName":         "string – task name (templates ok)",
+				"asanaNotes":        "string – task description (templates ok)",
+				"asanaAssignee":     "string – Asana user gid or 'me'",
+				"asanaDueOn":        "string – YYYY-MM-DD",
+				"asanaCompleted":    "'true'|'false' for update_task",
+				"asanaComment":      "string – comment text (templates ok)",
+				"asanaLimit":        "number (default 50, max 100)",
+			},
+			"auth":    "OAuth connection used automatically — never set integrationToken. Call list_integration_resources for real workspace/project IDs and its child resources for sections/tasks.",
+			"handles": map[string]any{"inputs": []string{"target (left)"}, "outputs": []string{"source (right)"}},
 		},
 		{
 			"type": "typeform", "label": "Typeform", "category": "Integrations",
@@ -910,17 +948,17 @@ Rules:
 - Space new nodes ~250px apart from existing ones.
 - After calling create_workflow or update_workflow, explain what you did and what the user needs to configure.
 
-Integrations (notion, linear, github, gitlab, gmail, stripe, shopify, jira, confluence, bitbucket, plus the Google suite):
+Integrations (including notion, linear, github, gitlab, monday, asana, gmail, stripe, shopify, jira, confluence, bitbucket and the Google suite):
 - Auth is handled by OAuth connections — NEVER set integrationToken and never ask the user for API keys.
-- Before placing or editing an integration node, call list_integration_resources and use the REAL resource IDs (notionDatabaseId, notionPageId, linearTeamId, linearProjectId, githubRepo, gitlabProjectId, stripePriceId) from the response. Mention the resource by name when you explain the workflow.
+- Before placing or editing an integration node, call list_integration_resources and use the REAL resource IDs (notionDatabaseId, notionPageId, linearTeamId, linearProjectId, githubRepo, gitlabProjectId, confluenceSpaceKey, confluencePageId, stripePriceId) from the response. Mention the resource by name when you explain the workflow.
 - If the provider is not connected, still build the node but leave the resource ID empty and tell the user to click Connect in the node's settings panel, then ask you to fill in the target resource.
 - Prefer the gmail node over emailSend when the user wants mail sent from their own address or wants to read/search their inbox.
 
 App Triggers (integrationTrigger):
-- Use integrationTrigger — not a github/gitlab action node — when the user says the workflow should start when something happens in GitHub or GitLab.
+- Use integrationTrigger — not an action node — when the user says the workflow should start when something happens in a provider listed in its live eventCatalog.
 - Call get_available_nodes for the live eventCatalog, then list_integration_resources for the chosen provider. Set triggerProvider, an EXACT supported triggerEvent, the REAL triggerResourceId, its triggerResourceLabel, and only supported triggerFilters. Never invent event ids or repository/project ids.
-- GitHub repository ids are owner/repo; GitLab project ids are numeric. If the provider is disconnected, leave the resource fields empty and explain that it must be connected before the target can be selected.
-- The builder configures the node on the canvas but does not register external webhooks. After building, tell the user to save the workflow, open the App Trigger, click Start listening, and Publish. GitHub requires the Fernary App installed on that exact repository; GitLab requires Maintainer or Owner access to the exact project.
+- Resource ids use the provider's real format (for example GitHub owner/repo; GitLab, monday.com and Asana numeric ids). If the provider is disconnected, leave the resource fields empty and explain that it must be connected before the target can be selected.
+- The builder configures the node on the canvas but does not register external webhooks. After building, tell the user to save the workflow, open the App Trigger, click Start listening, and Publish. Registration validates provider access and creates the required remote subscription.
 - The normalized payload is the trigger node output. Downstream nodes access event fields as {{nodeId.output.data.title}}, {{nodeId.output.data.body}}, and so on, using the selected event's sample payload as the shape.
 
 Persistence (Data stores):

@@ -233,6 +233,45 @@ func runGithub(ctx context.Context, token string, d FlowNodeData, outputs map[st
 		b, _ := json.Marshal(names)
 		return string(b), nil
 
+	case "list_repo_tree":
+		if repo == "" {
+			return "", fmt.Errorf("githubRepo is required (owner/name)")
+		}
+		ref := sub(d.GithubRef)
+		if ref == "" {
+			details, err := githubCall(ctx, token, http.MethodGet, "/repos/"+repo, nil)
+			if err != nil {
+				return "", err
+			}
+			var metadata struct {
+				DefaultBranch string `json:"default_branch"`
+			}
+			if err := json.Unmarshal([]byte(details), &metadata); err != nil || metadata.DefaultBranch == "" {
+				return "", fmt.Errorf("GitHub: repository response did not include a default branch")
+			}
+			ref = metadata.DefaultBranch
+		}
+		raw, err := githubCall(ctx, token, http.MethodGet,
+			"/repos/"+repo+"/git/trees/"+url.PathEscape(ref)+"?recursive=1", nil)
+		if err != nil {
+			return "", err
+		}
+		return githubRepositoryTree(raw, repo, ref, sub(d.GithubPath), d.GithubTreeLimit)
+
+	case "get_repo_details":
+		if repo == "" {
+			return "", fmt.Errorf("githubRepo is required (owner/name)")
+		}
+		details, err := githubCall(ctx, token, http.MethodGet, "/repos/"+repo, nil)
+		if err != nil {
+			return "", err
+		}
+		languages, err := githubCall(ctx, token, http.MethodGet, "/repos/"+repo+"/languages", nil)
+		if err != nil {
+			return "", err
+		}
+		return githubRepositoryDetails(details, languages)
+
 	case "get_file":
 		q := url.Values{}
 		if ref := sub(d.GithubRef); ref != "" {
@@ -422,6 +461,169 @@ func runGithub(ctx context.Context, token string, d FlowNodeData, outputs map[st
 	default:
 		return "", fmt.Errorf("unknown GitHub operation: %s", d.IntegrationOp)
 	}
+}
+
+const (
+	githubTreeDefaultLimit = 1000
+	githubTreeMaximumLimit = 5000
+)
+
+// githubRepositoryTree keeps recursive tree responses useful for an agent without
+// allowing a large repository to consume the workflow's entire context window.
+func githubRepositoryTree(raw, repo, ref, pathPrefix string, requestedLimit int) (string, error) {
+	var tree struct {
+		SHA       string `json:"sha"`
+		Truncated bool   `json:"truncated"`
+		Entries   []struct {
+			Path string `json:"path"`
+			Mode string `json:"mode"`
+			Type string `json:"type"`
+			Size int64  `json:"size"`
+		} `json:"tree"`
+	}
+	if err := json.Unmarshal([]byte(raw), &tree); err != nil {
+		return "", fmt.Errorf("GitHub: could not decode repository tree: %w", err)
+	}
+
+	limit := requestedLimit
+	if limit <= 0 {
+		limit = githubTreeDefaultLimit
+	}
+	if limit > githubTreeMaximumLimit {
+		limit = githubTreeMaximumLimit
+	}
+	prefix := strings.Trim(strings.TrimSpace(pathPrefix), "/")
+	entries := make([]map[string]any, 0, min(limit, len(tree.Entries)))
+	matching := 0
+	for _, entry := range tree.Entries {
+		if prefix != "" && entry.Path != prefix && !strings.HasPrefix(entry.Path, prefix+"/") {
+			continue
+		}
+		matching++
+		if len(entries) >= limit {
+			continue
+		}
+		item := map[string]any{"path": entry.Path, "type": entry.Type}
+		if entry.Type == "blob" {
+			item["size_bytes"] = entry.Size
+			if entry.Mode == "100755" {
+				item["executable"] = true
+			}
+		}
+		if entry.Type == "commit" {
+			item["submodule"] = true
+		}
+		entries = append(entries, item)
+	}
+
+	locallyTruncated := matching > len(entries)
+	result := map[string]any{
+		"repository":         repo,
+		"ref":                ref,
+		"tree_sha":           tree.SHA,
+		"path_prefix":        prefix,
+		"total_entries":      len(tree.Entries),
+		"matching_entries":   matching,
+		"returned_entries":   len(entries),
+		"truncated":          tree.Truncated || locallyTruncated,
+		"provider_truncated": tree.Truncated,
+		"entries":            entries,
+	}
+	if tree.Truncated || locallyTruncated {
+		result["note"] = "The tree response is incomplete. Use githubPath to narrow the directory or increase githubTreeLimit (maximum 5000)."
+	}
+	b, err := json.Marshal(result)
+	if err != nil {
+		return "", fmt.Errorf("GitHub: could not encode repository tree: %w", err)
+	}
+	return string(b), nil
+}
+
+// githubRepositoryDetails combines the repository and languages endpoints into a
+// compact overview suitable for deciding which files an agent should inspect next.
+func githubRepositoryDetails(detailsRaw, languagesRaw string) (string, error) {
+	var repo struct {
+		FullName        string   `json:"full_name"`
+		Description     string   `json:"description"`
+		Homepage        string   `json:"homepage"`
+		HTMLURL         string   `json:"html_url"`
+		Visibility      string   `json:"visibility"`
+		Private         bool     `json:"private"`
+		Fork            bool     `json:"fork"`
+		Archived        bool     `json:"archived"`
+		Disabled        bool     `json:"disabled"`
+		DefaultBranch   string   `json:"default_branch"`
+		Language        string   `json:"language"`
+		Topics          []string `json:"topics"`
+		Size            int64    `json:"size"`
+		StargazersCount int      `json:"stargazers_count"`
+		ForksCount      int      `json:"forks_count"`
+		OpenIssuesCount int      `json:"open_issues_count"`
+		Subscribers     int      `json:"subscribers_count"`
+		CreatedAt       string   `json:"created_at"`
+		UpdatedAt       string   `json:"updated_at"`
+		PushedAt        string   `json:"pushed_at"`
+		HasIssues       bool     `json:"has_issues"`
+		HasWiki         bool     `json:"has_wiki"`
+		HasPages        bool     `json:"has_pages"`
+		HasDiscussions  bool     `json:"has_discussions"`
+		Owner           struct {
+			Login string `json:"login"`
+		} `json:"owner"`
+		License *struct {
+			Key  string `json:"key"`
+			Name string `json:"name"`
+			SPDX string `json:"spdx_id"`
+		} `json:"license"`
+		Parent *struct {
+			FullName string `json:"full_name"`
+			HTMLURL  string `json:"html_url"`
+		} `json:"parent"`
+	}
+	if err := json.Unmarshal([]byte(detailsRaw), &repo); err != nil {
+		return "", fmt.Errorf("GitHub: could not decode repository details: %w", err)
+	}
+	var languages map[string]int64
+	if err := json.Unmarshal([]byte(languagesRaw), &languages); err != nil {
+		return "", fmt.Errorf("GitHub: could not decode repository languages: %w", err)
+	}
+
+	result := map[string]any{
+		"repository":       repo.FullName,
+		"owner":            repo.Owner.Login,
+		"description":      repo.Description,
+		"homepage":         repo.Homepage,
+		"url":              repo.HTMLURL,
+		"visibility":       repo.Visibility,
+		"private":          repo.Private,
+		"fork":             repo.Fork,
+		"archived":         repo.Archived,
+		"disabled":         repo.Disabled,
+		"default_branch":   repo.DefaultBranch,
+		"primary_language": repo.Language,
+		"languages_bytes":  languages,
+		"topics":           repo.Topics,
+		"size_kb":          repo.Size,
+		"stars":            repo.StargazersCount,
+		"forks":            repo.ForksCount,
+		"open_issues":      repo.OpenIssuesCount,
+		"subscribers":      repo.Subscribers,
+		"created_at":       repo.CreatedAt,
+		"updated_at":       repo.UpdatedAt,
+		"pushed_at":        repo.PushedAt,
+		"features":         map[string]bool{"issues": repo.HasIssues, "wiki": repo.HasWiki, "pages": repo.HasPages, "discussions": repo.HasDiscussions},
+	}
+	if repo.License != nil {
+		result["license"] = map[string]string{"key": repo.License.Key, "name": repo.License.Name, "spdx_id": repo.License.SPDX}
+	}
+	if repo.Parent != nil {
+		result["parent_repository"] = map[string]string{"repository": repo.Parent.FullName, "url": repo.Parent.HTMLURL}
+	}
+	b, err := json.Marshal(result)
+	if err != nil {
+		return "", fmt.Errorf("GitHub: could not encode repository details: %w", err)
+	}
+	return string(b), nil
 }
 
 // githubIssueResult projects a created issue down to the useful fields.

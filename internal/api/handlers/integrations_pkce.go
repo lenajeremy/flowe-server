@@ -18,6 +18,8 @@ import (
 // pkceProviders require code_challenge on authorize and code_verifier on exchange.
 var pkceProviders = map[string]bool{
 	"airtable": true,
+	"asana":    true,
+	"monday":   true,
 	"supabase": true,
 }
 

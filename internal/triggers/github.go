@@ -182,8 +182,8 @@ func (githubAdapter) Renew(context.Context, Conn, *models.IntegrationTrigger) (*
 
 // Handshake: GitHub has none. It sends a "ping" event on creation, which Parse
 // turns into zero events, so the delivery is acknowledged and nothing runs.
-func (githubAdapter) Handshake(*http.Request, []byte) (int, []byte, bool) {
-	return 0, nil, false
+func (githubAdapter) Handshake(*http.Request, []byte) (int, []byte, http.Header, bool) {
+	return 0, nil, nil, false
 }
 
 // Verify checks the App's shared signing secret — the one entered in the

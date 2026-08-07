@@ -244,18 +244,20 @@ func jiraResources(token, cloudID string) ([]integrationResource, error) {
 	return out, nil
 }
 
-// confluenceResources lists spaces, whose keys go in confluenceSpaceKey.
+// confluenceResources lists spaces and current pages for the node's resource
+// pickers. Page names include their space so duplicate titles remain legible.
 func confluenceResources(token, cloudID string) ([]integrationResource, error) {
 	if cloudID == "" {
 		return nil, fmt.Errorf("confluence connection is missing its site — reconnect Confluence")
 	}
-	raw, err := atlassianGet(token,
-		"https://api.atlassian.com/ex/confluence/"+cloudID+"/wiki/api/v2/spaces?limit=100")
+	base := "https://api.atlassian.com/ex/confluence/" + cloudID + "/wiki/api/v2"
+	raw, err := atlassianGet(token, base+"/spaces?limit=100")
 	if err != nil {
 		return nil, err
 	}
 	var spaces struct {
 		Results []struct {
+			ID   string `json:"id"`
 			Key  string `json:"key"`
 			Name string `json:"name"`
 		} `json:"results"`
@@ -263,9 +265,60 @@ func confluenceResources(token, cloudID string) ([]integrationResource, error) {
 	if json.Unmarshal(raw, &spaces) != nil {
 		return nil, fmt.Errorf("parse confluence spaces")
 	}
-	out := make([]integrationResource, 0, len(spaces.Results))
+	out := make([]integrationResource, 0, len(spaces.Results)+100)
+	spaceNames := make(map[string]string, len(spaces.Results))
 	for _, s := range spaces.Results {
+		spaceNames[s.ID] = s.Name
 		out = append(out, integrationResource{ID: s.Key, Name: s.Name, Type: "space"})
+	}
+
+	// The v2 endpoint is cursor-paginated. Bound the picker at 500 pages so a
+	// large wiki does not create an enormous workflow-editor response; manual
+	// IDs and templates remain available in the picker for anything beyond it.
+	const pagePickerLimit = 500
+	pageURL := base + "/pages?limit=100&status=current"
+	seenCursors := map[string]bool{}
+	for len(out)-len(spaces.Results) < pagePickerLimit {
+		raw, err = atlassianGet(token, pageURL)
+		if err != nil {
+			return nil, err
+		}
+		var pages struct {
+			Results []struct {
+				ID      string `json:"id"`
+				Title   string `json:"title"`
+				SpaceID string `json:"spaceId"`
+			} `json:"results"`
+			Links struct {
+				Next string `json:"next"`
+			} `json:"_links"`
+		}
+		if json.Unmarshal(raw, &pages) != nil {
+			return nil, fmt.Errorf("parse confluence pages")
+		}
+		for _, p := range pages.Results {
+			if len(out)-len(spaces.Results) >= pagePickerLimit {
+				break
+			}
+			name := p.Title
+			if spaceName := spaceNames[p.SpaceID]; spaceName != "" {
+				name += " — " + spaceName
+			}
+			out = append(out, integrationResource{ID: p.ID, Name: firstNonEmptyStr(name, p.ID), Type: "page"})
+		}
+		if pages.Links.Next == "" {
+			break
+		}
+		next, parseErr := url.Parse(pages.Links.Next)
+		if parseErr != nil || next.Query().Get("cursor") == "" {
+			break
+		}
+		cursor := next.Query().Get("cursor")
+		if seenCursors[cursor] {
+			break
+		}
+		seenCursors[cursor] = true
+		pageURL = base + "/pages?limit=100&status=current&cursor=" + url.QueryEscape(cursor)
 	}
 	return out, nil
 }

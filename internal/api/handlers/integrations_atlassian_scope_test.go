@@ -51,7 +51,8 @@ func TestEveryConfluenceOperationHasItsScope(t *testing.T) {
 	need := map[string][]string{
 		"list_spaces (v2 GET /spaces)":                   {"read:space:confluence"},
 		"get_space (v2 GET /spaces/{id})":                {"read:space:confluence"},
-		"resource picker (v2 GET /spaces)":               {"read:space:confluence"},
+		"space picker (v2 GET /spaces)":                  {"read:space:confluence"},
+		"page picker (v2 GET /pages)":                    {"read:page:confluence"},
 		"list_pages (v2 GET /pages)":                     {"read:page:confluence"},
 		"get_page (v2 GET /pages/{id})":                  {"read:page:confluence"},
 		"find_page_by_title (v2 GET /pages)":             {"read:page:confluence"},

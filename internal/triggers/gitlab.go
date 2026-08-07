@@ -198,8 +198,8 @@ func (gitlabAdapter) Renew(context.Context, Conn, *models.IntegrationTrigger) (*
 	return nil, nil
 }
 
-func (gitlabAdapter) Handshake(*http.Request, []byte) (int, []byte, bool) {
-	return 0, nil, false
+func (gitlabAdapter) Handshake(*http.Request, []byte) (int, []byte, http.Header, bool) {
+	return 0, nil, nil, false
 }
 
 // Verify implements GitLab's Standard Webhooks signature. The signing token is

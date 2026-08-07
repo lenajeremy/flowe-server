@@ -44,6 +44,8 @@ const (
 	NodeTypeKit                 NodeType = "kit"
 	NodeTypeAirtable            NodeType = "airtable"
 	NodeTypeClickUp             NodeType = "clickup"
+	NodeTypeMonday              NodeType = "monday"
+	NodeTypeAsana               NodeType = "asana"
 	NodeTypeTypeform            NodeType = "typeform"
 	NodeTypeCalendly            NodeType = "calendly"
 	NodeTypeDropbox             NodeType = "dropbox"
@@ -154,11 +156,12 @@ type FlowNodeData struct {
 	GithubLabels      string `json:"githubLabels,omitempty"`
 	GithubState       string `json:"githubState,omitempty"`
 	GithubLimit       int    `json:"githubLimit,omitempty"`
+	GithubTreeLimit   int    `json:"githubTreeLimit,omitempty"` // list_repo_tree: default 1000, max 5000
 	GithubPrNumber    string `json:"githubPrNumber,omitempty"`
 	GithubBranch      string `json:"githubBranch,omitempty"`      // PR head / file commit branch / workflow ref
 	GithubBase        string `json:"githubBase,omitempty"`        // PR base branch
 	GithubMergeMethod string `json:"githubMergeMethod,omitempty"` // merge | squash | rebase
-	GithubPath        string `json:"githubPath,omitempty"`        // file path (get_file / create_or_update_file)
+	GithubPath        string `json:"githubPath,omitempty"`        // file path, or optional list_repo_tree prefix
 	GithubContent     string `json:"githubContent,omitempty"`     // file content
 	GithubCommitMsg   string `json:"githubCommitMessage,omitempty"`
 	GithubRef         string `json:"githubRef,omitempty"`        // branch/tag/sha for reads
@@ -579,6 +582,30 @@ type FlowNodeData struct {
 	AirtableWebhookId     string `json:"airtableWebhookId,omitempty"`
 	AirtableCursor        string `json:"airtableCursor,omitempty"`
 	AirtableLimit         int    `json:"airtableLimit,omitempty"`
+
+	// monday.com
+	MondayBoardId      string `json:"mondayBoardId,omitempty"`
+	MondayItemId       string `json:"mondayItemId,omitempty"`
+	MondayGroupId      string `json:"mondayGroupId,omitempty"`
+	MondayItemName     string `json:"mondayItemName,omitempty"`
+	MondayColumnValues string `json:"mondayColumnValues,omitempty"` // JSON object keyed by column id
+	MondayUpdateBody   string `json:"mondayUpdateBody,omitempty"`
+	MondayCursor       string `json:"mondayCursor,omitempty"`
+	MondayLimit        int    `json:"mondayLimit,omitempty"`
+
+	// asana
+	AsanaWorkspaceId  string `json:"asanaWorkspaceId,omitempty"`
+	AsanaProjectId    string `json:"asanaProjectId,omitempty"`
+	AsanaSectionId    string `json:"asanaSectionId,omitempty"`
+	AsanaTaskId       string `json:"asanaTaskId,omitempty"`
+	AsanaParentTaskId string `json:"asanaParentTaskId,omitempty"`
+	AsanaName         string `json:"asanaName,omitempty"`
+	AsanaNotes        string `json:"asanaNotes,omitempty"`
+	AsanaAssignee     string `json:"asanaAssignee,omitempty"`
+	AsanaDueOn        string `json:"asanaDueOn,omitempty"`
+	AsanaCompleted    string `json:"asanaCompleted,omitempty"` // "true" | "false"
+	AsanaComment      string `json:"asanaComment,omitempty"`
+	AsanaLimit        int    `json:"asanaLimit,omitempty"`
 
 	// clickup
 	ClickUpWorkspaceId     string `json:"clickupWorkspaceId,omitempty"` // "team" in ClickUp's API

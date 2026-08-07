@@ -28,9 +28,10 @@ const (
 
 // Event is what every adapter produces, whichever way it found out.
 type Event struct {
-	// Key deduplicates. It must be the provider's own identifier for this
-	// delivery (X-GitHub-Delivery, Slack's event_id, a Gmail message id) — never
-	// a hash of the body, which differs between two deliveries of the same event.
+	// Key deduplicates. Prefer the provider's own identifier for this delivery
+	// (X-GitHub-Delivery, Slack's event_id, a Gmail message id). A provider such
+	// as Asana that supplies no event id uses a stable hash of each individual
+	// raw event—not the enclosing delivery body, whose batching can change.
 	Key string
 	// Type is the registry event id that matched, e.g. "pull_request.opened".
 	Type string
@@ -135,7 +136,7 @@ type Pusher interface {
 	// Handshake answers a provider's URL-verification challenge before any
 	// trigger exists to verify against — Slack's url_verification, Dropbox's
 	// challenge echo. Returning handled=false means this is a normal delivery.
-	Handshake(r *http.Request, body []byte) (status int, response []byte, handled bool)
+	Handshake(r *http.Request, body []byte) (status int, response []byte, headers http.Header, handled bool)
 	// Verify authenticates the raw body. An error here means the request never
 	// touches a workflow. t is nil for app-level providers, which authenticate
 	// against an app secret rather than a per-trigger one.

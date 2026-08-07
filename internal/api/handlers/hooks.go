@@ -66,9 +66,18 @@ func (h *WorkflowHandler) ReceiveProviderHook(c *gin.Context) {
 
 	// Handshakes come before everything: a provider verifying a URL has no
 	// trigger to check against and no signature we could match.
-	if status, resp, handled := adapter.Handshake(c.Request, body); handled {
+	if status, resp, headers, handled := adapter.Handshake(c.Request, body); handled {
 		slog.InfoContext(ctx, "hook handshake", "provider", provider)
-		c.Data(status, "text/plain; charset=utf-8", resp)
+		for name, values := range headers {
+			for _, value := range values {
+				c.Header(name, value)
+			}
+		}
+		contentType := headers.Get("Content-Type")
+		if contentType == "" {
+			contentType = "text/plain; charset=utf-8"
+		}
+		c.Data(status, contentType, resp)
 		return
 	}
 
@@ -122,6 +131,12 @@ func (h *WorkflowHandler) ReceiveProviderHook(c *gin.Context) {
 
 	fired := 0
 	for _, ev := range events {
+		// A per-resource webhook URL already identifies its subscription. Some
+		// providers (notably Asana) omit the parent project from individual task
+		// events, so carry the registered resource into the normalized event.
+		if trig != nil && ev.ResourceID == "" {
+			ev.ResourceID = trig.ResourceID
+		}
 		if ev.Lifecycle != nil {
 			h.applyTriggerLifecycle(provider, ev)
 			continue

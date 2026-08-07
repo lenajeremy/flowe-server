@@ -1129,6 +1129,26 @@ func runNodeInner(ctx context.Context, node WorkflowASTNode, outputs map[string]
 		}
 		return runClickUp(ctx, token, d, outputs)
 
+	case NodeTypeMonday:
+		token := substituteTemplates(d.IntegrationToken, outputs)
+		if token == "" && IntegrationCredsLookup != nil {
+			token, _ = IntegrationCredsLookup(ownerID, "monday")
+		}
+		if token == "" {
+			return "", fmt.Errorf("monday.com is not connected — use Connect monday.com in the node settings")
+		}
+		return runMonday(ctx, token, d, outputs)
+
+	case NodeTypeAsana:
+		token := substituteTemplates(d.IntegrationToken, outputs)
+		if token == "" && IntegrationCredsLookup != nil {
+			token, _ = IntegrationCredsLookup(ownerID, "asana")
+		}
+		if token == "" {
+			return "", fmt.Errorf("Asana is not connected — use Connect Asana in the node settings")
+		}
+		return runAsana(ctx, token, d, outputs)
+
 	case NodeTypeTypeform:
 		token := substituteTemplates(d.IntegrationToken, outputs)
 		if token == "" && IntegrationCredsLookup != nil {

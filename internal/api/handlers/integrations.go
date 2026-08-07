@@ -369,6 +369,31 @@ var oauthProviders = map[string]oauthProvider{
 		clientIDEnv:  "CLICKUP_CLIENT_ID",
 		secretEnv:    "CLICKUP_CLIENT_SECRET",
 	},
+	// monday.com's current OAuth flow requires PKCE and returns an expiring JWT
+	// access token plus a rotating refresh token. The scopes match the actions,
+	// resource pickers, and signed board webhooks implemented by this connector.
+	"monday": {
+		name:         "monday",
+		authorizeURL: "https://auth.monday.com/oauth2/authorize",
+		clientIDEnv:  "MONDAY_CLIENT_ID",
+		secretEnv:    "MONDAY_CLIENT_SECRET",
+		extraAuthQ: url.Values{
+			"scope":                   {"me:read account:read boards:read boards:write updates:read updates:write users:read webhooks:read webhooks:write"},
+			"force_install_if_needed": {"true"},
+		},
+	},
+	// Asana scopes are granular and non-inheriting: write does not imply read,
+	// and delete is separate again. Keep this list in step with the concrete
+	// operations below instead of relying on the app's legacy full-access mode.
+	"asana": {
+		name:         "asana",
+		authorizeURL: "https://app.asana.com/-/oauth_authorize",
+		clientIDEnv:  "ASANA_CLIENT_ID",
+		secretEnv:    "ASANA_CLIENT_SECRET",
+		extraAuthQ: url.Values{
+			"scope": {"workspaces:read projects:read project_sections:read tasks:read tasks:write tasks:delete stories:read stories:write webhooks:write webhooks:delete"},
+		},
+	},
 	// Airtable requires PKCE and Basic auth on the token endpoint — see
 	// integrations_airtable.go.
 	"airtable": {
@@ -417,7 +442,7 @@ var allProviders = []string{
 	"googleslides", "googleforms", "googlemeet", "googlechat", "googletasks",
 	"googlekeep", "outlook", "slack", "notion", "linear",
 	"github", "gitlab", "jira", "confluence", "bitbucket",
-	"stripe", "shopify", "granola", "resend", "sendgrid", "kit", "airtable", "clickup", "typeform", "calendly", "dropbox", "netlify", "supabase", "gumroad",
+	"stripe", "shopify", "granola", "resend", "sendgrid", "kit", "airtable", "clickup", "monday", "asana", "typeform", "calendly", "dropbox", "netlify", "supabase", "gumroad",
 	"googlesearchconsole", "googlecontacts", "hubspot", "front",
 }
 
@@ -722,6 +747,10 @@ func (h *WorkflowHandler) CallbackIntegration(c *gin.Context) {
 		conn, err = exchangeAirtableCode(code, st.verifier)
 	case "clickup":
 		conn, err = exchangeClickUpCode(code)
+	case "monday":
+		conn, err = exchangeMondayCode(code, st.verifier)
+	case "asana":
+		conn, err = exchangeAsanaCode(code, st.verifier)
 	case "dropbox":
 		conn, err = exchangeFormPostCode("dropbox", code, "https://api.dropboxapi.com/oauth2/token")
 	case "netlify":
@@ -798,12 +827,13 @@ func (h *WorkflowHandler) DisconnectIntegration(c *gin.Context) {
 	// GitLab creates real project hooks with this OAuth token. Remove them while
 	// the credential still exists; deleting the connection first would strand
 	// remote hooks and leave reconnecting unable to clean them up.
-	if provider == "gitlab" {
+	if provider == "gitlab" || provider == "monday" || provider == "asana" {
 		query := h.db.DB.Where("organization_id = ? AND user_id = ? AND provider = ? AND deleted_at IS NULL",
 			currentOrgID(c), currentUserID(c), provider)
 		if err := h.retireIntegrationTriggers(c.Request.Context(), query); err != nil {
-			slog.ErrorContext(c.Request.Context(), "could not retire GitLab webhooks on disconnect", "error", err)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "could not remove GitLab webhooks"})
+			slog.ErrorContext(c.Request.Context(), "could not retire provider webhooks on disconnect",
+				"provider", provider, "error", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "could not remove " + provider + " webhooks"})
 			return
 		}
 	}
@@ -871,6 +901,10 @@ func (h *WorkflowHandler) listProviderResources(orgID, userID, provider string) 
 		return searchConsoleResources(token)
 	case "clickup":
 		return clickupResources(token)
+	case "monday":
+		return mondayResources(token)
+	case "asana":
+		return asanaResources(token)
 	case "googletasks":
 		return googleTasksResources(token)
 	case "googlechat":
@@ -921,6 +955,10 @@ func (h *WorkflowHandler) listChildResources(orgID, userID, provider, parent str
 			return branches, nil
 		}
 		return append(branches, people...), nil
+	case "monday":
+		return mondayBoardResources(token, parent)
+	case "asana":
+		return asanaProjectResources(token, parent)
 	}
 	return []integrationResource{}, nil
 }
@@ -1246,7 +1284,8 @@ if (window.opener) { window.opener.postMessage(` + string(payload) + `, ` + stri
 
 // FreshAccessToken returns a valid access token and workspace/tenant
 // identifier for a user's provider connection, transparently refreshing
-// expiring tokens (github, gmail, gitlab, google*, outlook) and persisting the
+// expiring tokens (including GitHub, Gmail, GitLab, Google, Outlook, monday.com
+// and Asana) and persisting the
 // rotated credentials. Returns empty strings when no connection exists.
 func FreshAccessToken(db *gorm.DB, userID, provider string) (token, workspace string) {
 	var conn models.IntegrationConnection
@@ -1319,7 +1358,7 @@ func UserGrantTokenForOrg(db *gorm.DB, orgID, userID, provider string) string {
 }
 
 // refreshConnection exchanges the stored refresh token for a new access token
-// (gmail via Google, gitlab). It persists the rotated access token, expiry,
+// with its provider. It persists the rotated access token, expiry,
 // and (when the provider returns one) refresh token, then returns the updated
 // connection. Providers without refresh flows return the connection unchanged.
 // refreshTokenEndpoints maps a provider to its refresh exchange. Package-level
@@ -1327,7 +1366,7 @@ func UserGrantTokenForOrg(db *gorm.DB, orgID, userID, provider string) string {
 // GitHub App user tokens live 8 hours and their refresh token (~6 months)
 // rotates on every use. Classic OAuth Apps never reach here — they return no
 // refresh token, so ExpiresAt stays nil and the token is used as-is.
-// jsonBody sends the grant as a JSON object rather than a form (Atlassian).
+// jsonBody sends the grant as a JSON object rather than a form (Atlassian and monday.com).
 // basicAuth puts the client credentials in an Authorization header rather than
 // the body (Bitbucket rejects them in the body).
 type refreshEndpoint struct {
@@ -1363,6 +1402,8 @@ var refreshTokenEndpoints = map[string]refreshEndpoint{
 	"typeform":            {tokenURL: "https://api.typeform.com/oauth/token", clientIDEnv: "TYPEFORM_CLIENT_ID", secretEnv: "TYPEFORM_CLIENT_SECRET"},
 	"calendly":            {tokenURL: "https://auth.calendly.com/oauth/token", clientIDEnv: "CALENDLY_CLIENT_ID", secretEnv: "CALENDLY_CLIENT_SECRET"},
 	"bitbucket":           {tokenURL: bitbucketTokenURL, clientIDEnv: "BITBUCKET_CLIENT_ID", secretEnv: "BITBUCKET_CLIENT_SECRET", basicAuth: true},
+	"monday":              {tokenURL: mondayTokenURL, clientIDEnv: "MONDAY_CLIENT_ID", secretEnv: "MONDAY_CLIENT_SECRET", jsonBody: true},
+	"asana":               {tokenURL: asanaTokenURL, clientIDEnv: "ASANA_CLIENT_ID", secretEnv: "ASANA_CLIENT_SECRET"},
 }
 
 // refreshedToken is one provider's answer to a refresh-token grant.
@@ -1437,12 +1478,12 @@ func refreshConnection(db *gorm.DB, conn *models.IntegrationConnection) (*models
 	// values explicitly here. The in-memory conn keeps plaintext for the caller.
 	updates := map[string]any{"access_token": cryptobox.Encrypt(tok.AccessToken)}
 	conn.AccessToken = tok.AccessToken
-	if tok.ExpiresIn > 0 {
-		exp := time.Now().Add(time.Duration(tok.ExpiresIn) * time.Second)
-		conn.ExpiresAt = &exp
-		updates["expires_at"] = exp
+	setOAuthExpiry(conn, tok.AccessToken, tok.ExpiresIn)
+	if conn.ExpiresAt != nil {
+		updates["expires_at"] = *conn.ExpiresAt
 	}
-	// github, gitlab and atlassian rotate the refresh token on use; google does not.
+	// Providers that rotate refresh tokens return the replacement here; Google
+	// commonly omits it and keeps the existing token.
 	if tok.RefreshToken != "" {
 		conn.RefreshToken = tok.RefreshToken
 		updates["refresh_token"] = cryptobox.Encrypt(tok.RefreshToken)
