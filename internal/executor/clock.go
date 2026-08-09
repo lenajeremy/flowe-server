@@ -47,6 +47,11 @@ func WithClock(system string) string { return appendClock(system, false) }
 // WithClockAndTool is WithClock for call sites that also register the
 // get_current_time tool. Only these mention the tool — promising a tool that
 // isn't in the request just invites the model to hallucinate a call.
+//
+// It has no production callers left: every tool-loop call site now sends
+// ClockBlock in its own block instead, because concatenating here makes the
+// prefix unique per request and no prompt cache can hit. Reach for ClockBlock,
+// not this, when wiring up a new loop.
 func WithClockAndTool(system string) string { return appendClock(system, true) }
 
 // ClockBlock is the clock on its own, for call sites that keep it in a
