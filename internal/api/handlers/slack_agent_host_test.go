@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"strconv"
@@ -96,6 +97,61 @@ func TestAgentHostOAuthStateIsDistinctFromActionConnection(t *testing.T) {
 	}
 }
 
+func TestSlackAgentAPIGetPreservesReadArguments(t *testing.T) {
+	oldClient := slackAgentHTTPClient
+	t.Cleanup(func() { slackAgentHTTPClient = oldClient })
+	slackAgentHTTPClient = &http.Client{Transport: slackRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+		if request.Method != http.MethodGet {
+			t.Fatalf("Slack read method = %q, want GET", request.Method)
+		}
+		if got := request.URL.Query().Get("channel"); got != "C123" {
+			t.Fatalf("channel query = %q, want C123", got)
+		}
+		if got := request.URL.Query().Get("limit"); got != "100" {
+			t.Fatalf("limit query = %q, want 100", got)
+		}
+		if request.Header.Get("Authorization") != "Bearer xoxb-test" {
+			t.Fatal("Slack bearer token was not attached")
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(`{"ok":true,"channel":{"id":"C123","name":"general","is_member":true}}`)),
+			Header:     http.Header{},
+		}, nil
+	})}
+	var result struct {
+		Channel struct {
+			ID string `json:"id"`
+		} `json:"channel"`
+	}
+	if err := slackAgentAPIGet(context.Background(), "xoxb-test", "conversations.info", map[string]any{
+		"channel": "C123", "limit": 100,
+	}, &result); err != nil {
+		t.Fatalf("Slack GET failed: %v", err)
+	}
+	if result.Channel.ID != "C123" {
+		t.Fatalf("decoded channel = %q, want C123", result.Channel.ID)
+	}
+}
+
+func TestSlackAgentAPIErrorIncludesResponseMetadata(t *testing.T) {
+	oldClient := slackAgentHTTPClient
+	t.Cleanup(func() { slackAgentHTTPClient = oldClient })
+	slackAgentHTTPClient = &http.Client{Transport: slackRoundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body: io.NopCloser(strings.NewReader(
+				`{"ok":false,"error":"invalid_arguments","response_metadata":{"messages":["[ERROR] missing required field: channel"]}}`,
+			)),
+			Header: http.Header{},
+		}, nil
+	})}
+	err := slackAgentAPIGet(context.Background(), "xoxb-test", "conversations.info", map[string]any{"channel": "C123"}, nil)
+	if err == nil || !strings.Contains(err.Error(), "missing required field: channel") {
+		t.Fatalf("Slack error = %v, want response metadata", err)
+	}
+}
+
 func TestSlackAgentPostTextUsesDeploymentDisplayName(t *testing.T) {
 	oldClient := slackAgentHTTPClient
 	t.Cleanup(func() { slackAgentHTTPClient = oldClient })
@@ -121,6 +177,38 @@ func TestSlackAgentPostTextUsesDeploymentDisplayName(t *testing.T) {
 	}
 }
 
+func TestSlackAgentPostTextUsesDeliveryIdempotencyKey(t *testing.T) {
+	oldClient := slackAgentHTTPClient
+	t.Cleanup(func() { slackAgentHTTPClient = oldClient })
+	var payload map[string]any
+	slackAgentHTTPClient = &http.Client{Transport: slackRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+		if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode Slack payload: %v", err)
+		}
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"ok":true}`)), Header: http.Header{}}, nil
+	})}
+	deliveryID := uuid.NewString()
+	if err := slackAgentPostText(withSlackAgentDeliveryID(context.Background(), deliveryID), "xoxb-test", "C123", "100.1", "hello"); err != nil {
+		t.Fatalf("post text: %v", err)
+	}
+	if payload["client_msg_id"] != deliveryID {
+		t.Fatalf("client_msg_id = %#v, want %q", payload["client_msg_id"], deliveryID)
+	}
+}
+
+func TestSlackAgentGeneratedTextCannotNotifyUsersOrChannel(t *testing.T) {
+	t.Parallel()
+	got := slackAgentSanitizeGeneratedText("notify <!channel> <!here> <!everyone> <!subteam^S123ABC|ops> and <@U123ABC>")
+	if strings.Contains(got, "<!") || strings.Contains(got, "<@") {
+		t.Fatalf("generated Slack notification markup survived: %q", got)
+	}
+	for _, want := range []string{"@channel", "@here", "@everyone", "@user-group", "@user-U123ABC"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("sanitized text omitted %q: %q", want, got)
+		}
+	}
+}
+
 func TestSlackAgentStripSelfMentionPreservesMentionedTeammates(t *testing.T) {
 	t.Parallel()
 	message := "<@UFERNARY> send the summary to <@UALICE> and <@UBOB>"
@@ -131,6 +219,36 @@ func TestSlackAgentStripSelfMentionPreservesMentionedTeammates(t *testing.T) {
 	legacy := slackAgentStripSelfMention(message, "")
 	if legacy != got {
 		t.Fatalf("legacy mention fallback = %q, want %q", legacy, got)
+	}
+}
+
+func TestSlackThreadContextRetainsNewestMessagesWhenBounded(t *testing.T) {
+	oldClient := slackAgentHTTPClient
+	t.Cleanup(func() { slackAgentHTTPClient = oldClient })
+	messages := make([]map[string]string, 0, 20)
+	for index := 0; index < 20; index++ {
+		messages = append(messages, map[string]string{
+			"user": "U123", "ts": fmt.Sprintf("100.%06d", index),
+			"text": fmt.Sprintf("message-%02d-%s", index, strings.Repeat("x", 1900)),
+		})
+	}
+	response, _ := json.Marshal(map[string]any{"ok": true, "messages": messages})
+	slackAgentHTTPClient = &http.Client{Transport: slackRoundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(string(response))), Header: http.Header{}}, nil
+	})}
+
+	contextText, err := slackAgentThreadContext(context.Background(), "xoxb-test", "C123", "100.000000", "999.999999")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(contextText, "message-19-") {
+		t.Fatal("bounded thread context dropped the newest message")
+	}
+	if strings.Contains(contextText, "message-00-") {
+		t.Fatal("bounded thread context retained the oldest message instead of newer context")
+	}
+	if strings.Index(contextText, "message-12-") > strings.Index(contextText, "message-19-") {
+		t.Fatal("bounded thread context is not ordered oldest to newest")
 	}
 }
 

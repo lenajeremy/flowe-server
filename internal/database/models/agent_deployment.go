@@ -140,17 +140,23 @@ const (
 // for provider retries.
 type HostedAgentDelivery struct {
 	BaseModel
-	Provider            string                    `json:"provider" gorm:"not null;uniqueIndex:idx_hosted_delivery,priority:1"`
-	ExternalDeliveryID  string                    `json:"external_delivery_id" gorm:"not null;uniqueIndex:idx_hosted_delivery,priority:2"`
-	ExternalWorkspaceID string                    `json:"external_workspace_id" gorm:"index"`
-	EventKind           string                    `json:"event_kind" gorm:"not null;index"`
-	Payload             JSONB                     `json:"payload" gorm:"type:jsonb;not null"`
-	Status              HostedAgentDeliveryStatus `json:"status" gorm:"type:varchar(20);not null;default:'pending';index"`
-	AttemptCount        int                       `json:"attempt_count" gorm:"not null;default:0"`
-	AvailableAt         time.Time                 `json:"available_at" gorm:"index"`
-	ClaimedAt           *time.Time                `json:"claimed_at,omitempty"`
-	CompletedAt         *time.Time                `json:"completed_at,omitempty"`
-	LastError           string                    `json:"last_error,omitempty"`
+	Provider            string `json:"provider" gorm:"not null;uniqueIndex:idx_hosted_delivery,priority:1"`
+	ExternalDeliveryID  string `json:"external_delivery_id" gorm:"not null;uniqueIndex:idx_hosted_delivery,priority:2"`
+	ExternalWorkspaceID string `json:"external_workspace_id" gorm:"index"`
+	// ThreadKey lets concurrent workers preserve provider-thread turn order.
+	// Legacy queued deliveries default to empty and retain the old behavior.
+	ThreadKey            string                    `json:"-" gorm:"not null;default:'';index"`
+	EventKind            string                    `json:"event_kind" gorm:"not null;index"`
+	Payload              JSONB                     `json:"payload" gorm:"type:jsonb;not null"`
+	Status               HostedAgentDeliveryStatus `json:"status" gorm:"type:varchar(20);not null;default:'pending';index"`
+	AttemptCount         int                       `json:"attempt_count" gorm:"not null;default:0"`
+	AvailableAt          time.Time                 `json:"available_at" gorm:"index"`
+	ClaimedAt            *time.Time                `json:"claimed_at,omitempty"`
+	CompletedAt          *time.Time                `json:"completed_at,omitempty"`
+	LastError            string                    `json:"last_error,omitempty"`
+	ResponseDeploymentID string                    `json:"-" gorm:"type:varchar(36);index"`
+	ResponseText         string                    `json:"-" gorm:"type:text"`
+	ResponseRecordedAt   *time.Time                `json:"-"`
 }
 
 type HostedAgentApprovalStatus string
@@ -178,24 +184,31 @@ const (
 // EffectiveOverrides directly; it never asks the model to regenerate them.
 type HostedAgentApproval struct {
 	BaseModel
-	OrganizationID       string                    `json:"organization_id" gorm:"type:uuid;not null;index"`
-	DeploymentID         string                    `json:"deployment_id" gorm:"type:uuid;not null;index"`
-	DeploymentVersion    int                       `json:"deployment_version" gorm:"not null"`
-	ThreadID             string                    `json:"thread_id" gorm:"type:uuid;not null;index"`
-	ChatSessionID        string                    `json:"chat_session_id" gorm:"type:uuid;not null;index"`
-	RequesterExternalID  string                    `json:"requester_external_id" gorm:"not null;index"`
-	SourceDeliveryID     string                    `json:"source_delivery_id" gorm:"type:uuid;not null;uniqueIndex"`
-	NodeID               string                    `json:"node_id" gorm:"not null"`
-	Operation            string                    `json:"operation" gorm:"not null"`
-	Reason               string                    `json:"reason" gorm:"not null"`
-	EffectiveOverrides   JSONB                     `json:"effective_overrides" gorm:"type:jsonb;not null"`
-	EffectiveConfigHash  string                    `json:"effective_config_hash" gorm:"not null"`
-	ExecutionFingerprint string                    `json:"-" gorm:"index"`
-	DisplayDetails       JSONB                     `json:"display_details" gorm:"type:jsonb;not null"`
-	Status               HostedAgentApprovalStatus `json:"status" gorm:"type:varchar(20);not null;default:'pending';index"`
-	ExpiresAt            time.Time                 `json:"expires_at" gorm:"not null;index"`
-	ResolvedAt           *time.Time                `json:"resolved_at,omitempty"`
-	ExecutedAt           *time.Time                `json:"executed_at,omitempty"`
+	OrganizationID      string `json:"organization_id" gorm:"type:uuid;not null;index"`
+	DeploymentID        string `json:"deployment_id" gorm:"type:uuid;not null;index"`
+	DeploymentVersion   int    `json:"deployment_version" gorm:"not null"`
+	ThreadID            string `json:"thread_id" gorm:"type:uuid;not null;index"`
+	ChatSessionID       string `json:"chat_session_id" gorm:"type:uuid;not null;index"`
+	RequesterExternalID string `json:"requester_external_id" gorm:"not null;index"`
+	SourceDeliveryID    string `json:"source_delivery_id" gorm:"type:uuid;not null;uniqueIndex"`
+	NodeID              string `json:"node_id" gorm:"not null"`
+	Operation           string `json:"operation" gorm:"not null"`
+	Reason              string `json:"reason" gorm:"not null"`
+	EffectiveOverrides  JSONB  `json:"effective_overrides" gorm:"type:jsonb;not null"`
+	EffectiveConfigHash string `json:"effective_config_hash" gorm:"not null"`
+	// ExecutionConfig is the exact, template-resolved node configuration that
+	// was reviewed. Storing only this value avoids copying unrelated session
+	// outputs into the approval while ensuring a later turn cannot change it.
+	ExecutionConfig        JSONB                     `json:"-" gorm:"type:jsonb;not null;default:'{}'"`
+	ConfigRecordedAt       *time.Time                `json:"-"`
+	ExecutionFingerprint   string                    `json:"-" gorm:"index"`
+	CredentialProvider     string                    `json:"-" gorm:"index"`
+	CredentialConnectionID string                    `json:"-" gorm:"type:varchar(36);index"`
+	DisplayDetails         JSONB                     `json:"display_details" gorm:"type:jsonb;not null"`
+	Status                 HostedAgentApprovalStatus `json:"status" gorm:"type:varchar(20);not null;default:'pending';index"`
+	ExpiresAt              time.Time                 `json:"expires_at" gorm:"not null;index"`
+	ResolvedAt             *time.Time                `json:"resolved_at,omitempty"`
+	ExecutedAt             *time.Time                `json:"executed_at,omitempty"`
 	// ExecutionKey is a stable, durable attempt identity written before any
 	// external side effect. It follows the call through logs and billing, while
 	// unresolved equivalent calls are blocked by the pinned call fields above.

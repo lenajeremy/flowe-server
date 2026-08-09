@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 
@@ -101,6 +102,13 @@ func agentNodeCapability(node executor.WorkflowASTNode) (AgentNodeCapability, bo
 		node.Data.NodeType == executor.NodeTypeImageInput {
 		return AgentNodeCapability{}, false
 	}
+	// Hosted integrations resolve the deployer's encrypted connection at run
+	// time. A legacy token embedded in workflow JSON would be copied into the
+	// deployment and approval records, so fail closed and require reconnecting
+	// through Fernary's credential store instead.
+	if strings.TrimSpace(node.Data.IntegrationToken) != "" {
+		return AgentNodeCapability{}, false
+	}
 
 	capability := AgentNodeCapability{
 		NodeID: node.ID, NodeType: node.Data.NodeType, Label: node.Data.Label,
@@ -147,6 +155,10 @@ func agentNodeCapability(node executor.WorkflowASTNode) (AgentNodeCapability, bo
 		capability.Operations = []AgentOperationCapability{{
 			ID: "send", Label: "Send email", Effect: AgentEffectWrite,
 		}}
+	case executor.NodeTypeTextInput, executor.NodeTypeLLM:
+		capability.Operations = []AgentOperationCapability{{
+			ID: "run", Label: "Run", Effect: AgentEffectRead,
+		}}
 	default:
 		operationDoc, hasOperations := fieldDocs["integrationOp"].(string)
 		if hasOperations {
@@ -169,9 +181,10 @@ func agentNodeCapability(node executor.WorkflowASTNode) (AgentNodeCapability, bo
 				})
 			}
 		} else {
-			capability.Operations = []AgentOperationCapability{{
-				ID: "run", Label: "Run", Effect: AgentEffectRead,
-			}}
+			// An integration without authoritative operation metadata cannot be
+			// proven read-only. Do not expose it until its catalog entry describes
+			// the exact operations the server can authorize.
+			return AgentNodeCapability{}, false
 		}
 	}
 
@@ -183,16 +196,40 @@ func classifyAgentOperation(operation string) AgentEffect {
 	if normalized == "find_replace" {
 		return AgentEffectWrite
 	}
-	for _, prefix := range []string{
-		"delete", "remove", "revoke", "cancel", "disable", "archive", "refund",
-		"void", "disconnect", "reset", "rollback", "clear", "purge", "destroy",
-	} {
-		if normalized == prefix || strings.HasPrefix(normalized, prefix+"_") {
-			return AgentEffectDestructive
-		}
+	if normalized == "run_sql_read_only" || normalized == "generate_types" {
+		return AgentEffectRead
 	}
 	if normalized == "run_sql" {
 		return AgentEffectDestructive
+	}
+	destructiveWords := []string{
+		"delete", "remove", "revoke", "cancel", "disable", "archive", "refund",
+		"void", "disconnect", "reset", "rollback", "clear", "purge", "destroy",
+	}
+	writeWords := []string{
+		"create", "update", "set", "add", "send", "post", "put", "patch",
+		"invite", "share", "upload", "append", "increment", "move", "rename",
+		"merge", "approve", "reject", "respond", "reply", "forward", "schedule",
+		"publish", "unpublish", "trigger", "execute", "run", "write", "commit",
+	}
+	// Mutation words take precedence even when an operation starts with a
+	// read-looking verb (for example, a future list_and_delete operation). The
+	// catalog evolves independently, so prefix-only classification would turn a
+	// newly added mutation into an approval bypass.
+	parts := strings.FieldsFunc(normalized, func(r rune) bool { return r == '_' || r == '-' })
+	for _, part := range parts {
+		if slices.Contains(destructiveWords, part) {
+			return AgentEffectDestructive
+		}
+		if slices.Contains(writeWords, part) {
+			return AgentEffectWrite
+		}
+	}
+	// Composite operation names are not safe to infer from their first verb.
+	// If a future catalog adds list_and_adjust_* without teaching this classifier
+	// its new mutation verb, approval is still required.
+	if strings.Contains(normalized, "_and_") || strings.Contains(normalized, "_or_") {
+		return AgentEffectWrite
 	}
 	for _, prefix := range []string{
 		"get", "list", "search", "find", "fetch", "check", "count", "query",
@@ -201,9 +238,6 @@ func classifyAgentOperation(operation string) AgentEffect {
 		if normalized == prefix || strings.HasPrefix(normalized, prefix+"_") {
 			return AgentEffectRead
 		}
-	}
-	if normalized == "run_sql_read_only" || normalized == "generate_types" {
-		return AgentEffectRead
 	}
 	return AgentEffectWrite
 }

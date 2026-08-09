@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"reflect"
 	"strings"
+	"sync"
 )
 
 // ExecuteSingleNode runs one workflow node in isolation with a caller-supplied
@@ -55,6 +56,41 @@ func ResolveSingleNodeData(node WorkflowASTNode, overrides map[string]any) (Flow
 	return mergeNodeData(node.Data, overrides)
 }
 
+// ResolveSingleNodeDataForExecution returns the exact configuration produced by
+// applying overrides and one immutable output snapshot. Hosted approvals hash,
+// display, and execute this value so templates cannot change after review.
+func ResolveSingleNodeDataForExecution(node WorkflowASTNode, overrides map[string]any, outputs map[string]string) (FlowNodeData, error) {
+	data, err := ResolveSingleNodeData(node, overrides)
+	if err != nil {
+		return FlowNodeData{}, err
+	}
+	// Deep-copy pointer fields before replacing strings.
+	raw, err := json.Marshal(data)
+	if err != nil {
+		return FlowNodeData{}, err
+	}
+	var resolved FlowNodeData
+	if err := json.Unmarshal(raw, &resolved); err != nil {
+		return FlowNodeData{}, err
+	}
+	value := reflect.ValueOf(&resolved).Elem()
+	for index := 0; index < value.NumField(); index++ {
+		field := value.Field(index)
+		switch field.Kind() {
+		case reflect.String:
+			field.SetString(substituteTemplates(field.String(), outputs))
+		case reflect.Pointer:
+			if !field.IsNil() && field.Elem().Kind() == reflect.String {
+				text := substituteTemplates(field.Elem().String(), outputs)
+				copy := reflect.New(field.Type().Elem())
+				copy.Elem().SetString(text)
+				field.Set(copy)
+			}
+		}
+	}
+	return resolved, nil
+}
+
 // mergeNodeData overlays override values onto a copy of the node data using
 // the JSON representation, so callers speak the same field names the frontend
 // and AI catalog use. Unknown keys are rejected to surface orchestrator
@@ -96,21 +132,20 @@ func mergeNodeData(data FlowNodeData, overrides map[string]any) (FlowNodeData, e
 // knownFlowDataKeys returns the set of JSON field names FlowNodeData accepts.
 // Built by marshalling a fully zero struct is insufficient (omitempty hides
 // keys), so we reflect over the JSON of a round-tripped map built from tags.
-var flowDataKeys map[string]bool
+var (
+	flowDataKeys     map[string]bool
+	flowDataKeysOnce sync.Once
+)
 
 func knownFlowDataKeys() map[string]bool {
-	if flowDataKeys != nil {
-		return flowDataKeys
-	}
-	keys := map[string]bool{}
-	// Marshal a struct with every field set to a non-zero probe value would be
-	// unmaintainable; instead decode "{}" into the struct and use a strict
-	// decoder trick: encode field names from struct tags via reflection.
-	for _, tag := range flowNodeDataJSONTags() {
-		keys[tag] = true
-	}
-	flowDataKeys = keys
-	return keys
+	flowDataKeysOnce.Do(func() {
+		keys := map[string]bool{}
+		for _, tag := range flowNodeDataJSONTags() {
+			keys[tag] = true
+		}
+		flowDataKeys = keys
+	})
+	return flowDataKeys
 }
 
 // flowNodeDataJSONTags reflects FlowNodeData's json tags (minus omitempty).

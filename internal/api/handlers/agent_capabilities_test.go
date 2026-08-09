@@ -73,9 +73,39 @@ func TestAgentOperationClassificationFailsConservatively(t *testing.T) {
 	if got := classifyAgentOperation("unknown_future_operation"); got != AgentEffectWrite {
 		t.Fatalf("unknown operation = %q, want conservative write", got)
 	}
+	if got := classifyAgentOperation("list_and_delete_contacts"); got != AgentEffectDestructive {
+		t.Fatalf("read-prefixed mutation = %q, want destructive", got)
+	}
+	for _, operation := range []string{"get_or_create_contact", "list_and_update_issues", "search_and_send_email", "list_and_adjust_inventory"} {
+		if got := classifyAgentOperation(operation); got == AgentEffectRead {
+			t.Errorf("composite mutation %q classified as read", operation)
+		}
+	}
+	if got := classifyAgentOperation("run_sql_read_only"); got != AgentEffectRead {
+		t.Fatalf("explicit read-only SQL = %q, want read", got)
+	}
+	if got := classifyAgentOperation("run_sql"); got != AgentEffectDestructive {
+		t.Fatalf("arbitrary SQL = %q, want destructive", got)
+	}
 	if !sensitiveAgentReadOperation("get_auth_config") || !sensitiveAgentReadOperation("list_env_vars") ||
 		!sensitiveAgentReadOperation("get_api_key") || !sensitiveAgentReadOperation("list_deploy_keys") {
 		t.Fatal("credential-adjacent reads were not marked sensitive")
+	}
+}
+
+func TestHostedCapabilitiesFailClosedWithoutOperationMetadata(t *testing.T) {
+	t.Parallel()
+	node := executor.WorkflowASTNode{ID: "future-1", Data: executor.FlowNodeData{
+		NodeType: executor.NodeType("futureIntegration"), Label: "Future integration", IntegrationOp: "list_and_update",
+	}}
+	if _, ok := agentNodeCapability(node); ok {
+		t.Fatal("integration without catalog operation metadata was exposed")
+	}
+	for _, safeType := range []executor.NodeType{executor.NodeTypeTextInput, executor.NodeTypeLLM} {
+		capability, ok := agentNodeCapability(executor.WorkflowASTNode{ID: string(safeType), Data: executor.FlowNodeData{NodeType: safeType}})
+		if !ok || len(capability.Operations) != 1 || capability.Operations[0].ID != "run" || capability.Operations[0].Effect != AgentEffectRead {
+			t.Fatalf("safe local node %q capability = %#v, ok=%v", safeType, capability, ok)
+		}
 	}
 }
 
@@ -103,6 +133,15 @@ func TestHostedCapabilitiesExcludeBlockingApprovalAndImageNodes(t *testing.T) {
 		}); ok {
 			t.Errorf("hosted capability exposed %q", nodeType)
 		}
+	}
+}
+
+func TestHostedCapabilitiesRejectEmbeddedIntegrationCredentials(t *testing.T) {
+	t.Parallel()
+	node := githubAgentNode()
+	node.Data.IntegrationToken = "legacy-plaintext-token"
+	if _, ok := agentNodeCapability(node); ok {
+		t.Fatal("hosted capability exposed a node with an embedded credential")
 	}
 }
 

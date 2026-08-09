@@ -9,6 +9,7 @@ import (
 	"workflow-ai/server/internal/database/models"
 
 	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
 )
 
 // Providers that authenticate with a long-lived API key rather than OAuth.
@@ -104,9 +105,6 @@ func (h *WorkflowHandler) SetIntegrationKey(c *gin.Context) {
 	}
 
 	userID, orgID := currentUserID(c), currentOrgID(c)
-	// One connection per user per provider: replace rather than accumulate.
-	h.db.DB.Unscoped().Where("organization_id = ? AND user_id = ? AND provider = ?",
-		orgID, userID, prov.name).Delete(&models.IntegrationConnection{})
 	conn := models.IntegrationConnection{
 		UserID:         userID,
 		OrganizationID: orgID,
@@ -114,7 +112,16 @@ func (h *WorkflowHandler) SetIntegrationKey(c *gin.Context) {
 		AccessToken:    key,
 		Scope:          "api_key",
 	}
-	if err := h.db.DB.Create(&conn).Error; err != nil {
+	err := h.withHostedAuthorityLock(c.Request.Context(), orgID, userID, func(connection *gorm.DB) error {
+		return connection.Transaction(func(tx *gorm.DB) error {
+			if err := tx.Unscoped().Where("organization_id = ? AND user_id = ? AND provider = ?",
+				orgID, userID, prov.name).Delete(&models.IntegrationConnection{}).Error; err != nil {
+				return err
+			}
+			return tx.Create(&conn).Error
+		})
+	})
+	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not save the API key"})
 		return
 	}

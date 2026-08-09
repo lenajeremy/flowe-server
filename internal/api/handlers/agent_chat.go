@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"reflect"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"workflow-ai/server/internal/auth"
@@ -72,6 +74,7 @@ func (h *WorkflowHandler) ListChatSessions(c *gin.Context) {
 	out := []agentSessionSummary{}
 	h.db.DB.Model(&models.ChatSession{}).
 		Where("workflow_id = ? AND organization_id = ?", c.Param("id"), orgIDOrDeny(c)).
+		Where("NOT EXISTS (SELECT 1 FROM hosted_agent_threads WHERE hosted_agent_threads.chat_session_id = chat_sessions.id AND hosted_agent_threads.deleted_at IS NULL)").
 		Order("updated_at desc").Limit(50).
 		Select("id, title, created_at, updated_at").Scan(&out)
 	c.JSON(http.StatusOK, out)
@@ -98,7 +101,9 @@ func (h *WorkflowHandler) DeleteChatSession(c *gin.Context) {
 
 func (h *WorkflowHandler) loadOwnedSession(c *gin.Context) (*models.ChatSession, bool) {
 	var sess models.ChatSession
-	if err := h.orgScope(c).First(&sess, "id = ?", c.Param("id")).Error; err != nil {
+	if err := h.orgScope(c).
+		Where("NOT EXISTS (SELECT 1 FROM hosted_agent_threads WHERE hosted_agent_threads.chat_session_id = chat_sessions.id AND hosted_agent_threads.deleted_at IS NULL)").
+		First(&sess, "id = ?", c.Param("id")).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "session not found"})
 		return nil, false
 	}
@@ -122,11 +127,13 @@ func agentToolName(node executor.WorkflowASTNode) string {
 	if label == "" {
 		label = string(node.Data.NodeType)
 	}
-	name := label + "__" + toolNameRe.ReplaceAllString(node.ID, "_")
-	if len(name) > 64 {
-		name = name[:64]
+	digest := sha256.Sum256([]byte(node.ID))
+	suffix := fmt.Sprintf("__%x", digest[:8])
+	maxLabel := 64 - len(suffix)
+	if len(label) > maxLabel {
+		label = strings.Trim(label[:maxLabel], "_")
 	}
-	return name
+	return label + suffix
 }
 
 // agentSkipNode: control-flow/display/trigger nodes are not tools — the
@@ -242,8 +249,9 @@ func buildAgentToolsWithPolicy(ast executor.WorkflowAST, policy *AgentCapability
 		)
 
 		inputSchema := map[string]any{
-			"type":       "object",
-			"properties": props,
+			"type":                 "object",
+			"properties":           props,
+			"additionalProperties": false,
 		}
 		if len(required) > 0 {
 			inputSchema["required"] = required
@@ -298,8 +306,9 @@ func agentSafeSavedConfig(data executor.FlowNodeData) string {
 	if json.Unmarshal(raw, &fields) != nil {
 		return "{}"
 	}
+	relevant := agentRelevantConfigFields(data)
 	for field := range fields {
-		if agentSecretConfigFields[strings.ToLower(field)] {
+		if !relevant[field] || agentSecretConfigFields[strings.ToLower(field)] {
 			delete(fields, field)
 		}
 	}
@@ -310,43 +319,94 @@ func agentSafeSavedConfig(data executor.FlowNodeData) string {
 	return string(safe)
 }
 
+func agentRelevantConfigFields(data executor.FlowNodeData) map[string]bool {
+	relevant := map[string]bool{"nodeType": true, "label": true}
+	if entry := catalogEntry(string(data.NodeType)); entry != nil {
+		if docs, ok := entry["dataFields"].(map[string]any); ok {
+			for field := range docs {
+				relevant[field] = true
+			}
+		}
+	}
+	return relevant
+}
+
+func agentApprovalDisplayDetails(data executor.FlowNodeData) (map[string]any, error) {
+	raw, err := json.Marshal(data)
+	if err != nil {
+		return nil, err
+	}
+	var fields map[string]any
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return nil, err
+	}
+	// FlowNodeData is a union shared by every node type, and several older JSON
+	// fields are intentionally not omitempty. Only show fields that belong to
+	// this node's catalog entry so an approval is readable and does not imply
+	// that unrelated empty settings participate in the call.
+	relevant := agentRelevantConfigFields(data)
+	for field, value := range fields {
+		if !relevant[field] {
+			delete(fields, field)
+			continue
+		}
+		if !agentSecretConfigFields[strings.ToLower(field)] {
+			continue
+		}
+		encoded, _ := json.Marshal(value)
+		if text, ok := value.(string); ok && text == "" {
+			delete(fields, field)
+			continue
+		}
+		digest := sha256.Sum256(encoded)
+		fields[field] = map[string]any{
+			"redacted": true,
+			"bytes":    len(encoded),
+			"sha256":   fmt.Sprintf("%x", digest[:8]),
+		}
+	}
+	return fields, nil
+}
+
 // flowDataFieldType maps a FlowNodeData JSON field to its JSON-schema type.
 func flowDataFieldType(field string) (string, bool) {
 	t, ok := flowDataFieldTypes()[field]
 	return t, ok
 }
 
-var flowDataTypesCache map[string]string
+var (
+	flowDataTypesCache map[string]string
+	flowDataTypesOnce  sync.Once
+)
 
 func flowDataFieldTypes() map[string]string {
-	if flowDataTypesCache != nil {
-		return flowDataTypesCache
-	}
-	out := map[string]string{}
-	t := reflect.TypeOf(executor.FlowNodeData{})
-	for i := 0; i < t.NumField(); i++ {
-		tag := t.Field(i).Tag.Get("json")
-		if tag == "" || tag == "-" {
-			continue
+	flowDataTypesOnce.Do(func() {
+		out := map[string]string{}
+		t := reflect.TypeOf(executor.FlowNodeData{})
+		for i := 0; i < t.NumField(); i++ {
+			tag := t.Field(i).Tag.Get("json")
+			if tag == "" || tag == "-" {
+				continue
+			}
+			name := strings.Split(tag, ",")[0]
+			ft := t.Field(i).Type
+			if ft.Kind() == reflect.Ptr {
+				ft = ft.Elem()
+			}
+			switch ft.Kind() {
+			case reflect.String:
+				out[name] = "string"
+			case reflect.Int, reflect.Int64:
+				out[name] = "integer"
+			case reflect.Float64:
+				out[name] = "number"
+			case reflect.Bool:
+				out[name] = "boolean"
+			}
 		}
-		name := strings.Split(tag, ",")[0]
-		ft := t.Field(i).Type
-		if ft.Kind() == reflect.Ptr {
-			ft = ft.Elem()
-		}
-		switch ft.Kind() {
-		case reflect.String:
-			out[name] = "string"
-		case reflect.Int, reflect.Int64:
-			out[name] = "integer"
-		case reflect.Float64:
-			out[name] = "number"
-		case reflect.Bool:
-			out[name] = "boolean"
-		}
-	}
-	flowDataTypesCache = out
-	return out
+		flowDataTypesCache = out
+	})
+	return flowDataTypesCache
 }
 
 // ── The turn endpoint ─────────────────────────────────────────

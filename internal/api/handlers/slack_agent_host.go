@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -40,14 +41,21 @@ const (
 	hostedAgentMessageCap    = 2000
 	hostedAgentThreadMsgCap  = 40
 	hostedApprovalOutcomeTTL = 24 * time.Hour
+	hostedAgentWorkerCount   = 4
 )
 
 var (
 	slackAgentHTTPClient         = &http.Client{Timeout: 20 * time.Second}
 	slackMentionPattern          = regexp.MustCompile(`<@[A-Z0-9]+>\s*`)
+	slackSpecialMentionPattern   = regexp.MustCompile(`<!((?:channel|here|everyone))(?:\^[^>]*)?>`)
+	slackSubteamMentionPattern   = regexp.MustCompile(`<!subteam\^[A-Z0-9]+(?:\|[^>]*)?>`)
+	slackUserMentionPattern      = regexp.MustCompile(`<@([A-Z0-9]+)>`)
+	slackRoutingIDPattern        = regexp.MustCompile(`^[A-Z][A-Z0-9]{1,31}$`)
+	slackTimestampPattern        = regexp.MustCompile(`^[0-9]{1,16}\.[0-9]{1,16}$`)
 	hostedWorkerOnce             sync.Once
 	errHostedThreadStale         = errors.New("Slack thread belongs to another agent deployment")
 	errHostedAgentAuthorityEnded = errors.New("the deployment owner is no longer authorized to act for this organization")
+	errHostedCredentialChanged   = errors.New("the deployment owner's integration connection changed after approval was requested")
 	hostedApprovalOutcomeMemory  sync.Map
 )
 
@@ -128,6 +136,17 @@ type hostedSlackInteractionPayload struct {
 	Action      string `json:"action"`
 }
 
+type slackAgentDeliveryContextKey struct{}
+
+func withSlackAgentDeliveryID(ctx context.Context, deliveryID string) context.Context {
+	return context.WithValue(ctx, slackAgentDeliveryContextKey{}, deliveryID)
+}
+
+func slackAgentDeliveryID(ctx context.Context) string {
+	value, _ := ctx.Value(slackAgentDeliveryContextKey{}).(string)
+	return value
+}
+
 func verifySlackAgentSignature(header http.Header, body []byte, now time.Time) error {
 	secret := os.Getenv("SLACK_SIGNING_SECRET")
 	if secret == "" {
@@ -184,7 +203,22 @@ func (h *WorkflowHandler) ReceiveSlackAgentEvent(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Slack mention is missing routing fields"})
 		return
 	}
-	if !h.activeSlackAgentTargetExists(envelope.TeamID, envelope.Event.Channel) {
+	if !slackRoutingIDPattern.MatchString(envelope.TeamID) ||
+		!slackRoutingIDPattern.MatchString(envelope.Event.Channel) ||
+		!slackRoutingIDPattern.MatchString(envelope.Event.User) ||
+		!slackTimestampPattern.MatchString(envelope.Event.TS) ||
+		(envelope.Event.ThreadTS != "" && !slackTimestampPattern.MatchString(envelope.Event.ThreadTS)) ||
+		len(envelope.EventID) > 255 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Slack mention has invalid routing fields"})
+		return
+	}
+	targetExists, err := h.activeSlackAgentTargetExists(envelope.TeamID, envelope.Event.Channel)
+	if err != nil {
+		slog.ErrorContext(c.Request.Context(), "could not resolve Slack agent destination", "error", err)
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "could not resolve agent destination"})
+		return
+	}
+	if !targetExists {
 		c.JSON(http.StatusOK, gin.H{"status": "ignored"})
 		return
 	}
@@ -199,7 +233,8 @@ func (h *WorkflowHandler) ReceiveSlackAgentEvent(c *gin.Context) {
 	})
 	delivery := models.HostedAgentDelivery{
 		Provider: slackAgentProvider, ExternalDeliveryID: envelope.EventID,
-		ExternalWorkspaceID: envelope.TeamID, EventKind: "mention", Payload: models.JSONB(payload),
+		ExternalWorkspaceID: envelope.TeamID, ThreadKey: envelope.TeamID + ":" + envelope.Event.Channel + ":" + threadID,
+		EventKind: "mention", Payload: models.JSONB(payload),
 		Status: models.HostedAgentDeliveryPending, AvailableAt: time.Now().UTC(),
 	}
 	result := h.db.DB.Clauses(clause.OnConflict{DoNothing: true}).Create(&delivery)
@@ -233,7 +268,7 @@ func (h *WorkflowHandler) ReceiveSlackAgentInteraction(c *gin.Context) {
 		return
 	}
 	var interaction slackAgentInteraction
-	if json.Unmarshal([]byte(form.Get("payload")), &interaction) != nil || len(interaction.Actions) != 1 {
+	if json.Unmarshal([]byte(form.Get("payload")), &interaction) != nil || interaction.Type != "block_actions" || len(interaction.Actions) != 1 {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "unreadable Slack interaction"})
 		return
 	}
@@ -243,7 +278,7 @@ func (h *WorkflowHandler) ReceiveSlackAgentInteraction(c *gin.Context) {
 		c.Status(http.StatusOK)
 		return
 	}
-	if interaction.Team.ID == "" || interaction.User.ID == "" || action.Value == "" {
+	if interaction.Team.ID == "" || interaction.User.ID == "" || interaction.Channel.ID == "" || action.Value == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Slack interaction is missing identity fields"})
 		return
 	}
@@ -251,17 +286,32 @@ func (h *WorkflowHandler) ReceiveSlackAgentInteraction(c *gin.Context) {
 	if threadID == "" {
 		threadID = interaction.Container.MessageTS
 	}
+	actionTS := action.ActionTS
+	if actionTS == "" {
+		actionTS = interaction.ActionTS
+	}
+	if !slackRoutingIDPattern.MatchString(interaction.Team.ID) ||
+		!slackRoutingIDPattern.MatchString(interaction.User.ID) ||
+		!slackRoutingIDPattern.MatchString(interaction.Channel.ID) ||
+		!slackTimestampPattern.MatchString(threadID) || interaction.TriggerID == "" || len(interaction.TriggerID) > 255 ||
+		!slackTimestampPattern.MatchString(actionTS) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Slack interaction has invalid routing fields"})
+		return
+	}
+	if _, err := uuid.Parse(action.Value); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Slack interaction has an invalid approval ID"})
+		return
+	}
 	payload, _ := json.Marshal(hostedSlackInteractionPayload{
 		WorkspaceID: interaction.Team.ID, ChannelID: interaction.Channel.ID, ThreadID: threadID,
 		RequesterID: interaction.User.ID, ApprovalID: action.Value, Action: decision,
 	})
-	externalID := interaction.TriggerID + ":" + action.ActionTS
-	if action.ActionTS == "" {
-		externalID = interaction.TriggerID + ":" + interaction.ActionTS
-	}
+	externalID := interaction.TriggerID + ":" + actionTS
 	delivery := models.HostedAgentDelivery{
 		Provider: slackAgentProvider, ExternalDeliveryID: "interaction:" + externalID,
-		ExternalWorkspaceID: interaction.Team.ID, EventKind: "interaction", Payload: models.JSONB(payload),
+		ExternalWorkspaceID: interaction.Team.ID,
+		ThreadKey:           interaction.Team.ID + ":" + interaction.Channel.ID + ":" + threadID,
+		EventKind:           "interaction", Payload: models.JSONB(payload),
 		Status: models.HostedAgentDeliveryPending, AvailableAt: time.Now().UTC(),
 	}
 	if err := h.db.DB.Clauses(clause.OnConflict{DoNothing: true}).Create(&delivery).Error; err != nil {
@@ -286,20 +336,24 @@ func hostedApprovalInteractionAction(actionID string) (string, bool) {
 	}
 }
 
-func (h *WorkflowHandler) activeSlackAgentTargetExists(workspaceID, channelID string) bool {
+func (h *WorkflowHandler) activeSlackAgentTargetExists(workspaceID, channelID string) (bool, error) {
 	var count int64
-	h.db.DB.Table("agent_deployment_targets AS target").
+	err := h.db.DB.Table("agent_deployment_targets AS target").
 		Joins("JOIN agent_deployments AS deployment ON deployment.id = target.deployment_id AND deployment.deleted_at IS NULL").
 		Joins("JOIN agent_host_installations AS host ON host.id = deployment.host_installation_id AND host.deleted_at IS NULL").
 		Where("target.deleted_at IS NULL AND target.provider = ? AND target.external_workspace_id = ? AND target.external_channel_id = ? AND target.enabled = true",
 			slackAgentProvider, workspaceID, channelID).
 		Where("deployment.status = ? AND host.status = ?", models.AgentDeploymentActive, models.AgentHostActive).
-		Count(&count)
-	return count > 0
+		Count(&count).Error
+	return count > 0, err
 }
 
 func (h *WorkflowHandler) StartHostedAgentWorker() {
-	hostedWorkerOnce.Do(func() { go h.hostedAgentWorkerLoop() })
+	hostedWorkerOnce.Do(func() {
+		for range hostedAgentWorkerCount {
+			go h.hostedAgentWorkerLoop()
+		}
+	})
 }
 
 func (h *WorkflowHandler) hostedAgentWorkerLoop() {
@@ -321,9 +375,21 @@ func (h *WorkflowHandler) processHostedAgentQueue() {
 		if delivery == nil {
 			return
 		}
-		err = h.processHostedAgentDelivery(context.Background(), delivery)
+		ctx, cancel := context.WithTimeout(context.Background(), 12*time.Minute)
+		err = h.safeProcessHostedAgentDelivery(withSlackAgentDeliveryID(ctx, delivery.ID.String()), delivery)
+		cancel()
 		h.finishHostedAgentDelivery(delivery, err)
 	}
+}
+
+func (h *WorkflowHandler) safeProcessHostedAgentDelivery(ctx context.Context, delivery *models.HostedAgentDelivery) (err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = fmt.Errorf("hosted agent delivery panicked: %v", recovered)
+			slog.ErrorContext(ctx, "hosted agent delivery panic recovered", "delivery_id", delivery.ID, "panic", recovered)
+		}
+	}()
+	return h.processHostedAgentDelivery(ctx, delivery)
 }
 
 func (h *WorkflowHandler) claimHostedAgentDelivery() (*models.HostedAgentDelivery, error) {
@@ -334,12 +400,24 @@ func (h *WorkflowHandler) claimHostedAgentDelivery() (*models.HostedAgentDeliver
 	// locks provide the stronger concurrency guarantee while a worker is alive.
 	stale := now.Add(-30 * time.Minute)
 	err := h.db.DB.Transaction(func(tx *gorm.DB) error {
-		err := tx.Clauses(clause.Locking{Strength: "UPDATE", Options: "SKIP LOCKED"}).
+		result := tx.Clauses(clause.Locking{Strength: "UPDATE", Options: "SKIP LOCKED"}).
 			Where("(status = ? AND available_at <= ?) OR (status = ? AND claimed_at < ?)",
 				models.HostedAgentDeliveryPending, now, models.HostedAgentDeliveryProcessing, stale).
-			Order("available_at ASC").First(&delivery).Error
-		if err != nil {
-			return err
+			Where(`thread_key = '' OR NOT EXISTS (
+				SELECT 1 FROM hosted_agent_deliveries AS earlier
+				WHERE earlier.deleted_at IS NULL
+				  AND earlier.thread_key = hosted_agent_deliveries.thread_key
+				  AND earlier.id <> hosted_agent_deliveries.id
+				  AND earlier.status IN (?, ?)
+				  AND (earlier.created_at < hosted_agent_deliveries.created_at
+				       OR (earlier.created_at = hosted_agent_deliveries.created_at AND earlier.id::text < hosted_agent_deliveries.id::text))
+			)`, models.HostedAgentDeliveryPending, models.HostedAgentDeliveryProcessing).
+			Order("available_at ASC").Limit(1).Find(&delivery)
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected == 0 {
+			return gorm.ErrRecordNotFound
 		}
 		return tx.Model(&delivery).Updates(map[string]any{
 			"status": models.HostedAgentDeliveryProcessing, "claimed_at": now,
@@ -359,24 +437,30 @@ func (h *WorkflowHandler) claimHostedAgentDelivery() (*models.HostedAgentDeliver
 func (h *WorkflowHandler) finishHostedAgentDelivery(delivery *models.HostedAgentDelivery, processErr error) {
 	now := time.Now().UTC()
 	if processErr == nil {
-		h.db.DB.Model(delivery).Updates(map[string]any{
+		if err := h.db.DB.Model(delivery).Updates(map[string]any{
 			"status": models.HostedAgentDeliveryCompleted, "completed_at": now, "last_error": "",
-		})
+		}).Error; err != nil {
+			slog.Error("could not mark hosted agent delivery completed", "delivery_id", delivery.ID, "error", err)
+		}
 		return
 	}
 	slog.Warn("hosted agent delivery failed", "delivery_id", delivery.ID, "attempt", delivery.AttemptCount, "error", processErr)
 	if delivery.AttemptCount >= 5 {
-		h.db.DB.Model(delivery).Updates(map[string]any{
+		if err := h.db.DB.Model(delivery).Updates(map[string]any{
 			"status": models.HostedAgentDeliveryFailed, "completed_at": now,
 			"last_error": truncate(processErr.Error(), 2000),
-		})
+		}).Error; err != nil {
+			slog.Error("could not mark hosted agent delivery failed", "delivery_id", delivery.ID, "error", err)
+		}
 		return
 	}
 	backoff := time.Duration(1<<min(delivery.AttemptCount, 6)) * time.Second
-	h.db.DB.Model(delivery).Updates(map[string]any{
+	if err := h.db.DB.Model(delivery).Updates(map[string]any{
 		"status": models.HostedAgentDeliveryPending, "available_at": now.Add(backoff),
 		"last_error": truncate(processErr.Error(), 2000),
-	})
+	}).Error; err != nil {
+		slog.Error("could not reschedule hosted agent delivery", "delivery_id", delivery.ID, "error", err)
+	}
 }
 
 func (h *WorkflowHandler) processHostedAgentDelivery(ctx context.Context, delivery *models.HostedAgentDelivery) error {
@@ -418,20 +502,64 @@ func (h *WorkflowHandler) withHostedAuthorityLock(ctx context.Context, organizat
 	if organizationID == "" || userID == "" {
 		return errors.New("hosted authority lock identity is empty")
 	}
-	return withHostedAdvisoryLock(ctx, h.db.DB, "authority:"+organizationID+":"+userID, run)
+	return h.withHostedAuthorityLocks(ctx, organizationID, []string{userID}, run)
+}
+
+func (h *WorkflowHandler) withHostedAuthorityLocks(ctx context.Context, organizationID string, userIDs []string, run func(*gorm.DB) error) error {
+	if organizationID == "" {
+		return errors.New("hosted authority lock organization is empty")
+	}
+	keys := make([]string, 0, len(userIDs))
+	for _, userID := range userIDs {
+		if userID == "" {
+			return errors.New("hosted authority lock user is empty")
+		}
+		keys = append(keys, "authority:"+organizationID+":"+userID)
+	}
+	return withHostedAdvisoryLocks(ctx, h.db.DB, keys, run)
+}
+
+func withHostedAdvisoryLocks(ctx context.Context, db *gorm.DB, requestedKeys []string, run func(*gorm.DB) error) error {
+	unique := map[string]bool{}
+	keys := make([]string, 0, len(requestedKeys))
+	for _, key := range requestedKeys {
+		if key == "" {
+			return errors.New("hosted advisory lock key is empty")
+		}
+		if !unique[key] {
+			unique[key] = true
+			keys = append(keys, key)
+		}
+	}
+	sort.Strings(keys)
+	return db.WithContext(ctx).Connection(func(connection *gorm.DB) error {
+		acquired := 0
+		// Unlocks must still run after the request context is cancelled. Reusing a
+		// cancelled context here can return the session to the pool with advisory
+		// locks still held, permanently stalling later authority changes.
+		unlockDB := connection.Session(&gorm.Session{NewDB: true}).WithContext(context.WithoutCancel(ctx))
+		defer func() {
+			for index := acquired - 1; index >= 0; index-- {
+				if err := unlockDB.Exec("SELECT pg_advisory_unlock(hashtextextended(?, 0))", keys[index]).Error; err != nil {
+					slog.ErrorContext(context.WithoutCancel(ctx), "could not release hosted authority lock", "key", keys[index], "error", err)
+				}
+			}
+		}()
+		for _, key := range keys {
+			if err := connection.Exec("SELECT pg_advisory_lock(hashtextextended(?, 0))", key).Error; err != nil {
+				return err
+			}
+			acquired++
+		}
+		return run(connection)
+	})
 }
 
 // withHostedAdvisoryLock holds one connection-scoped PostgreSQL lock for the
 // entire callback. Approval execution and member removal use the same authority
 // key, so revocation cannot commit while an external mutation is still running.
 func withHostedAdvisoryLock(ctx context.Context, db *gorm.DB, key string, run func(*gorm.DB) error) error {
-	return db.WithContext(ctx).Connection(func(connection *gorm.DB) error {
-		if err := connection.Exec("SELECT pg_advisory_lock(hashtextextended(?, 0))", key).Error; err != nil {
-			return err
-		}
-		defer connection.Exec("SELECT pg_advisory_unlock(hashtextextended(?, 0))", key)
-		return run(connection)
-	})
+	return withHostedAdvisoryLocks(ctx, db, []string{key}, run)
 }
 
 type resolvedSlackDeployment struct {
@@ -451,9 +579,11 @@ func (h *WorkflowHandler) resolveSlackDeployment(workspaceID, channelID string) 
 		return nil, err
 	}
 	var deployerMembership int64
-	h.db.DB.Model(&models.OrgMember{}).
+	if err := h.db.DB.Model(&models.OrgMember{}).
 		Where("organization_id = ? AND user_id = ?", deployment.OrganizationID, deployment.DeployedByUserID).
-		Count(&deployerMembership)
+		Count(&deployerMembership).Error; err != nil {
+		return nil, err
+	}
 	if deployerMembership == 0 {
 		h.db.DB.Model(&deployment).Update("status", models.AgentDeploymentPaused)
 		return nil, gorm.ErrRecordNotFound
@@ -467,6 +597,45 @@ func (h *WorkflowHandler) resolveSlackDeployment(workspaceID, channelID string) 
 		return nil, errors.New("hosted agent tenant boundary mismatch")
 	}
 	return &resolvedSlackDeployment{Deployment: deployment, Target: target, Host: host}, nil
+}
+
+func verifyHostedAgentAuthorityOn(db *gorm.DB, resolved *resolvedSlackDeployment) error {
+	var deployment models.AgentDeployment
+	if err := db.Where("id = ? AND organization_id = ? AND deployed_by_user_id = ? AND version = ? AND status = ?",
+		resolved.Deployment.ID, resolved.Deployment.OrganizationID, resolved.Deployment.DeployedByUserID,
+		resolved.Deployment.Version, models.AgentDeploymentActive).First(&deployment).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return errHostedAgentAuthorityEnded
+		}
+		return err
+	}
+	var membership int64
+	if err := db.Model(&models.OrgMember{}).
+		Where("organization_id = ? AND user_id = ?", deployment.OrganizationID, deployment.DeployedByUserID).
+		Count(&membership).Error; err != nil {
+		return err
+	}
+	if membership != 1 {
+		return errHostedAgentAuthorityEnded
+	}
+	var hostCount int64
+	if err := db.Model(&models.AgentHostInstallation{}).
+		Where("id = ? AND organization_id = ? AND external_workspace_id = ? AND status = ?",
+			resolved.Host.ID, deployment.OrganizationID, resolved.Host.ExternalWorkspaceID, models.AgentHostActive).
+		Count(&hostCount).Error; err != nil {
+		return err
+	}
+	var targetCount int64
+	if err := db.Model(&models.AgentDeploymentTarget{}).
+		Where("id = ? AND deployment_id = ? AND organization_id = ? AND enabled = true",
+			resolved.Target.ID, deployment.ID, deployment.OrganizationID).
+		Count(&targetCount).Error; err != nil {
+		return err
+	}
+	if hostCount != 1 || targetCount != 1 {
+		return errHostedAgentAuthorityEnded
+	}
+	return nil
 }
 
 func (h *WorkflowHandler) loadOrCreateHostedThread(resolved *resolvedSlackDeployment, payload hostedSlackEventPayload) (*models.HostedAgentThread, *models.ChatSession, error) {
@@ -486,7 +655,9 @@ func (h *WorkflowHandler) loadOrCreateHostedThread(resolved *resolvedSlackDeploy
 			session.UserID != resolved.Deployment.DeployedByUserID {
 			return nil, nil, errors.New("hosted agent session boundary mismatch")
 		}
-		h.db.DB.Model(&thread).Update("latest_external_message_id", payload.MessageID)
+		if err := h.db.DB.Model(&thread).Update("latest_external_message_id", payload.MessageID).Error; err != nil {
+			return nil, nil, err
+		}
 		return &thread, &session, nil
 	}
 	if !errors.Is(err, gorm.ErrRecordNotFound) {
@@ -524,24 +695,46 @@ func (h *WorkflowHandler) processSlackAgentMention(ctx context.Context, delivery
 	if err != nil {
 		return err
 	}
-	if !auth.Allow(ctx, h.redis, "rl:hosted-agent-deployment:"+resolved.Deployment.ID.String(), 60, time.Minute) ||
-		!auth.Allow(ctx, h.redis, "rl:hosted-agent-requester:"+resolved.Deployment.ID.String()+":"+payload.RequesterID, 12, time.Minute) {
+	if delivery.ResponseRecordedAt != nil {
+		if delivery.ResponseDeploymentID != resolved.Deployment.ID.String() {
+			return nil
+		}
 		return slackAgentPostText(ctx, resolved.Host.BotToken, payload.ChannelID, payload.ThreadID,
-			"This agent is receiving too many requests right now. Please try again in a minute.", resolved.Deployment.Name)
-	}
-	thread, session, err := h.loadOrCreateHostedThread(resolved, payload)
-	if errors.Is(err, errHostedThreadStale) {
-		return slackAgentPostText(ctx, resolved.Host.BotToken, payload.ChannelID, payload.ThreadID,
-			"This thread belongs to an older agent deployment. Start a new top-level mention to use the current agent.", resolved.Deployment.Name)
-	}
-	if err != nil {
-		return err
+			delivery.ResponseText, resolved.Deployment.Name)
 	}
 
 	var existingApproval models.HostedAgentApproval
-	if err := h.db.DB.Where("source_delivery_id = ? AND status = ?", delivery.ID.String(), models.HostedAgentApprovalPending).
-		First(&existingApproval).Error; err == nil {
-		return slackAgentPostApproval(ctx, resolved.Host.BotToken, payload.ChannelID, payload.ThreadID, &existingApproval, resolved.Deployment.Name)
+	if err := h.db.DB.Where("source_delivery_id = ?", delivery.ID.String()).First(&existingApproval).Error; err == nil {
+		if existingApproval.DeploymentID != resolved.Deployment.ID.String() ||
+			existingApproval.OrganizationID != resolved.Deployment.OrganizationID {
+			return errors.New("hosted approval delivery boundary mismatch")
+		}
+		if existingApproval.Status == models.HostedAgentApprovalPending {
+			return slackAgentPostApproval(ctx, resolved.Host.BotToken, payload.ChannelID, payload.ThreadID, &existingApproval, resolved.Deployment.Name)
+		}
+		// The mention already produced a durable approval and a later interaction
+		// resolved it. Never ask the model to regenerate the source turn.
+		return nil
+	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return err
+	}
+
+	// Provider retries must recover a durable approval before consuming another
+	// rate-limit slot. Otherwise a transient failure posting the approval could
+	// strand it permanently behind a later rate-limit response.
+	if !auth.Allow(ctx, h.redis, "rl:hosted-agent-deployment:"+resolved.Deployment.ID.String(), 60, time.Minute) ||
+		!auth.Allow(ctx, h.redis, "rl:hosted-agent-requester:"+resolved.Deployment.ID.String()+":"+payload.RequesterID, 12, time.Minute) {
+		return h.slackAgentPostDeliveryText(ctx, delivery, &resolved.Deployment, resolved.Host.BotToken, payload.ChannelID, payload.ThreadID,
+			"This agent is receiving too many requests right now. Please try again in a minute.")
+	}
+
+	thread, session, err := h.loadOrCreateHostedThread(resolved, payload)
+	if errors.Is(err, errHostedThreadStale) {
+		return h.slackAgentPostDeliveryText(ctx, delivery, &resolved.Deployment, resolved.Host.BotToken, payload.ChannelID, payload.ThreadID,
+			"This thread belongs to an older agent deployment. Start a new top-level mention to use the current agent.")
+	}
+	if err != nil {
+		return err
 	}
 
 	plan, err := h.bill.CheckBalance(resolved.Deployment.OrganizationID, resolved.Deployment.DeployedByUserID)
@@ -550,7 +743,7 @@ func (h *WorkflowHandler) processSlackAgentMention(ctx context.Context, delivery
 		if !errors.Is(err, billing.ErrOverCap) {
 			message = "The agent could not check its Fernary credits. Please try again shortly."
 		}
-		if postErr := slackAgentPostText(ctx, resolved.Host.BotToken, payload.ChannelID, payload.ThreadID, message, resolved.Deployment.Name); postErr != nil {
+		if postErr := h.slackAgentPostDeliveryText(ctx, delivery, &resolved.Deployment, resolved.Host.BotToken, payload.ChannelID, payload.ThreadID, message); postErr != nil {
 			return postErr
 		}
 		return nil
@@ -586,35 +779,46 @@ func (h *WorkflowHandler) processSlackAgentMention(ctx context.Context, delivery
 	goal, _ := analysis["goal"].(string)
 	runtimeModel, err := prepareAgentRuntimeModel(resolved.Deployment.ModelID)
 	if err != nil {
-		_ = slackAgentPostText(ctx, resolved.Host.BotToken, payload.ChannelID, payload.ThreadID,
-			"This agent's model is not configured on Fernary. Ask the deployment owner to update it.", resolved.Deployment.Name)
-		return nil
+		return h.slackAgentPostDeliveryText(ctx, delivery, &resolved.Deployment, resolved.Host.BotToken, payload.ChannelID, payload.ThreadID,
+			"This agent's model is not configured on Fernary. Ask the deployment owner to update it.")
 	}
 
 	var approvals []*AgentApprovalActivity
 	var streamedText strings.Builder
-	var streamedErrors []string
 	sink := func(event AgentTurnEvent) {
 		switch event.Type {
 		case AgentTurnText:
 			streamedText.WriteString(event.Text)
-		case AgentTurnError:
-			streamedErrors = append(streamedErrors, event.Text)
 		case AgentTurnApproval:
 			if event.Approval != nil {
 				approvals = append(approvals, event.Approval)
 			}
 		}
 	}
-	requestApproval := func(ctx context.Context, call AgentAuthorizedCall) (*AgentApprovalActivity, error) {
-		return h.createHostedAgentApproval(ctx, delivery, resolved, thread, session, payload.RequesterID, call)
+	requestApproval := func(ctx context.Context, call AgentAuthorizedCall, state map[string]string) (*AgentApprovalActivity, error) {
+		return h.createHostedAgentApproval(ctx, delivery, resolved, thread, session, payload.RequesterID, call, state)
 	}
-	result, turnErr := h.RunAgentTurn(ctx, AgentTurnInput{
-		Session: session, Workflow: ast, Policy: &policy,
-		OwnerUserID: resolved.Deployment.DeployedByUserID, OrganizationID: resolved.Deployment.OrganizationID,
-		Message: message, StoredMessage: requestText, HistoryLimit: 20, HistoryTextCap: 6000,
-		Goal: goal, Model: runtimeModel, RequestApproval: requestApproval,
-	}, sink)
+	var result AgentTurnResult
+	var turnErr error
+	lockErr := h.withHostedAuthorityLock(ctx, resolved.Deployment.OrganizationID, resolved.Deployment.DeployedByUserID, func(connection *gorm.DB) error {
+		if err := verifyHostedAgentAuthorityOn(connection, resolved); err != nil {
+			return err
+		}
+		result, turnErr = h.RunAgentTurn(ctx, AgentTurnInput{
+			Session: session, Workflow: ast, Policy: &policy,
+			OwnerUserID: resolved.Deployment.DeployedByUserID, OrganizationID: resolved.Deployment.OrganizationID,
+			Message: message, StoredMessage: requestText, HistoryLimit: 20, HistoryTextCap: 6000,
+			Goal: goal, Model: runtimeModel, RequestApproval: requestApproval,
+		}, sink)
+		return nil
+	})
+	if errors.Is(lockErr, errHostedAgentAuthorityEnded) {
+		return h.slackAgentPostDeliveryText(ctx, delivery, &resolved.Deployment, resolved.Host.BotToken, payload.ChannelID, payload.ThreadID,
+			"This deployment can no longer act because its owner or destination is no longer active.")
+	}
+	if lockErr != nil {
+		return lockErr
+	}
 	if len(approvals) > 0 {
 		for _, activity := range approvals {
 			var approval models.HostedAgentApproval
@@ -628,11 +832,8 @@ func (h *WorkflowHandler) processSlackAgentMention(ctx context.Context, delivery
 		return nil
 	}
 	if turnErr != nil && !errors.Is(turnErr, ErrAgentApprovalPending) {
-		message := "The agent could not finish that request."
-		if len(streamedErrors) > 0 {
-			message += " " + truncate(streamedErrors[len(streamedErrors)-1], 1000)
-		}
-		return slackAgentPostText(ctx, resolved.Host.BotToken, payload.ChannelID, payload.ThreadID, message, resolved.Deployment.Name)
+		return h.slackAgentPostDeliveryText(ctx, delivery, &resolved.Deployment, resolved.Host.BotToken, payload.ChannelID, payload.ThreadID,
+			"The agent could not finish that request. Please try again or ask the deployment owner to check Fernary.")
 	}
 	answer := strings.TrimSpace(result.Text)
 	if answer == "" {
@@ -641,7 +842,53 @@ func (h *WorkflowHandler) processSlackAgentMention(ctx context.Context, delivery
 	if answer == "" {
 		answer = "I couldn't produce an answer for that request."
 	}
-	return slackAgentPostText(ctx, resolved.Host.BotToken, payload.ChannelID, payload.ThreadID, answer, resolved.Deployment.Name)
+	return h.slackAgentPostDeliveryText(ctx, delivery, &resolved.Deployment, resolved.Host.BotToken, payload.ChannelID, payload.ThreadID,
+		slackAgentSanitizeGeneratedText(answer))
+}
+
+// slackAgentPostDeliveryText stores the exact reply before contacting Slack.
+// A provider timeout or a failure marking the queue row complete can then
+// replay this text without rerunning the model, read tools, or billing.
+func (h *WorkflowHandler) slackAgentPostDeliveryText(ctx context.Context, delivery *models.HostedAgentDelivery, deployment *models.AgentDeployment, token, channelID, threadID, message string) error {
+	if deployment == nil {
+		return errors.New("hosted agent reply deployment is required")
+	}
+	if delivery.ResponseRecordedAt == nil {
+		recordedAt := time.Now().UTC()
+		stored := truncate(message, 35000)
+		result := h.db.DB.Model(&models.HostedAgentDelivery{}).
+			Where("id = ? AND response_recorded_at IS NULL", delivery.ID).
+			Updates(map[string]any{
+				"response_deployment_id": deployment.ID.String(),
+				"response_text":          stored, "response_recorded_at": recordedAt,
+			})
+		if result.Error != nil {
+			return fmt.Errorf("record hosted agent reply: %w", result.Error)
+		}
+		if result.RowsAffected == 0 {
+			var durable models.HostedAgentDelivery
+			if err := h.db.DB.Select("response_deployment_id", "response_text", "response_recorded_at").First(&durable, "id = ?", delivery.ID).Error; err != nil {
+				return fmt.Errorf("recover hosted agent reply: %w", err)
+			}
+			delivery.ResponseDeploymentID = durable.ResponseDeploymentID
+			delivery.ResponseText = durable.ResponseText
+			delivery.ResponseRecordedAt = durable.ResponseRecordedAt
+		} else {
+			delivery.ResponseDeploymentID = deployment.ID.String()
+			delivery.ResponseText = stored
+			delivery.ResponseRecordedAt = &recordedAt
+		}
+	}
+	if delivery.ResponseDeploymentID != deployment.ID.String() {
+		return errors.New("hosted agent reply deployment changed before delivery")
+	}
+	return slackAgentPostText(ctx, token, channelID, threadID, delivery.ResponseText, deployment.Name)
+}
+
+func slackAgentSanitizeGeneratedText(message string) string {
+	message = slackSpecialMentionPattern.ReplaceAllString(message, "@$1")
+	message = slackSubteamMentionPattern.ReplaceAllString(message, "@user-group")
+	return slackUserMentionPattern.ReplaceAllString(message, "@user-$1")
 }
 
 func slackAgentStripSelfMention(message, botUserID string) string {
@@ -660,16 +907,25 @@ func slackAgentStripSelfMention(message, botUserID string) string {
 	return strings.TrimSpace(message[:location[0]] + message[location[1]:])
 }
 
-func (h *WorkflowHandler) createHostedAgentApproval(ctx context.Context, delivery *models.HostedAgentDelivery, resolved *resolvedSlackDeployment, thread *models.HostedAgentThread, session *models.ChatSession, requesterID string, call AgentAuthorizedCall) (*AgentApprovalActivity, error) {
-	effective, err := executor.ResolveSingleNodeData(call.Node, call.Overrides)
+func (h *WorkflowHandler) createHostedAgentApproval(ctx context.Context, delivery *models.HostedAgentDelivery, resolved *resolvedSlackDeployment, thread *models.HostedAgentThread, session *models.ChatSession, requesterID string, call AgentAuthorizedCall, state map[string]string) (*AgentApprovalActivity, error) {
+	effective, err := executor.ResolveSingleNodeDataForExecution(call.Node, call.Overrides, state)
 	if err != nil {
 		return nil, err
 	}
 	effectiveJSON, _ := json.Marshal(effective)
 	hash := sha256.Sum256(effectiveJSON)
-	var details map[string]any
-	if json.Unmarshal([]byte(agentSafeSavedConfig(effective)), &details) != nil {
+	details, err := agentApprovalDisplayDetails(effective)
+	if err != nil {
 		return nil, errors.New("could not render approval details")
+	}
+	credentialProvider, credentialConnectionID, credentialDescription, err := h.resolveHostedApprovalCredential(
+		resolved.Deployment.OrganizationID, resolved.Deployment.DeployedByUserID, effective,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if credentialDescription != nil {
+		details["credential"] = credentialDescription
 	}
 	detailJSON, _ := json.Marshal(details)
 	if len(detailJSON) > 20<<10 {
@@ -678,17 +934,21 @@ func (h *WorkflowHandler) createHostedAgentApproval(ctx context.Context, deliver
 	overrideJSON, _ := json.Marshal(call.Overrides)
 	configHash := hex.EncodeToString(hash[:])
 	approvalID := uuid.New()
+	now := time.Now().UTC()
+	reason := truncate(strings.TrimSpace(call.Reason), 2000)
 	approval := models.HostedAgentApproval{
 		BaseModel:      models.BaseModel{ID: approvalID},
 		OrganizationID: resolved.Deployment.OrganizationID, DeploymentID: resolved.Deployment.ID.String(),
 		DeploymentVersion: resolved.Deployment.Version, ThreadID: thread.ID.String(), ChatSessionID: session.ID.String(),
 		RequesterExternalID: requesterID, SourceDeliveryID: delivery.ID.String(),
-		NodeID: call.Node.ID, Operation: call.Operation.ID, Reason: call.Reason,
+		NodeID: call.Node.ID, Operation: call.Operation.ID, Reason: reason,
 		EffectiveOverrides: models.JSONB(overrideJSON), EffectiveConfigHash: configHash,
+		ExecutionConfig: models.JSONB(effectiveJSON), ConfigRecordedAt: &now,
 		ExecutionFingerprint: hostedApprovalExecutionFingerprint(effective),
-		DisplayDetails:       models.JSONB(detailJSON), Status: models.HostedAgentApprovalPending,
+		CredentialProvider:   credentialProvider, CredentialConnectionID: credentialConnectionID,
+		DisplayDetails: models.JSONB(detailJSON), Status: models.HostedAgentApprovalPending,
 		ExecutionKey: hostedApprovalExecutionKey(approvalID.String()),
-		ExpiresAt:    time.Now().UTC().Add(15 * time.Minute),
+		ExpiresAt:    now.Add(15 * time.Minute),
 	}
 	// The approval row is the durable pre-execution attempt record. Locking the
 	// deployment serializes approval creation with claims and revocation, while
@@ -725,15 +985,58 @@ func (h *WorkflowHandler) createHostedAgentApproval(ctx context.Context, deliver
 	}
 	return &AgentApprovalActivity{
 		ApprovalID: approval.ID.String(), Node: call.Node.Data.Label, NodeID: call.Node.ID,
-		Operation: call.Operation.Label, Effect: call.Operation.Effect, Reason: call.Reason, Details: details,
+		Operation: call.Operation.Label, Effect: call.Operation.Effect, Reason: reason, Details: details,
 	}, nil
+}
+
+func (h *WorkflowHandler) resolveHostedApprovalCredential(organizationID, userID string, effective executor.FlowNodeData) (string, string, map[string]any, error) {
+	if effective.IntegrationOp == "" || effective.IntegrationToken != "" {
+		return "", "", nil, nil
+	}
+	provider := string(effective.NodeType)
+	var connection models.IntegrationConnection
+	if err := h.db.DB.Select("id", "provider", "workspace_id", "workspace_name").
+		Where("organization_id = ? AND user_id = ? AND provider = ?", organizationID, userID, provider).
+		First(&connection).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return "", "", nil, fmt.Errorf("%s is not connected for the deployment owner", humanizeAgentOperation(provider))
+		}
+		return "", "", nil, err
+	}
+	description := map[string]any{"provider": provider}
+	if connection.WorkspaceName != "" {
+		description["workspace"] = connection.WorkspaceName
+	} else if connection.WorkspaceID != "" {
+		description["workspace"] = connection.WorkspaceID
+	}
+	return provider, connection.ID.String(), description, nil
+}
+
+func verifyHostedApprovalCredentialOn(db *gorm.DB, approval *models.HostedAgentApproval, deployment *models.AgentDeployment) error {
+	if approval.CredentialProvider == "" && approval.CredentialConnectionID == "" {
+		return nil
+	}
+	if approval.CredentialProvider == "" || approval.CredentialConnectionID == "" {
+		return errHostedCredentialChanged
+	}
+	var count int64
+	if err := db.Model(&models.IntegrationConnection{}).
+		Where("id = ? AND organization_id = ? AND user_id = ? AND provider = ?",
+			approval.CredentialConnectionID, deployment.OrganizationID, deployment.DeployedByUserID, approval.CredentialProvider).
+		Count(&count).Error; err != nil {
+		return err
+	}
+	if count != 1 {
+		return errHostedCredentialChanged
+	}
+	return nil
 }
 
 func findEquivalentUnresolvedHostedApproval(db *gorm.DB, candidate *models.HostedAgentApproval) (*models.HostedAgentApproval, error) {
 	var unresolved models.HostedAgentApproval
 	query := db.Where(
-		"id <> ? AND deployment_id = ? AND operation = ? AND status IN ?",
-		candidate.ID, candidate.DeploymentID, candidate.Operation,
+		"id <> ? AND organization_id = ? AND operation = ? AND status IN ?",
+		candidate.ID, candidate.OrganizationID, candidate.Operation,
 		[]models.HostedAgentApprovalStatus{
 			models.HostedAgentApprovalExecuting, models.HostedAgentApprovalOutcomeUnknown,
 		},
@@ -777,7 +1080,7 @@ func slackAgentThreadContext(ctx context.Context, token, channelID, threadID, cu
 			TS    string `json:"ts"`
 		} `json:"messages"`
 	}
-	if err := slackAgentAPICall(ctx, token, "conversations.replies", map[string]any{
+	if err := slackAgentAPIGet(ctx, token, "conversations.replies", map[string]any{
 		"channel": channelID, "ts": threadID, "limit": 100,
 	}, &response); err != nil {
 		return "", err
@@ -786,9 +1089,13 @@ func slackAgentThreadContext(ctx context.Context, token, channelID, threadID, cu
 	if len(messages) > hostedAgentThreadMsgCap {
 		messages = messages[len(messages)-hostedAgentThreadMsgCap:]
 	}
-	lines := make([]string, 0, len(messages))
+	// Fill the bounded context newest-first, then reverse it for the model. A
+	// long thread must lose its oldest messages, not the replies immediately
+	// preceding the current request.
+	reversed := make([]string, 0, len(messages))
 	total := 0
-	for _, message := range messages {
+	for index := len(messages) - 1; index >= 0; index-- {
+		message := messages[index]
 		if message.TS == currentMessageID || strings.TrimSpace(message.Text) == "" {
 			continue
 		}
@@ -800,20 +1107,63 @@ func slackAgentThreadContext(ctx context.Context, token, channelID, threadID, cu
 		if total+len(line) > hostedAgentThreadTextCap {
 			break
 		}
-		lines = append(lines, line)
+		reversed = append(reversed, line)
 		total += len(line)
+	}
+	lines := make([]string, len(reversed))
+	for index := range reversed {
+		lines[len(reversed)-1-index] = reversed[index]
 	}
 	return strings.Join(lines, "\n"), nil
 }
 
 func slackAgentAPICall(ctx context.Context, token, method string, payload map[string]any, out any) error {
-	body, _ := json.Marshal(payload)
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://slack.com/api/"+method, strings.NewReader(string(body)))
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("encode Slack API %s payload: %w", method, err)
+	}
+	return slackAgentAPIRequest(ctx, token, http.MethodPost, "https://slack.com/api/"+method, strings.NewReader(string(body)), method, out)
+}
+
+// Slack documents its read-only Web API methods as GET endpoints. Sending
+// their arguments as JSON can yield ok:false invalid_arguments even though the
+// HTTP response is 200, because some workspaces ignore the POST body for those
+// methods. Query encoding also keeps required arguments intact for channel
+// validation and thread reads.
+func slackAgentAPIGet(ctx context.Context, token, method string, payload map[string]any, out any) error {
+	query := url.Values{}
+	for key, value := range payload {
+		var encoded string
+		switch typed := value.(type) {
+		case string:
+			encoded = typed
+		case bool:
+			encoded = strconv.FormatBool(typed)
+		case int:
+			encoded = strconv.Itoa(typed)
+		case int64:
+			encoded = strconv.FormatInt(typed, 10)
+		default:
+			return fmt.Errorf("Slack API %s query parameter %q has unsupported type %T", method, key, value)
+		}
+		query.Set(key, encoded)
+	}
+	endpoint := "https://slack.com/api/" + method
+	if encoded := query.Encode(); encoded != "" {
+		endpoint += "?" + encoded
+	}
+	return slackAgentAPIRequest(ctx, token, http.MethodGet, endpoint, nil, method, out)
+}
+
+func slackAgentAPIRequest(ctx context.Context, token, requestMethod, endpoint string, body io.Reader, slackMethod string, out any) error {
+	request, err := http.NewRequestWithContext(ctx, requestMethod, endpoint, body)
 	if err != nil {
 		return err
 	}
 	request.Header.Set("Authorization", "Bearer "+token)
-	request.Header.Set("Content-Type", "application/json; charset=utf-8")
+	if body != nil {
+		request.Header.Set("Content-Type", "application/json; charset=utf-8")
+	}
 	response, err := slackAgentHTTPClient.Do(request)
 	if err != nil {
 		return err
@@ -821,14 +1171,41 @@ func slackAgentAPICall(ctx context.Context, token, method string, payload map[st
 	defer response.Body.Close()
 	raw, _ := io.ReadAll(io.LimitReader(response.Body, 2<<20))
 	if response.StatusCode != http.StatusOK {
-		return fmt.Errorf("Slack API %s returned %d", method, response.StatusCode)
+		return fmt.Errorf("Slack API %s returned %d", slackMethod, response.StatusCode)
 	}
 	var status struct {
-		OK    bool   `json:"ok"`
-		Error string `json:"error"`
+		OK               bool   `json:"ok"`
+		Error            string `json:"error"`
+		Needed           string `json:"needed"`
+		Provided         string `json:"provided"`
+		ResponseMetadata struct {
+			Messages []string `json:"messages"`
+		} `json:"response_metadata"`
 	}
-	if json.Unmarshal(raw, &status) != nil || !status.OK {
-		return fmt.Errorf("Slack API %s failed: %s", method, status.Error)
+	if err := json.Unmarshal(raw, &status); err != nil {
+		return fmt.Errorf("Slack API %s returned invalid JSON", slackMethod)
+	}
+	if !status.OK {
+		details := make([]string, 0, len(status.ResponseMetadata.Messages)+2)
+		for _, message := range status.ResponseMetadata.Messages {
+			if message = strings.TrimSpace(message); message != "" {
+				details = append(details, truncate(message, 300))
+			}
+		}
+		if status.Needed != "" {
+			details = append(details, "needed scopes: "+truncate(status.Needed, 200))
+		}
+		if status.Provided != "" {
+			details = append(details, "provided scopes: "+truncate(status.Provided, 200))
+		}
+		reason := status.Error
+		if reason == "" {
+			reason = "unknown_error"
+		}
+		if len(details) > 0 {
+			reason += " (" + strings.Join(details, "; ") + ")"
+		}
+		return fmt.Errorf("Slack API %s failed: %s", slackMethod, reason)
 	}
 	if out != nil {
 		return json.Unmarshal(raw, out)
@@ -842,6 +1219,9 @@ func slackAgentPostText(ctx context.Context, token, channelID, threadID, message
 	}
 	if len(agentName) > 0 && strings.TrimSpace(agentName[0]) != "" {
 		payload["username"] = truncate(strings.TrimSpace(agentName[0]), 80)
+	}
+	if deliveryID := slackAgentDeliveryID(ctx); deliveryID != "" {
+		payload["client_msg_id"] = deliveryID
 	}
 	return slackAgentAPICall(ctx, token, "chat.postMessage", payload, nil)
 }
@@ -857,14 +1237,15 @@ func slackAgentPostApproval(ctx context.Context, token, channelID, threadID stri
 			"type": "section",
 			"text": map[string]any{"type": "mrkdwn", "text": fmt.Sprintf(
 				"*Approval required*\n*Operation:* %s\n*Why:* %s\n*Requested by:* <@%s>",
-				slackAgentEscape(humanizeAgentOperation(approval.Operation)), slackAgentEscape(approval.Reason), approval.RequesterExternalID)},
+				slackAgentEscape(humanizeAgentOperation(approval.Operation)), truncate(slackAgentEscape(approval.Reason), 1000), approval.RequesterExternalID)},
 		},
 	}
-	for start := 0; start < len(detailJSON); start += 2500 {
-		end := min(start+2500, len(detailJSON))
+	detailRunes := []rune(string(detailJSON))
+	for start := 0; start < len(detailRunes); start += 2400 {
+		end := min(start+2400, len(detailRunes))
 		blocks = append(blocks, map[string]any{
 			"type": "section", "text": map[string]any{
-				"type": "mrkdwn", "text": "```" + slackAgentEscape(string(detailJSON[start:end])) + "```",
+				"type": "mrkdwn", "text": "```" + slackAgentEscape(string(detailRunes[start:end])) + "```",
 			},
 		})
 	}
@@ -877,11 +1258,15 @@ func slackAgentPostApproval(ctx context.Context, token, channelID, threadID stri
 	})
 	payload := map[string]any{
 		"channel": channelID, "thread_ts": threadID,
-		"text":   fmt.Sprintf("Approval required for %s: %s", approval.Operation, approval.Reason),
+		"text": slackAgentSanitizeGeneratedText(fmt.Sprintf(
+			"Approval required for %s: %s", humanizeAgentOperation(approval.Operation), truncate(approval.Reason, 1000))),
 		"blocks": blocks,
 	}
 	if len(agentName) > 0 && strings.TrimSpace(agentName[0]) != "" {
 		payload["username"] = truncate(strings.TrimSpace(agentName[0]), 80)
+	}
+	if deliveryID := slackAgentDeliveryID(ctx); deliveryID != "" {
+		payload["client_msg_id"] = deliveryID
 	}
 	return slackAgentAPICall(ctx, token, "chat.postMessage", payload, nil)
 }
@@ -926,6 +1311,9 @@ func slackAgentPostUnknownOutcome(ctx context.Context, token, channelID, threadI
 	if len(agentName) > 0 && strings.TrimSpace(agentName[0]) != "" {
 		payload["username"] = truncate(strings.TrimSpace(agentName[0]), 80)
 	}
+	if deliveryID := slackAgentDeliveryID(ctx); deliveryID != "" {
+		payload["client_msg_id"] = deliveryID
+	}
 	return slackAgentAPICall(ctx, token, "chat.postMessage", payload, nil)
 }
 
@@ -938,7 +1326,10 @@ func slackAgentEscape(value string) string {
 func (h *WorkflowHandler) processSlackAgentApproval(ctx context.Context, payload hostedSlackInteractionPayload) error {
 	var approval models.HostedAgentApproval
 	if err := h.db.DB.First(&approval, "id = ?", payload.ApprovalID).Error; err != nil {
-		return nil
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil
+		}
+		return err
 	}
 	var deployment models.AgentDeployment
 	if err := h.db.DB.First(&deployment, "id = ?", approval.DeploymentID).Error; err != nil {
@@ -952,7 +1343,8 @@ func (h *WorkflowHandler) processSlackAgentApproval(ctx context.Context, payload
 	if err := h.db.DB.First(&thread, "id = ?", approval.ThreadID).Error; err != nil {
 		return err
 	}
-	if host.ExternalWorkspaceID != payload.WorkspaceID || thread.ExternalChannelID != payload.ChannelID ||
+	if approval.OrganizationID != deployment.OrganizationID || approval.DeploymentID != deployment.ID.String() ||
+		thread.DeploymentID != deployment.ID.String() || host.ExternalWorkspaceID != payload.WorkspaceID || thread.ExternalChannelID != payload.ChannelID ||
 		(payload.ThreadID != "" && thread.ExternalThreadID != payload.ThreadID) ||
 		host.OrganizationID != deployment.OrganizationID || thread.OrganizationID != deployment.OrganizationID {
 		return errors.New("approval interaction does not match its Slack thread")
@@ -987,7 +1379,11 @@ func (h *WorkflowHandler) processSlackAgentApproval(ctx context.Context, payload
 	}
 	if time.Now().After(approval.ExpiresAt) {
 		now := time.Now().UTC()
-		h.db.DB.Model(&approval).Updates(map[string]any{"status": models.HostedAgentApprovalExpired, "resolved_at": now})
+		result := h.db.DB.Model(&approval).Where("status = ?", models.HostedAgentApprovalPending).
+			Updates(map[string]any{"status": models.HostedAgentApprovalExpired, "resolved_at": now})
+		if result.Error != nil {
+			return result.Error
+		}
 		return slackAgentPostText(ctx, host.BotToken, thread.ExternalChannelID, thread.ExternalThreadID,
 			"That approval expired. Mention the agent again to request a fresh action.", deployment.Name)
 	}
@@ -997,6 +1393,9 @@ func (h *WorkflowHandler) processSlackAgentApproval(ctx context.Context, payload
 			Updates(map[string]any{"status": models.HostedAgentApprovalRejected, "resolved_at": now})
 		if result.Error != nil {
 			return result.Error
+		}
+		if result.RowsAffected != 1 {
+			return errors.New("approval was resolved concurrently")
 		}
 		return slackAgentPostText(ctx, host.BotToken, thread.ExternalChannelID, thread.ExternalThreadID,
 			"<@"+payload.RequesterID+"> rejected the action. Nothing was changed.", deployment.Name)
@@ -1118,18 +1517,26 @@ func reconcileHostedAgentApprovalOn(db *gorm.DB, approval *models.HostedAgentApp
 func (h *WorkflowHandler) executeSlackAgentApproval(ctx context.Context, approval *models.HostedAgentApproval, deployment *models.AgentDeployment, host *models.AgentHostInstallation, thread *models.HostedAgentThread) error {
 	if approval.DeploymentVersion != deployment.Version || deployment.Status != models.AgentDeploymentActive {
 		err := errors.New("deployment changed or is no longer active")
-		h.failHostedApproval(approval, err)
+		if persistErr := h.failHostedApproval(approval, err); persistErr != nil {
+			return errors.Join(err, persistErr)
+		}
 		return slackAgentPostText(ctx, host.BotToken, thread.ExternalChannelID, thread.ExternalThreadID, err.Error(), deployment.Name)
 	}
 	ast, node, err := hostedApprovalSnapshot(deployment, approval)
 	if err != nil {
-		h.failHostedApproval(approval, err)
+		if persistErr := h.failHostedApproval(approval, err); persistErr != nil {
+			return errors.Join(err, persistErr)
+		}
 		return err
 	}
 	var policy AgentCapabilityPolicy
 	var overrides map[string]any
 	if json.Unmarshal(deployment.CapabilityPolicy, &policy) != nil || json.Unmarshal(approval.EffectiveOverrides, &overrides) != nil {
-		return errors.New("approved call is unreadable")
+		err = errors.New("approved call is unreadable")
+		if persistErr := h.failHostedApproval(approval, err); persistErr != nil {
+			return errors.Join(err, persistErr)
+		}
+		return err
 	}
 	authorizationInput := map[string]any{"reason": approval.Reason}
 	for field, value := range overrides {
@@ -1140,24 +1547,46 @@ func (h *WorkflowHandler) executeSlackAgentApproval(ctx context.Context, approva
 		if err == nil {
 			err = errors.New("approved operation no longer matches its policy")
 		}
-		h.failHostedApproval(approval, err)
+		if persistErr := h.failHostedApproval(approval, err); persistErr != nil {
+			return errors.Join(err, persistErr)
+		}
 		return err
 	}
-	effective, err := executor.ResolveSingleNodeData(*node, authorized.Overrides)
-	if err != nil {
-		h.failHostedApproval(approval, err)
+	if approval.ConfigRecordedAt == nil {
+		err = errors.New("approval predates pinned execution details; request the action again")
+		if persistErr := h.failHostedApproval(approval, err); persistErr != nil {
+			return errors.Join(err, persistErr)
+		}
 		return err
+	}
+	var effective executor.FlowNodeData
+	if err := json.Unmarshal(approval.ExecutionConfig, &effective); err != nil {
+		if persistErr := h.failHostedApproval(approval, err); persistErr != nil {
+			return errors.Join(err, persistErr)
+		}
+		return errors.New("approved execution details are unreadable")
 	}
 	effectiveJSON, _ := json.Marshal(effective)
 	hash := sha256.Sum256(effectiveJSON)
 	if hex.EncodeToString(hash[:]) != approval.EffectiveConfigHash {
 		err = errors.New("approved call hash does not match the pinned operation")
-		h.failHostedApproval(approval, err)
+		if persistErr := h.failHostedApproval(approval, err); persistErr != nil {
+			return errors.Join(err, persistErr)
+		}
 		return err
 	}
 
 	var session models.ChatSession
 	if err := h.db.DB.First(&session, "id = ?", approval.ChatSessionID).Error; err != nil {
+		return err
+	}
+	if approval.ChatSessionID != thread.ChatSessionID ||
+		session.OrganizationID != approval.OrganizationID || session.OrganizationID != deployment.OrganizationID ||
+		session.UserID != deployment.DeployedByUserID || session.WorkflowID != deployment.WorkflowID {
+		err = errors.New("hosted approval session boundary mismatch")
+		if persistErr := h.failHostedApproval(approval, err); persistErr != nil {
+			return errors.Join(err, persistErr)
+		}
 		return err
 	}
 	plan, billErr := h.bill.CheckBalance(deployment.OrganizationID, deployment.DeployedByUserID)
@@ -1176,23 +1605,39 @@ func (h *WorkflowHandler) executeSlackAgentApproval(ctx context.Context, approva
 		out     string
 		toolErr error
 	)
-	lockErr := h.withHostedAuthorityLock(ctx, deployment.OrganizationID, deployment.DeployedByUserID, func(connection *gorm.DB) error {
+	fingerprint := approval.ExecutionFingerprint
+	if fingerprint == "" {
+		fingerprint = approval.NodeID + ":" + approval.EffectiveConfigHash
+	}
+	lockErr := withHostedAdvisoryLocks(ctx, h.db.DB, []string{
+		"approval-execution:" + approval.OrganizationID + ":" + approval.Operation + ":" + fingerprint,
+		"authority:" + deployment.OrganizationID + ":" + deployment.DeployedByUserID,
+	}, func(connection *gorm.DB) error {
+		if err := verifyHostedApprovalCredentialOn(connection, approval, deployment); err != nil {
+			return err
+		}
 		var claimErr error
 		claimed, claimErr = h.claimHostedAgentApprovalOn(connection, approval, deployment)
 		if claimErr != nil || !claimed {
 			return claimErr
 		}
-		state := map[string]string{}
-		_ = json.Unmarshal(session.State, &state)
 		keys := executor.APIKeys{
 			Anthropic: os.Getenv("ANTHROPIC_API_KEY"), OpenAI: os.Getenv("OPENAI_API_KEY"),
 			Brave: os.Getenv("BRAVE_API_KEY"), Jina: os.Getenv("JINA_API_KEY"),
 		}
-		out, toolErr = executor.ExecuteSingleNode(ctx, *node, authorized.Overrides, state, ast.Edges, keys,
+		executionNode := *node
+		executionNode.Data = effective
+		out, toolErr = executor.ExecuteSingleNode(ctx, executionNode, nil, map[string]string{}, ast.Edges, keys,
 			approval.ExecutionKey, deployment.DeployedByUserID, deployment.OrganizationID, nil)
 		if toolErr != nil {
-			h.failHostedApprovalOn(connection, approval, toolErr)
-			return nil
+			// Once execution has been dispatched, an error is not proof that the
+			// external mutation did not happen (for example, the provider may have
+			// committed it before our response timed out). Keep equivalent calls
+			// blocked until the original requester reconciles the outcome.
+			slog.ErrorContext(ctx, "hosted approval execution returned an indeterminate error",
+				"approval_id", approval.ID, "execution_key", approval.ExecutionKey, "error", toolErr)
+			return h.markHostedApprovalOutcomeUnknownOn(connection, approval,
+				"the external action returned an error after execution started; it may have completed and must not be retried automatically")
 		}
 		if cacheErr := h.rememberHostedApprovalOutcome(ctx, approval.ID.String(), out); cacheErr != nil {
 			// The in-process copy still covers a transient PostgreSQL error. Log
@@ -1208,9 +1653,18 @@ func (h *WorkflowHandler) executeSlackAgentApproval(ctx context.Context, approva
 			"This action is blocked because an equivalent action may already have completed. Its original requester must reconcile that outcome before this approval can run.", deployment.Name)
 	}
 	if errors.Is(lockErr, errHostedAgentAuthorityEnded) {
-		h.failHostedApproval(approval, lockErr)
+		if persistErr := h.failHostedApproval(approval, lockErr); persistErr != nil {
+			return errors.Join(lockErr, persistErr)
+		}
 		return slackAgentPostText(ctx, host.BotToken, thread.ExternalChannelID, thread.ExternalThreadID,
 			"This deployment can no longer act because its owner is not a current organization member.", deployment.Name)
+	}
+	if errors.Is(lockErr, errHostedCredentialChanged) {
+		if persistErr := h.failHostedApproval(approval, lockErr); persistErr != nil {
+			return errors.Join(lockErr, persistErr)
+		}
+		return slackAgentPostText(ctx, host.BotToken, thread.ExternalChannelID, thread.ExternalThreadID,
+			"The deployment owner's connected account changed after this approval was requested. Nothing was run; mention the agent again to review a fresh action.", deployment.Name)
 	}
 	if lockErr != nil {
 		return lockErr
@@ -1219,8 +1673,8 @@ func (h *WorkflowHandler) executeSlackAgentApproval(ctx context.Context, approva
 		return nil
 	}
 	if toolErr != nil {
-		return slackAgentPostText(ctx, host.BotToken, thread.ExternalChannelID, thread.ExternalThreadID,
-			"The approved action failed: "+truncate(toolErr.Error(), 1500), deployment.Name)
+		return slackAgentPostUnknownOutcome(ctx, host.BotToken, thread.ExternalChannelID, thread.ExternalThreadID,
+			approval, deployment.Name)
 	}
 	h.forgetHostedApprovalOutcome(ctx, approval.ID.String())
 	if err := h.syncHostedAgentApprovalSession(approval, deployment, node.Data.Label); err != nil {
@@ -1517,7 +1971,15 @@ func (h *WorkflowHandler) recoverExecutingSlackAgentApproval(ctx context.Context
 
 func (h *WorkflowHandler) markSlackAgentApprovalOutcomeUnknown(ctx context.Context, approval *models.HostedAgentApproval, deployment *models.AgentDeployment, host *models.AgentHostInstallation, thread *models.HostedAgentThread) error {
 	message := "execution was interrupted after it started; the external action may have completed and must not be retried automatically"
-	result := h.db.DB.Model(&models.HostedAgentApproval{}).
+	if err := h.markHostedApprovalOutcomeUnknownOn(h.db.DB, approval, message); err != nil {
+		return err
+	}
+	return slackAgentPostUnknownOutcome(ctx, host.BotToken, thread.ExternalChannelID, thread.ExternalThreadID,
+		approval, deployment.Name)
+}
+
+func (h *WorkflowHandler) markHostedApprovalOutcomeUnknownOn(db *gorm.DB, approval *models.HostedAgentApproval, message string) error {
+	result := db.Model(&models.HostedAgentApproval{}).
 		Where("id = ? AND status = ?", approval.ID, models.HostedAgentApprovalExecuting).
 		Updates(map[string]any{
 			"status": models.HostedAgentApprovalOutcomeUnknown, "last_error": message,
@@ -1525,12 +1987,12 @@ func (h *WorkflowHandler) markSlackAgentApprovalOutcomeUnknown(ctx context.Conte
 	if result.Error != nil {
 		return result.Error
 	}
-	if result.RowsAffected == 1 {
-		approval.Status = models.HostedAgentApprovalOutcomeUnknown
-		approval.LastError = message
+	if result.RowsAffected != 1 {
+		return errors.New("indeterminate hosted approval could not be recorded from its executing state")
 	}
-	return slackAgentPostUnknownOutcome(ctx, host.BotToken, thread.ExternalChannelID, thread.ExternalThreadID,
-		approval, deployment.Name)
+	approval.Status = models.HostedAgentApprovalOutcomeUnknown
+	approval.LastError = message
+	return nil
 }
 
 func postSlackAgentApprovalSuccess(ctx context.Context, host *models.AgentHostInstallation, thread *models.HostedAgentThread, deployment *models.AgentDeployment, approval *models.HostedAgentApproval) error {
@@ -1541,17 +2003,27 @@ func postSlackAgentApprovalSuccess(ctx context.Context, host *models.AgentHostIn
 	return slackAgentPostText(ctx, host.BotToken, thread.ExternalChannelID, thread.ExternalThreadID, message, deployment.Name)
 }
 
-func (h *WorkflowHandler) failHostedApproval(approval *models.HostedAgentApproval, err error) {
-	h.failHostedApprovalOn(h.db.DB, approval, err)
+func (h *WorkflowHandler) failHostedApproval(approval *models.HostedAgentApproval, err error) error {
+	return h.failHostedApprovalOn(h.db.DB, approval, err)
 }
 
-func (h *WorkflowHandler) failHostedApprovalOn(db *gorm.DB, approval *models.HostedAgentApproval, err error) {
+func (h *WorkflowHandler) failHostedApprovalOn(db *gorm.DB, approval *models.HostedAgentApproval, err error) error {
 	now := time.Now().UTC()
-	db.Model(&models.HostedAgentApproval{}).
+	result := db.Model(&models.HostedAgentApproval{}).
 		Where("id = ? AND status IN ?", approval.ID, []models.HostedAgentApprovalStatus{
 			models.HostedAgentApprovalPending, models.HostedAgentApprovalExecuting,
 		}).Updates(map[string]any{
 		"status": models.HostedAgentApprovalFailed, "resolved_at": now,
 		"last_error": truncate(err.Error(), 2000),
 	})
+	if result.Error != nil {
+		return fmt.Errorf("record failed hosted approval: %w", result.Error)
+	}
+	if result.RowsAffected != 1 {
+		return errors.New("failed hosted approval could not be recorded from its current state")
+	}
+	approval.Status = models.HostedAgentApprovalFailed
+	approval.ResolvedAt = &now
+	approval.LastError = truncate(err.Error(), 2000)
+	return nil
 }

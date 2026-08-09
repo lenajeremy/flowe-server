@@ -269,10 +269,9 @@ func (h *WorkflowHandler) RemoveMember(c *gin.Context) {
 		return
 	}
 	// A hosted agent delegates its deployer's Fernary identity. The cross-replica
-	// authority lock is held by approved external mutations from claim through
-	// outcome persistence, so removal either revokes first or waits for the
-	// already-authorized operation to finish. Revocation and membership deletion
-	// then commit as one database transaction.
+	// authority lock is held by every hosted turn and approved external mutation,
+	// so removal either revokes first or waits for already-authorized work to
+	// finish. Revocation and membership deletion then commit as one transaction.
 	err := h.withHostedAuthorityLock(c.Request.Context(), orgID, target, func(connection *gorm.DB) error {
 		return removeMemberAndRevokeAgentAuthority(connection, orgID, target)
 	})

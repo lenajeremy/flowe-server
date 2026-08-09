@@ -96,11 +96,27 @@ func workflowNameFromContext(ctx context.Context) string {
 // main.go; used when a node has no manual token.
 var IntegrationCredsLookup func(userID, provider string) (token, workspace string)
 
+// IntegrationCredsLookupForOrg is the tenant-safe production lookup. The
+// legacy two-argument hook remains for isolated executor tests and callers
+// without organization context, but servers should configure this variant.
+var IntegrationCredsLookupForOrg func(orgID, userID, provider string) (token, workspace string)
+
 // IntegrationUserTokenLookup resolves the workflow owner's user-identity
 // grant (e.g. Slack xoxp- token) for providers whose actions can run either
 // as the bot or on the connecting human's behalf. Set by main.go; returns ""
 // when the connection predates user grants.
 var IntegrationUserTokenLookup func(userID, provider string) string
+
+// IntegrationUserTokenLookupForOrg is the tenant-safe equivalent for a
+// provider's optional human-identity grant.
+var IntegrationUserTokenLookupForOrg func(orgID, userID, provider string) string
+
+type integrationWorkspaceCtxKey struct{}
+
+func integrationWorkspaceFromContext(ctx context.Context) string {
+	workspace, _ := ctx.Value(integrationWorkspaceCtxKey{}).(string)
+	return workspace
+}
 
 // ── Approval channels ──────────────────────────────────────────
 
@@ -487,6 +503,13 @@ func executeNode(ctx context.Context, node WorkflowASTNode, outputs map[string]s
 
 func runNodeInner(ctx context.Context, node WorkflowASTNode, outputs map[string]string, edges []WorkflowASTEdge, keys APIKeys, runID, ownerID string, emit func(ExecutionEvent)) (string, error) {
 	d := node.Data
+	if d.IntegrationOp != "" && d.IntegrationToken == "" && IntegrationCredsLookupForOrg != nil {
+		token, workspace := IntegrationCredsLookupForOrg(OrgFromContext(ctx), ownerID, string(d.NodeType))
+		d.IntegrationToken = token
+		if workspace != "" {
+			ctx = context.WithValue(ctx, integrationWorkspaceCtxKey{}, workspace)
+		}
+	}
 	switch d.NodeType {
 	case NodeTypeTextInput:
 		return derefStr(d.DefaultValue, "(empty text input)"), nil
@@ -1007,9 +1030,15 @@ func runNodeInner(ctx context.Context, node WorkflowASTNode, outputs map[string]
 
 	case NodeTypeShopify:
 		token := substituteTemplates(d.IntegrationToken, outputs)
-		var shop string
-		if token == "" && IntegrationCredsLookup != nil {
-			token, shop = IntegrationCredsLookup(ownerID, "shopify")
+		shop := integrationWorkspaceFromContext(ctx)
+		if (token == "" || shop == "") && IntegrationCredsLookup != nil {
+			legacyToken, legacyShop := IntegrationCredsLookup(ownerID, "shopify")
+			if token == "" {
+				token = legacyToken
+			}
+			if shop == "" {
+				shop = legacyShop
+			}
 		}
 		if token == "" {
 			return "", fmt.Errorf("Shopify is not connected — use Connect Shopify in the node settings")
@@ -1261,12 +1290,16 @@ func runNodeInner(ctx context.Context, node WorkflowASTNode, outputs map[string]
 
 	case NodeTypeJira:
 		token := substituteTemplates(d.IntegrationToken, outputs)
-		cloudID := ""
-		if IntegrationCredsLookup != nil {
+		cloudID := integrationWorkspaceFromContext(ctx)
+		if (token == "" || cloudID == "") && IntegrationCredsLookup != nil {
 			var t string
-			t, cloudID = IntegrationCredsLookup(ownerID, "jira")
+			var legacyCloudID string
+			t, legacyCloudID = IntegrationCredsLookup(ownerID, "jira")
 			if token == "" {
 				token = t
+			}
+			if cloudID == "" {
+				cloudID = legacyCloudID
 			}
 		}
 		if token == "" {
@@ -1276,12 +1309,16 @@ func runNodeInner(ctx context.Context, node WorkflowASTNode, outputs map[string]
 
 	case NodeTypeConfluence:
 		token := substituteTemplates(d.IntegrationToken, outputs)
-		cloudID := ""
-		if IntegrationCredsLookup != nil {
+		cloudID := integrationWorkspaceFromContext(ctx)
+		if (token == "" || cloudID == "") && IntegrationCredsLookup != nil {
 			var t string
-			t, cloudID = IntegrationCredsLookup(ownerID, "confluence")
+			var legacyCloudID string
+			t, legacyCloudID = IntegrationCredsLookup(ownerID, "confluence")
 			if token == "" {
 				token = t
+			}
+			if cloudID == "" {
+				cloudID = legacyCloudID
 			}
 		}
 		if token == "" {
@@ -1291,12 +1328,16 @@ func runNodeInner(ctx context.Context, node WorkflowASTNode, outputs map[string]
 
 	case NodeTypeBitbucket:
 		token := substituteTemplates(d.IntegrationToken, outputs)
-		workspace := ""
-		if IntegrationCredsLookup != nil {
+		workspace := integrationWorkspaceFromContext(ctx)
+		if (token == "" || workspace == "") && IntegrationCredsLookup != nil {
 			var t string
-			t, workspace = IntegrationCredsLookup(ownerID, "bitbucket")
+			var legacyWorkspace string
+			t, legacyWorkspace = IntegrationCredsLookup(ownerID, "bitbucket")
 			if token == "" {
 				token = t
+			}
+			if workspace == "" {
+				workspace = legacyWorkspace
 			}
 		}
 		if token == "" {
@@ -1333,7 +1374,9 @@ func runNodeInner(ctx context.Context, node WorkflowASTNode, outputs map[string]
 			return "", fmt.Errorf("Slack is not connected — use Connect Slack in the node settings")
 		}
 		userToken := ""
-		if IntegrationUserTokenLookup != nil {
+		if IntegrationUserTokenLookupForOrg != nil {
+			userToken = IntegrationUserTokenLookupForOrg(OrgFromContext(ctx), ownerID, "slack")
+		} else if IntegrationUserTokenLookup != nil {
 			userToken = IntegrationUserTokenLookup(ownerID, "slack")
 		}
 		return runSlack(ctx, token, userToken, d, outputs)

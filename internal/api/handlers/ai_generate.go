@@ -14,6 +14,7 @@ import (
 	"os"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"workflow-ai/server/internal/auth"
 	"workflow-ai/server/internal/billing"
@@ -1767,6 +1768,12 @@ func sendSSE(w io.Writer, flusher http.Flusher, eventType, data string) {
 func truncate(s string, max int) string {
 	if len(s) <= max {
 		return s
+	}
+	if max <= 0 {
+		return "..."
+	}
+	for max > 0 && !utf8.RuneStart(s[max]) {
+		max--
 	}
 	return s[:max] + "..."
 }

@@ -1,3 +1,4 @@
 .env
+client_secret_*.apps.googleusercontent.com.json
 server.log
 tmp/

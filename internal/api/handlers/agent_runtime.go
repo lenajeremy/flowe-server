@@ -84,7 +84,7 @@ type AgentTurnInput struct {
 	HistoryTextCap  int
 	Goal            string
 	Model           agentRuntimeModel
-	RequestApproval func(context.Context, AgentAuthorizedCall) (*AgentApprovalActivity, error)
+	RequestApproval func(context.Context, AgentAuthorizedCall, map[string]string) (*AgentApprovalActivity, error)
 }
 
 type AgentTurnResult struct {
@@ -184,7 +184,11 @@ func (h *WorkflowHandler) RunAgentTurn(ctx context.Context, input AgentTurnInput
 					})
 					return agentToolExecution{Content: fmt.Sprintf(`{"error":%q}`, err.Error())}
 				}
-				approval, err := input.RequestApproval(ctx, authorized)
+				stateSnapshot := make(map[string]string, len(state))
+				for key, value := range state {
+					stateSnapshot[key] = value
+				}
+				approval, err := input.RequestApproval(ctx, authorized, stateSnapshot)
 				if err != nil {
 					record := agentToolCallRecord{
 						Node: tool.Node.Data.Label, NodeID: tool.Node.ID, Op: op, Status: "error",

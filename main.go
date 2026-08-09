@@ -83,17 +83,17 @@ func main() {
 	// Integration nodes fall back to the workflow owner's stored OAuth
 	// connection when the node config carries no manual token. FreshAccessToken
 	// transparently refreshes expiring tokens (gmail, gitlab).
-	executor.IntegrationCredsLookup = func(userID, provider string) (string, string) {
-		if userID == "" {
+	executor.IntegrationCredsLookupForOrg = func(orgID, userID, provider string) (string, string) {
+		if orgID == "" || userID == "" {
 			return "", ""
 		}
-		return handlers.FreshAccessToken(dbClient.DB, userID, provider)
+		return handlers.FreshAccessTokenForOrg(dbClient.DB, orgID, userID, provider)
 	}
-	executor.IntegrationUserTokenLookup = func(userID, provider string) string {
-		if userID == "" {
+	executor.IntegrationUserTokenLookupForOrg = func(orgID, userID, provider string) string {
+		if orgID == "" || userID == "" {
 			return ""
 		}
-		return handlers.UserGrantToken(dbClient.DB, userID, provider)
+		return handlers.UserGrantTokenForOrg(dbClient.DB, orgID, userID, provider)
 	}
 	// Durable persistence (workflow/account Data stores). Run-scoped stores stay
 	// in-memory inside the executor and never reach the DB.

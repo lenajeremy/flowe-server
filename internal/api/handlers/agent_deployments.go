@@ -16,13 +16,19 @@ import (
 	"workflow-ai/server/internal/auth"
 	"workflow-ai/server/internal/database/models"
 	"workflow-ai/server/internal/executor"
+	"workflow-ai/server/internal/tenancy"
 
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 var agentAliasPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{1,31}$`)
-var slackChannelIDPattern = regexp.MustCompile(`^[CG][A-Z0-9]+$`)
+var slackChannelIDPattern = regexp.MustCompile(`^[CG][A-Z0-9]{1,31}$`)
+var slackAgentHostRequiredScopes = []string{
+	"app_mentions:read", "chat:write", "chat:write.customize",
+	"channels:read", "channels:history", "groups:read", "groups:history",
+}
 
 type AgentPermissionSummary struct {
 	Goal                    string   `json:"goal,omitempty"`
@@ -203,11 +209,11 @@ func (h *WorkflowHandler) CreateAgentDeployment(c *gin.Context) {
 		c.JSON(http.StatusConflict, gin.H{"error": "Slack must be reconnected with hosted-agent mention permissions before deployment"})
 		return
 	}
-	if len(request.Channels) > 20 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "a deployment can allow at most 20 channels"})
+	if len(request.Channels) == 0 || len(request.Channels) > 20 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "select between 1 and 20 allowed channels"})
 		return
 	}
-	if installation.Provider == "slack" && len(request.Channels) > 0 {
+	if installation.Provider == "slack" {
 		channels, err := validateSlackDeploymentChannels(c.Request.Context(), installation.BotToken, request.Channels)
 		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "could not validate allowed Slack channels", "detail": err.Error()})
@@ -244,16 +250,12 @@ func (h *WorkflowHandler) CreateAgentDeployment(c *gin.Context) {
 		"analysisId": analysisRecord.ID.String(), "goal": analysisRecord.Goal,
 		"summary": analysisRecord.Summary, "warnings": analysisWarnings, "source": "ai",
 	})
-	status := models.AgentDeploymentDraft
-	if len(request.Channels) > 0 {
-		status = models.AgentDeploymentActive
-	}
 	modelID := resolveChatModel(request.ModelID).ID
 	deployment := models.AgentDeployment{
 		OrganizationID: currentOrgID(c), WorkflowID: workflow.ID.String(),
 		DeployedByUserID: auth.UserID(c), HostInstallationID: installation.ID.String(),
 		Provider: installation.Provider, Name: request.Name, Alias: request.Alias,
-		ModelID: modelID, Version: 1, Status: status,
+		ModelID: modelID, Version: 1, Status: models.AgentDeploymentActive,
 		SnapshotName: workflow.Name, SnapshotNodes: append(models.JSONB(nil), workflow.Nodes...),
 		SnapshotEdges:   append(models.JSONB(nil), workflow.Edges...),
 		SnapshotHash:    snapshotHash,
@@ -263,6 +265,13 @@ func (h *WorkflowHandler) CreateAgentDeployment(c *gin.Context) {
 
 	var targets []models.AgentDeploymentTarget
 	err = h.db.DB.Transaction(func(tx *gorm.DB) error {
+		// Serialize version allocation for this workflow. Concurrent deploys must
+		// not both observe the same MAX(version).
+		var lockedWorkflow models.Workflow
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("id = ? AND organization_id = ?", workflow.ID, currentOrgID(c)).First(&lockedWorkflow).Error; err != nil {
+			return err
+		}
 		var latest int
 		if err := tx.Model(&models.AgentDeployment{}).
 			Where("workflow_id = ? AND alias = ?", workflow.ID.String(), request.Alias).
@@ -317,12 +326,20 @@ func (h *WorkflowHandler) ListAgentDeployments(c *gin.Context) {
 	responses := make([]agentDeploymentResponse, 0, len(deployments))
 	for _, deployment := range deployments {
 		var targets []models.AgentDeploymentTarget
-		h.db.DB.Where("deployment_id = ?", deployment.ID.String()).Find(&targets)
+		if err := h.db.DB.Where("deployment_id = ?", deployment.ID.String()).Find(&targets).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load deployment targets"})
+			return
+		}
 		var policy AgentCapabilityPolicy
-		_ = json.Unmarshal(deployment.CapabilityPolicy, &policy)
+		if json.Unmarshal(deployment.CapabilityPolicy, &policy) != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "stored deployment policy is unreadable"})
+			return
+		}
 		ast := executor.WorkflowAST{Name: deployment.SnapshotName}
-		_ = json.Unmarshal(deployment.SnapshotNodes, &ast.Nodes)
-		_ = json.Unmarshal(deployment.SnapshotEdges, &ast.Edges)
+		if json.Unmarshal(deployment.SnapshotNodes, &ast.Nodes) != nil || json.Unmarshal(deployment.SnapshotEdges, &ast.Edges) != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "stored deployment snapshot is unreadable"})
+			return
+		}
 		var analysis map[string]any
 		_ = json.Unmarshal(deployment.PermissionAnalysis, &analysis)
 		goal, _ := analysis["goal"].(string)
@@ -340,12 +357,20 @@ func (h *WorkflowHandler) GetAgentDeployment(c *gin.Context) {
 		return
 	}
 	var targets []models.AgentDeploymentTarget
-	h.db.DB.Where("deployment_id = ?", deployment.ID.String()).Find(&targets)
+	if err := h.db.DB.Where("deployment_id = ?", deployment.ID.String()).Find(&targets).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load deployment targets"})
+		return
+	}
 	var policy AgentCapabilityPolicy
-	_ = json.Unmarshal(deployment.CapabilityPolicy, &policy)
+	if json.Unmarshal(deployment.CapabilityPolicy, &policy) != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "stored deployment policy is unreadable"})
+		return
+	}
 	ast := executor.WorkflowAST{Name: deployment.SnapshotName}
-	_ = json.Unmarshal(deployment.SnapshotNodes, &ast.Nodes)
-	_ = json.Unmarshal(deployment.SnapshotEdges, &ast.Edges)
+	if json.Unmarshal(deployment.SnapshotNodes, &ast.Nodes) != nil || json.Unmarshal(deployment.SnapshotEdges, &ast.Edges) != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "stored deployment snapshot is unreadable"})
+		return
+	}
 	var analysis map[string]any
 	_ = json.Unmarshal(deployment.PermissionAnalysis, &analysis)
 	goal, _ := analysis["goal"].(string)
@@ -398,9 +423,12 @@ func (h *WorkflowHandler) PatchAgentDeployment(c *gin.Context) {
 		}
 		if status == models.AgentDeploymentActive {
 			var deployerMembership int64
-			h.db.DB.Model(&models.OrgMember{}).
+			if err := h.db.DB.Model(&models.OrgMember{}).
 				Where("organization_id = ? AND user_id = ?", deployment.OrganizationID, deployment.DeployedByUserID).
-				Count(&deployerMembership)
+				Count(&deployerMembership).Error; err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "could not verify the deploying user's membership"})
+				return
+			}
 			if deployerMembership == 0 {
 				c.JSON(http.StatusConflict, gin.H{"error": "the deploying user is no longer an organization member; deploy a new snapshot under a current member"})
 				return
@@ -412,8 +440,11 @@ func (h *WorkflowHandler) PatchAgentDeployment(c *gin.Context) {
 				return
 			}
 			var enabledTargets int64
-			h.db.DB.Model(&models.AgentDeploymentTarget{}).
-				Where("deployment_id = ? AND enabled = true", deployment.ID.String()).Count(&enabledTargets)
+			if err := h.db.DB.Model(&models.AgentDeploymentTarget{}).
+				Where("deployment_id = ? AND enabled = true", deployment.ID.String()).Count(&enabledTargets).Error; err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "could not verify allowed channels"})
+				return
+			}
 			if enabledTargets == 0 {
 				c.JSON(http.StatusConflict, gin.H{"error": "add an allowed channel before activating this deployment"})
 				return
@@ -422,7 +453,49 @@ func (h *WorkflowHandler) PatchAgentDeployment(c *gin.Context) {
 		updates["status"] = status
 	}
 	if len(updates) > 0 {
-		if err := h.db.DB.Model(deployment).Updates(updates).Error; err != nil {
+		apply := func(db *gorm.DB) error {
+			var live models.AgentDeployment
+			if err := db.Where("id = ? AND organization_id = ? AND status <> ?",
+				deployment.ID, deployment.OrganizationID, models.AgentDeploymentRevoked).First(&live).Error; err != nil {
+				if errors.Is(err, gorm.ErrRecordNotFound) {
+					return errHostedAgentAuthorityEnded
+				}
+				return err
+			}
+			if request.Status != nil && models.AgentDeploymentStatus(*request.Status) == models.AgentDeploymentActive {
+				var memberships int64
+				if err := db.Model(&models.OrgMember{}).
+					Where("organization_id = ? AND user_id = ?", live.OrganizationID, live.DeployedByUserID).
+					Count(&memberships).Error; err != nil {
+					return err
+				}
+				var hostCount, targetCount int64
+				if err := db.Model(&models.AgentHostInstallation{}).
+					Where("id = ? AND organization_id = ? AND status = ?", live.HostInstallationID, live.OrganizationID, models.AgentHostActive).
+					Count(&hostCount).Error; err != nil {
+					return err
+				}
+				if err := db.Model(&models.AgentDeploymentTarget{}).
+					Where("deployment_id = ? AND enabled = true", live.ID).Count(&targetCount).Error; err != nil {
+					return err
+				}
+				if memberships != 1 || hostCount != 1 || targetCount == 0 {
+					return errHostedAgentAuthorityEnded
+				}
+			}
+			return db.Model(&live).Updates(updates).Error
+		}
+		var err error
+		if request.Status != nil {
+			err = h.withHostedAuthorityLock(c.Request.Context(), deployment.OrganizationID, deployment.DeployedByUserID, apply)
+		} else {
+			err = apply(h.db.DB.WithContext(c.Request.Context()))
+		}
+		if errors.Is(err, errHostedAgentAuthorityEnded) {
+			c.JSON(http.StatusConflict, gin.H{"error": "this deployment can no longer be changed or activated; deploy a new snapshot if its authority was revoked"})
+			return
+		}
+		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update deployment"})
 			return
 		}
@@ -435,15 +508,17 @@ func (h *WorkflowHandler) DeleteAgentDeployment(c *gin.Context) {
 	if !ok {
 		return
 	}
-	err := h.db.DB.Transaction(func(tx *gorm.DB) error {
-		if err := tx.Model(deployment).Update("status", models.AgentDeploymentRevoked).Error; err != nil {
-			return err
-		}
-		if err := tx.Model(&models.AgentDeploymentTarget{}).
-			Where("deployment_id = ?", deployment.ID.String()).Update("enabled", false).Error; err != nil {
-			return err
-		}
-		return tx.Where("deployment_id = ?", deployment.ID.String()).Delete(&models.AgentDeploymentTarget{}).Error
+	err := h.withHostedAuthorityLock(c.Request.Context(), deployment.OrganizationID, deployment.DeployedByUserID, func(connection *gorm.DB) error {
+		return connection.Transaction(func(tx *gorm.DB) error {
+			if err := tx.Model(deployment).Update("status", models.AgentDeploymentRevoked).Error; err != nil {
+				return err
+			}
+			if err := tx.Model(&models.AgentDeploymentTarget{}).
+				Where("deployment_id = ?", deployment.ID.String()).Update("enabled", false).Error; err != nil {
+				return err
+			}
+			return tx.Where("deployment_id = ?", deployment.ID.String()).Delete(&models.AgentDeploymentTarget{}).Error
+		})
 	})
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to revoke deployment"})
@@ -462,6 +537,10 @@ func (h *WorkflowHandler) ListAgentHosts(c *gin.Context) {
 }
 
 func (h *WorkflowHandler) ConnectAgentHost(c *gin.Context) {
+	if !tenancy.CanManageMembers(h.db.DB, currentOrgID(c), auth.UserID(c)) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "only organization owners and admins can connect the shared Slack host"})
+		return
+	}
 	// The agent-host OAuth route is intentionally static. Inject the provider
 	// expected by the shared integration OAuth implementation.
 	c.Params = append(c.Params, gin.Param{Key: "provider", Value: "slack"})
@@ -472,22 +551,36 @@ func (h *WorkflowHandler) ConnectAgentHost(c *gin.Context) {
 // DeleteAgentHost revokes only the org-level chat transport. It deliberately
 // does not delete or revoke any member's Slack action credential.
 func (h *WorkflowHandler) DeleteAgentHost(c *gin.Context) {
+	if !tenancy.CanManageMembers(h.db.DB, currentOrgID(c), auth.UserID(c)) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "only organization owners and admins can disconnect the shared Slack host"})
+		return
+	}
 	var installation models.AgentHostInstallation
 	if err := h.db.DB.Where("id = ? AND organization_id = ?", c.Param("id"), currentOrgID(c)).
 		First(&installation).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "agent host installation not found"})
 		return
 	}
-	err := h.db.DB.Transaction(func(tx *gorm.DB) error {
-		if err := tx.Model(&installation).Updates(map[string]any{
-			"status": models.AgentHostRevoked, "bot_token": "", "bot_user_id": "",
-			"last_error": "Team-chat host disconnected by an organization member",
-		}).Error; err != nil {
-			return err
-		}
-		return tx.Model(&models.AgentDeployment{}).
-			Where("host_installation_id = ? AND status = ?", installation.ID.String(), models.AgentDeploymentActive).
-			Update("status", models.AgentDeploymentPaused).Error
+	var deployerIDs []string
+	if err := h.db.DB.Model(&models.AgentDeployment{}).
+		Where("host_installation_id = ? AND organization_id = ? AND status <> ?",
+			installation.ID, installation.OrganizationID, models.AgentDeploymentRevoked).
+		Distinct("deployed_by_user_id").Pluck("deployed_by_user_id", &deployerIDs).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to resolve deployments using this host"})
+		return
+	}
+	err := h.withHostedAuthorityLocks(c.Request.Context(), installation.OrganizationID, deployerIDs, func(connection *gorm.DB) error {
+		return connection.Transaction(func(tx *gorm.DB) error {
+			if err := tx.Model(&installation).Updates(map[string]any{
+				"status": models.AgentHostRevoked, "bot_token": "", "bot_user_id": "",
+				"last_error": "Team-chat host disconnected by an organization member",
+			}).Error; err != nil {
+				return err
+			}
+			return tx.Model(&models.AgentDeployment{}).
+				Where("host_installation_id = ? AND status = ?", installation.ID.String(), models.AgentDeploymentActive).
+				Update("status", models.AgentDeploymentPaused).Error
+		})
 	})
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to disconnect agent host"})
@@ -529,7 +622,7 @@ func (h *WorkflowHandler) ListAgentHostChannels(c *gin.Context) {
 		if cursor != "" {
 			payload["cursor"] = cursor
 		}
-		if err := slackAgentAPICall(c.Request.Context(), installation.BotToken, "conversations.list", payload, &response); err != nil {
+		if err := slackAgentAPIGet(c.Request.Context(), installation.BotToken, "conversations.list", payload, &response); err != nil {
 			c.JSON(http.StatusBadGateway, gin.H{"error": "could not list Slack channels", "detail": err.Error()})
 			return
 		}
@@ -558,7 +651,7 @@ func validateSlackDeploymentChannels(ctx context.Context, token string, channels
 				IsMember bool   `json:"is_member"`
 			} `json:"channel"`
 		}
-		if err := slackAgentAPICall(ctx, token, "conversations.info", map[string]any{"channel": channelID}, &response); err != nil {
+		if err := slackAgentAPIGet(ctx, token, "conversations.info", map[string]any{"channel": channelID}, &response); err != nil {
 			return nil, fmt.Errorf("%s: %w", channelID, err)
 		}
 		if response.Channel.ID != channelID {
@@ -617,10 +710,7 @@ func oauthScopeContains(scopeList, want string) bool {
 }
 
 func slackAgentHostScopesReady(scopeList string) bool {
-	for _, required := range []string{
-		"app_mentions:read", "chat:write", "chat:write.customize",
-		"channels:read", "channels:history", "groups:read", "groups:history",
-	} {
+	for _, required := range slackAgentHostRequiredScopes {
 		if !oauthScopeContains(scopeList, required) {
 			return false
 		}

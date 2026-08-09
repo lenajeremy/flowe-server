@@ -1,12 +1,67 @@
 package handlers
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
 	"workflow-ai/server/internal/executor"
 	"workflow-ai/server/internal/triggers"
 )
+
+func TestAgentToolNameKeepsStableUniqueSuffixWhenLabelsAreLong(t *testing.T) {
+	t.Parallel()
+	label := strings.Repeat("customer account activity ", 5)
+	first := agentToolName(executor.WorkflowASTNode{ID: "node-first", Data: executor.FlowNodeData{Label: label}})
+	second := agentToolName(executor.WorkflowASTNode{ID: "node-second", Data: executor.FlowNodeData{Label: label}})
+	if first == second {
+		t.Fatalf("long duplicate labels produced the same tool name: %q", first)
+	}
+	if len(first) > 64 || len(second) > 64 {
+		t.Fatalf("tool names exceed provider limit: %d, %d", len(first), len(second))
+	}
+}
+
+func TestApprovalDetailsRedactSecretsButDescribeTheirPresence(t *testing.T) {
+	t.Parallel()
+	details, err := agentApprovalDisplayDetails(executor.FlowNodeData{
+		NodeType: executor.NodeTypeHTTPRequest, URL: "https://example.test/action",
+		RequestHeaders: `{"Authorization":"Bearer hidden"}`,
+		RequestBody:    `{"password":"hidden"}`,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := json.Marshal(details)
+	text := string(raw)
+	if strings.Contains(text, "Bearer hidden") || strings.Contains(text, `password\":\"hidden`) {
+		t.Fatalf("approval details leaked secret material: %s", text)
+	}
+	if strings.Contains(text, "emailTo") || strings.Contains(text, "dataStoreId") {
+		t.Fatalf("approval details included unrelated union fields: %s", text)
+	}
+	for _, field := range []string{"requestHeaders", "requestBody", "redacted", "sha256"} {
+		if !strings.Contains(text, field) {
+			t.Errorf("approval details omitted %q: %s", field, text)
+		}
+	}
+}
+
+func TestAgentSavedConfigOnlyDescribesCurrentNodeType(t *testing.T) {
+	t.Parallel()
+	config := agentSafeSavedConfig(executor.FlowNodeData{
+		NodeType: executor.NodeTypeGoogleDrive, Label: "Marketing files",
+		IntegrationOp: "list_files", GDriveParentId: "folder-123",
+	})
+	for _, want := range []string{`"integrationOp":"list_files"`, `"gdriveParentId":"folder-123"`} {
+		if !strings.Contains(config, want) {
+			t.Errorf("saved config omitted %s: %s", want, config)
+		}
+	}
+	if strings.Contains(config, "emailTo") || strings.Contains(config, "dataStoreId") {
+		t.Fatalf("saved config included unrelated union fields: %s", config)
+	}
+}
 
 func TestAgentSkipNodeExcludesTriggerNodes(t *testing.T) {
 	t.Parallel()
@@ -152,10 +207,13 @@ func TestAgentToolDescriptionNeverIncludesSavedSecrets(t *testing.T) {
 			t.Errorf("tool description leaked %q: %s", secret, description)
 		}
 	}
-	for _, safeDefault := range []string{"https://example.test/projects", `"maxTokens":250`} {
+	for _, safeDefault := range []string{"https://example.test/projects"} {
 		if !strings.Contains(description, safeDefault) {
 			t.Errorf("tool description lost safe default %q: %s", safeDefault, description)
 		}
+	}
+	if strings.Contains(description, `"maxTokens":250`) {
+		t.Errorf("tool description included an unrelated node-type field: %s", description)
 	}
 }
 

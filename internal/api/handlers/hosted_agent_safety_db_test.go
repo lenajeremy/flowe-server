@@ -34,12 +34,53 @@ func hostedAgentSafetyDB(t *testing.T) *gorm.DB {
 		&models.OrgMember{},
 		&models.AgentDeployment{},
 		&models.AgentDeploymentTarget{},
+		&models.HostedAgentDelivery{},
 		&models.HostedAgentApproval{},
 		&models.ChatSession{},
 	); err != nil {
 		t.Fatalf("migrate hosted agent safety models: %v", err)
 	}
 	return db
+}
+
+func TestHostedDeliveryClaimsPreserveThreadOrder(t *testing.T) {
+	db := hostedAgentSafetyDB(t)
+	threadKey := "T" + uuid.NewString() + ":C123:100.1"
+	createdAt := time.Now().UTC().Add(-time.Minute)
+	deliveries := []models.HostedAgentDelivery{
+		{
+			BaseModel: models.BaseModel{CreatedAt: createdAt}, Provider: slackAgentProvider,
+			ExternalDeliveryID: uuid.NewString(), ExternalWorkspaceID: "T123", ThreadKey: threadKey,
+			EventKind: "mention", Payload: models.JSONB(`{}`), Status: models.HostedAgentDeliveryPending,
+			AvailableAt: createdAt,
+		},
+		{
+			BaseModel: models.BaseModel{CreatedAt: createdAt.Add(time.Millisecond)}, Provider: slackAgentProvider,
+			ExternalDeliveryID: uuid.NewString(), ExternalWorkspaceID: "T123", ThreadKey: threadKey,
+			EventKind: "mention", Payload: models.JSONB(`{}`), Status: models.HostedAgentDeliveryPending,
+			AvailableAt: createdAt,
+		},
+	}
+	if err := db.Create(&deliveries).Error; err != nil {
+		t.Fatalf("create ordered deliveries: %v", err)
+	}
+	t.Cleanup(func() { db.Unscoped().Where("thread_key = ?", threadKey).Delete(&models.HostedAgentDelivery{}) })
+
+	handler := &WorkflowHandler{db: &database.DBClient{DB: db}}
+	first, err := handler.claimHostedAgentDelivery()
+	if err != nil || first == nil || first.ID != deliveries[0].ID {
+		t.Fatalf("first claim = (%v, %v), want %s", first, err, deliveries[0].ID)
+	}
+	blocked, err := handler.claimHostedAgentDelivery()
+	if err != nil || blocked != nil {
+		t.Fatalf("later same-thread delivery claimed early = (%v, %v)", blocked, err)
+	}
+	handler.finishHostedAgentDelivery(first, nil)
+	second, err := handler.claimHostedAgentDelivery()
+	if err != nil || second == nil || second.ID != deliveries[1].ID {
+		t.Fatalf("second claim = (%v, %v), want %s", second, err, deliveries[1].ID)
+	}
+	handler.finishHostedAgentDelivery(second, nil)
 }
 
 func safetyDeployment(orgID, userID string) models.AgentDeployment {

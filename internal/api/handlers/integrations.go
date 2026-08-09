@@ -21,6 +21,7 @@ import (
 	"workflow-ai/server/internal/cryptobox"
 	"workflow-ai/server/internal/database/models"
 	"workflow-ai/server/internal/telemetry"
+	"workflow-ai/server/internal/tenancy"
 
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
@@ -688,7 +689,8 @@ func (h *WorkflowHandler) ConnectIntegration(c *gin.Context) {
 		q.Set("code_challenge", pkceChallenge(verifier))
 		q.Set("code_challenge_method", "S256")
 	}
-	if agentHost, _ := c.Get("agent-host-connect"); agentHost == true {
+	agentHost, _ := c.Get("agent-host-connect")
+	if agentHost == true {
 		q.Set("state", newAgentHostOAuthState(currentUserID(c), currentOrgID(c), openerOrigin(c), verifier))
 	} else {
 		q.Set("state", newOAuthStateFull(currentUserID(c), currentOrgID(c), openerOrigin(c), "", verifier))
@@ -697,6 +699,10 @@ func (h *WorkflowHandler) ConnectIntegration(c *gin.Context) {
 		for _, v := range vs {
 			q.Set(k, v)
 		}
+	}
+	if agentHost == true && prov.name == "slack" {
+		q.Set("scope", strings.Join(slackAgentHostRequiredScopes, ","))
+		q.Del("user_scope")
 	}
 	// Return the authorize URL (not a 302) so the SPA can call this with an
 	// Authorization header, then open the URL in the popup it already spawned.
@@ -724,6 +730,11 @@ func (h *WorkflowHandler) CallbackIntegration(c *gin.Context) {
 		slog.WarnContext(ctx, "integration connect failed", "provider", provider, "reason", "invalid_or_expired_state")
 		telemetry.AuthEvent(ctx, "integration_oauth", "error")
 		oauthResultPage(c, provider, openerOrig, false, "invalid or expired state — try connecting again")
+		return
+	}
+	if st.agentHost && !tenancy.CanManageMembers(h.db.DB, orgID, userID) {
+		slog.WarnContext(ctx, "slack agent host connect rejected", "reason", "host_manager_authority_ended")
+		oauthResultPage(c, provider, openerOrig, false, "your organization role no longer allows connecting the shared Slack host")
 		return
 	}
 	code := c.Query("code")
@@ -814,25 +825,42 @@ func (h *WorkflowHandler) CallbackIntegration(c *gin.Context) {
 	}
 	conn.UserID = userID
 	conn.OrganizationID = orgID
+	if provider == "slack" && st.agentHost {
+		// A host installation is bot-only transport shared by the organization.
+		// Never overwrite the deployer's separate Slack action credential with it.
+		if err := h.syncSlackAgentHost(orgID, userID, conn); err != nil {
+			slog.WarnContext(ctx, "slack agent host sync failed", "reason", truncate(err.Error(), 200))
+			telemetry.AuthEvent(ctx, "integration_oauth", "error")
+			message := "failed to connect the shared Slack workspace"
+			if strings.Contains(err.Error(), "already connected to another Fernary organization") {
+				message = "this Slack workspace is already connected to another Fernary organization"
+			}
+			oauthResultPage(c, provider, openerOrig, false, message)
+			return
+		}
+		slog.InfoContext(ctx, "slack agent host connected", "user_id", userID, "org_id", orgID)
+		telemetry.AuthEvent(ctx, "integration_oauth", "ok")
+		oauthResultPage(c, provider, openerOrig, true, "")
+		return
+	}
 
 	// Upsert: one connection per user per provider. Hard delete — a soft-deleted
 	// row would still occupy the (organization_id, user_id, provider) unique index
 	// and block the insert, and dead tokens shouldn't linger in the table anyway.
-	h.db.DB.Unscoped().Where("organization_id = ? AND user_id = ? AND provider = ?",
-		orgID, userID, provider).Delete(&models.IntegrationConnection{})
-	if err := h.db.DB.Create(conn).Error; err != nil {
+	err = h.withHostedAuthorityLock(ctx, orgID, userID, func(connection *gorm.DB) error {
+		return connection.Transaction(func(tx *gorm.DB) error {
+			if err := tx.Unscoped().Where("organization_id = ? AND user_id = ? AND provider = ?",
+				orgID, userID, provider).Delete(&models.IntegrationConnection{}).Error; err != nil {
+				return err
+			}
+			return tx.Create(conn).Error
+		})
+	})
+	if err != nil {
 		slog.WarnContext(ctx, "integration connect failed", "provider", provider, "reason", "store_failed")
 		telemetry.AuthEvent(ctx, "integration_oauth", "error")
 		oauthResultPage(c, provider, openerOrig, false, "failed to store connection")
 		return
-	}
-	if provider == "slack" && st.agentHost {
-		if err := h.syncSlackAgentHost(orgID, userID, conn); err != nil {
-			slog.WarnContext(ctx, "slack agent host sync failed", "reason", truncate(err.Error(), 200))
-			telemetry.AuthEvent(ctx, "integration_oauth", "error")
-			oauthResultPage(c, provider, openerOrig, false, err.Error())
-			return
-		}
 	}
 	slog.InfoContext(ctx, "integration connected", "provider", provider, "user_id", userID)
 	telemetry.AuthEvent(ctx, "integration_oauth", "ok")
@@ -846,21 +874,26 @@ func (h *WorkflowHandler) DisconnectIntegration(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "unknown provider"})
 		return
 	}
-	// GitLab creates real project hooks with this OAuth token. Remove them while
-	// the credential still exists; deleting the connection first would strand
-	// remote hooks and leave reconnecting unable to clean them up.
-	if provider == "gitlab" || provider == "monday" || provider == "asana" {
-		query := h.db.DB.Where("organization_id = ? AND user_id = ? AND provider = ? AND deleted_at IS NULL",
-			currentOrgID(c), currentUserID(c), provider)
-		if err := h.retireIntegrationTriggers(c.Request.Context(), query); err != nil {
-			slog.ErrorContext(c.Request.Context(), "could not retire provider webhooks on disconnect",
-				"provider", provider, "error", err)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "could not remove " + provider + " webhooks"})
-			return
+	orgID, userID := currentOrgID(c), currentUserID(c)
+	err := h.withHostedAuthorityLock(c.Request.Context(), orgID, userID, func(connection *gorm.DB) error {
+		// GitLab creates real project hooks with this OAuth token. Remove them
+		// while the credential still exists; the authority lock also prevents a
+		// hosted turn from starting halfway through credential revocation.
+		if provider == "gitlab" || provider == "monday" || provider == "asana" {
+			query := connection.Where("organization_id = ? AND user_id = ? AND provider = ? AND deleted_at IS NULL",
+				orgID, userID, provider)
+			if err := h.retireIntegrationTriggers(c.Request.Context(), query); err != nil {
+				return fmt.Errorf("retire provider webhooks: %w", err)
+			}
 		}
+		return connection.Unscoped().Where("organization_id = ? AND user_id = ? AND provider = ?",
+			orgID, userID, provider).Delete(&models.IntegrationConnection{}).Error
+	})
+	if err != nil {
+		slog.ErrorContext(c.Request.Context(), "could not disconnect integration", "provider", provider, "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not disconnect " + provider})
+		return
 	}
-	h.db.DB.Unscoped().Where("organization_id = ? AND user_id = ? AND provider = ?",
-		currentOrgID(c), currentUserID(c), provider).Delete(&models.IntegrationConnection{})
 	slog.InfoContext(c.Request.Context(), "integration disconnected", "provider", provider, "user_id", currentUserID(c))
 	c.JSON(http.StatusOK, gin.H{"disconnected": provider})
 }
