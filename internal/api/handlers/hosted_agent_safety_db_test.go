@@ -148,6 +148,37 @@ func TestMemberRemovalAtomicallyRevokesHostedAgentAuthority(t *testing.T) {
 	}
 }
 
+func TestAgentDeploymentStatusUpdateUsesCleanLockedStatement(t *testing.T) {
+	db := hostedAgentSafetyDB(t)
+	orgID, userID := uuid.NewString(), uuid.NewString()
+	cleanupHostedAgentSafety(t, db, orgID)
+	deployment := safetyDeployment(orgID, userID)
+	if err := db.Create(&deployment).Error; err != nil {
+		t.Fatalf("create deployment: %v", err)
+	}
+	handler := &WorkflowHandler{db: &database.DBClient{DB: db}}
+	err := handler.withHostedAuthorityLock(context.Background(), orgID, userID, func(connection *gorm.DB) error {
+		var live models.AgentDeployment
+		if err := connection.Where("id = ? AND organization_id = ? AND status <> ?",
+			deployment.ID, orgID, models.AgentDeploymentRevoked).First(&live).Error; err != nil {
+			return err
+		}
+		return updateAgentDeploymentOnLockedConnection(connection, &live, map[string]any{
+			"status": models.AgentDeploymentPaused,
+		})
+	})
+	if err != nil {
+		t.Fatalf("update deployment under authority lock: %v", err)
+	}
+	var stored models.AgentDeployment
+	if err := db.First(&stored, "id = ?", deployment.ID).Error; err != nil {
+		t.Fatalf("reload deployment: %v", err)
+	}
+	if stored.Status != models.AgentDeploymentPaused {
+		t.Fatalf("deployment status = %q, want paused", stored.Status)
+	}
+}
+
 func TestHostedApprovalClaimRechecksDeployerMembership(t *testing.T) {
 	db := hostedAgentSafetyDB(t)
 	orgID, userID := uuid.NewString(), uuid.NewString()

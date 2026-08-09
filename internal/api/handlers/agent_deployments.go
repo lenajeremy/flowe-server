@@ -483,7 +483,7 @@ func (h *WorkflowHandler) PatchAgentDeployment(c *gin.Context) {
 					return errHostedAgentAuthorityEnded
 				}
 			}
-			return db.Model(&live).Updates(updates).Error
+			return updateAgentDeploymentOnLockedConnection(db, &live, updates)
 		}
 		var err error
 		if request.Status != nil {
@@ -501,6 +501,26 @@ func (h *WorkflowHandler) PatchAgentDeployment(c *gin.Context) {
 		}
 	}
 	h.GetAgentDeployment(c)
+}
+
+// updateAgentDeploymentOnLockedConnection starts a fresh GORM statement while
+// retaining the connection that owns the hosted-authority advisory lock. The
+// queries immediately above this write use agent_deployments too; reusing their
+// statement state can make PostgreSQL generate an invalid
+// `UPDATE agent_deployments ... FROM agent_deployments` query.
+func updateAgentDeploymentOnLockedConnection(db *gorm.DB, deployment *models.AgentDeployment, updates map[string]any) error {
+	result := db.Session(&gorm.Session{NewDB: true}).
+		Model(&models.AgentDeployment{}).
+		Where("id = ? AND organization_id = ? AND status <> ?",
+			deployment.ID, deployment.OrganizationID, models.AgentDeploymentRevoked).
+		Updates(updates)
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected != 1 {
+		return errHostedAgentAuthorityEnded
+	}
+	return nil
 }
 
 func (h *WorkflowHandler) DeleteAgentDeployment(c *gin.Context) {
