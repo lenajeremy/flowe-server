@@ -1,10 +1,34 @@
 package handlers
 
 import (
+	"encoding/json"
 	"testing"
 
 	"workflow-ai/server/internal/executor"
 )
+
+func TestAgentPolicyJSONUsesArraysForEmptyCollections(t *testing.T) {
+	t.Parallel()
+
+	policy := AgentCapabilityPolicy{Version: agentCapabilityPolicyVersion, Nodes: []AgentNodeGrant{{
+		NodeID: "github-1", AllowedOperations: []string{"list_issues"},
+	}}}
+	raw, err := json.Marshal(policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(raw), `{"version":1,"nodes":[{"nodeId":"github-1","allowedOperations":["list_issues"],"allowedOverrideFields":[]}]}`; got != want {
+		t.Fatalf("policy JSON = %s, want %s", got, want)
+	}
+
+	raw, err = json.Marshal(AgentCapabilityPolicy{Version: agentCapabilityPolicyVersion})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(raw), `{"version":1,"nodes":[]}`; got != want {
+		t.Fatalf("closed policy JSON = %s, want %s", got, want)
+	}
+}
 
 func githubAgentNode() executor.WorkflowASTNode {
 	return executor.WorkflowASTNode{
