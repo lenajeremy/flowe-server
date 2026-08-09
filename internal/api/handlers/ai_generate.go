@@ -1413,7 +1413,7 @@ func (h *WorkflowHandler) runOpenAIChat(c *gin.Context, flusher http.Flusher, re
 	for round := 0; round < 5; round++ {
 		sendSSE(c.Writer, flusher, "thinking", statusForRound(round))
 
-		body, _ := json.Marshal(map[string]any{
+		payload := map[string]any{
 			"model":  model.ID,
 			"stream": true,
 			// Without include_usage a streamed response carries no token counts
@@ -1421,7 +1421,13 @@ func (h *WorkflowHandler) runOpenAIChat(c *gin.Context, flusher http.Flusher, re
 			"stream_options": map[string]any{"include_usage": true},
 			"messages":       messages,
 			"tools":          openAIToolDefs(),
-		})
+		}
+		// The builder defaults to a frontier model, but a user can pick Gemini
+		// here, and the same thinking-budget rule applies to it.
+		for key, value := range executor.OpenAICompatibleBody(model.ID) {
+			payload[key] = value
+		}
+		body, _ := json.Marshal(payload)
 
 		resp, err := doOpenAIRequest(c, url, apiKey, body)
 		if err != nil {

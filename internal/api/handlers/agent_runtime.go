@@ -61,8 +61,18 @@ type agentRuntimeModel struct {
 
 // prepareAgentRuntimeModel resolves server-owned model credentials before a
 // turn starts. Hosted agents use Fernary's credentials, never a teammate's.
+// prepareAgentAnalysisModel resolves the model that writes a deployment's
+// permission policy. Defaults to the builder-grade model rather than the agent
+// one: see the note at its call site in the permission analyzer.
+func prepareAgentAnalysisModel(modelID string) (agentRuntimeModel, error) {
+	return prepareModel(resolveChatModel(modelID))
+}
+
 func prepareAgentRuntimeModel(modelID string) (agentRuntimeModel, error) {
-	model := resolveAgentModel(modelID)
+	return prepareModel(resolveAgentModel(modelID))
+}
+
+func prepareModel(model chatModelSpec) (agentRuntimeModel, error) {
 	provider := chatProviders[model.Provider]
 	apiKey := os.Getenv(provider.KeyEnv)
 	if apiKey == "" {
@@ -424,9 +434,16 @@ func agentOpenAILoop(ctx context.Context, model chatModelSpec, apiKey, url, syst
 
 	var finalText strings.Builder
 	for round := 0; round < agentMaxToolRounds; round++ {
-		body, _ := json.Marshal(map[string]any{
+		payload := map[string]any{
 			"model": model.ID, "stream": true, "messages": messages, "tools": toolSchemas,
-		})
+		}
+		// Applied here as well as in the executor: this loop builds its own body,
+		// and on a model that thinks from its answer budget the difference is a
+		// turn that costs several times more — or returns nothing at all.
+		for key, value := range executor.OpenAICompatibleBody(model.ID) {
+			payload[key] = value
+		}
+		body, _ := json.Marshal(payload)
 		resp, err := doOpenAIRequestContext(ctx, url, apiKey, body)
 		if err != nil {
 			return finalText.String(), fmt.Errorf("Request failed: %w", err)

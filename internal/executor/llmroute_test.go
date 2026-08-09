@@ -162,3 +162,24 @@ func TestOpenAIRequestsCarryNoProviderSpecificFields(t *testing.T) {
 		t.Errorf("body was rewritten with nothing to add: %s", got)
 	}
 }
+
+// Every handler that assembles its own chat-completions body needs the same
+// provider fields the router applies. The permission analyzer, the agent chat
+// loop and the builder all do, and each was found missing them: on Gemini that
+// means a request that thinks away its budget and returns nothing.
+func TestOpenAICompatibleBodyIsAvailableToHandlers(t *testing.T) {
+	got := OpenAICompatibleBody("gemini-3.5-flash")
+	if got["reasoning_effort"] != "none" {
+		t.Errorf("gemini body = %v, want reasoning_effort none", got)
+	}
+	if fields := OpenAICompatibleBody("gpt-5.5"); len(fields) != 0 {
+		t.Errorf("openai body = %v, want nothing", fields)
+	}
+
+	// A copy, so a caller merging into its payload cannot mutate the table and
+	// change every later request.
+	got["reasoning_effort"] = "tampered"
+	if again := OpenAICompatibleBody("gemini-3.5-flash"); again["reasoning_effort"] != "none" {
+		t.Error("the returned map aliases the route table")
+	}
+}

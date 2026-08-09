@@ -142,3 +142,26 @@ func withRouteBody(body []byte, extra map[string]any) []byte {
 	}
 	return out
 }
+
+// OpenAICompatibleBody returns the provider-specific request fields a model needs,
+// for callers that build their own chat-completions payload instead of going
+// through callOpenAI.
+//
+// The API handlers do exactly that in a few places — the permission analyzer, the
+// agent chat loops — and a Gemini request assembled without these silently comes
+// back empty, because the model spends its whole token budget thinking. Exported
+// so those callers can apply the same fields rather than each rediscovering the
+// failure.
+func OpenAICompatibleBody(model string) map[string]any {
+	id := strings.ToLower(strings.TrimSpace(model))
+	for _, candidate := range llmRoutes {
+		if strings.HasPrefix(id, candidate.prefix) {
+			out := make(map[string]any, len(candidate.body))
+			for key, value := range candidate.body {
+				out[key] = value
+			}
+			return out
+		}
+	}
+	return nil
+}
