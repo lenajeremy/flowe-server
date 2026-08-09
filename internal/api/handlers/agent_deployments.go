@@ -29,7 +29,12 @@ var slackAgentHostRequiredScopes = []string{
 	"app_mentions:read", "chat:write", "chat:write.customize",
 	"channels:read", "channels:history", "groups:read", "groups:history",
 }
-var slackAgentHostRequestedScopes = append(append([]string{}, slackAgentHostRequiredScopes...), "channels:join")
+// users:read.email maps a Fernary member onto their Slack account so the channel
+// picker can be scoped to what that person can already see. Requested but not
+// required: installs that predate it keep working, and offer public channels
+// only until they are reinstalled.
+var slackAgentHostRequestedScopes = append(append([]string{}, slackAgentHostRequiredScopes...),
+	"channels:join", "users:read.email")
 
 type AgentPermissionSummary struct {
 	Goal                    string   `json:"goal,omitempty"`
@@ -1092,6 +1097,60 @@ func (h *WorkflowHandler) DeleteAgentHost(c *gin.Context) {
 	c.Status(http.StatusNoContent)
 }
 
+// slackChannelInventory is what the channel picker gets back: the channels the
+// caller may choose, plus why the list might be shorter than they expect.
+type slackChannelInventory struct {
+	Channels []agentHostSlackChannel `json:"channels"`
+	// Scope is "member" when the list was narrowed to the caller's own Slack
+	// membership, or "public" when their Slack identity could not be resolved and
+	// only public channels are offered.
+	Scope  string `json:"scope"`
+	Notice string `json:"notice,omitempty"`
+}
+
+// slackWorkspaceUserID maps the calling Fernary user onto their Slack account.
+//
+// The host bot is shared org-wide, so its own channel list says nothing about
+// what any individual member is entitled to see. Matching on the account email
+// is the only link between the two identities that exists without asking every
+// member to authorize Slack separately.
+//
+// An empty id is not an error: the member may simply not be in this workspace,
+// their Slack address may differ from their Fernary one, or the install may
+// predate the users:read.email scope. The caller decides what to do about it.
+func (h *WorkflowHandler) slackWorkspaceUserID(c *gin.Context, botToken string) string {
+	var user models.User
+	if h.db.DB.First(&user, "id = ?", auth.UserID(c)).Error != nil {
+		return ""
+	}
+	email := strings.TrimSpace(user.Email)
+	if email == "" {
+		return ""
+	}
+	var lookup struct {
+		User struct {
+			ID string `json:"id"`
+		} `json:"user"`
+	}
+	if err := slackAgentAPIGet(c.Request.Context(), botToken, "users.lookupByEmail",
+		map[string]any{"email": email}, &lookup); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(lookup.User.ID)
+}
+
+// ListAgentHostChannels offers the channels this caller may deploy an agent to.
+//
+// The list is scoped to the caller's own Slack membership, not the bot's. The
+// host bot is connected once for the whole organization and sits in whatever
+// channels the workspace put it in, so listing its channels handed every member
+// — including people outside that Slack workspace entirely — an inventory of
+// private channel names, ids and membership. Deploying stays open to any member;
+// what they can point a deployment at is what they can already see.
+//
+// users.conversations with a user id returns a private channel only when the bot
+// shares membership too, which is the same set a deployment needs anyway: the
+// bot has to be in a channel to post there.
 func (h *WorkflowHandler) ListAgentHostChannels(c *gin.Context) {
 	var installation models.AgentHostInstallation
 	if err := h.db.DB.Where("id = ? AND organization_id = ? AND status = ?",
@@ -1103,8 +1162,27 @@ func (h *WorkflowHandler) ListAgentHostChannels(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "this host does not expose Slack channels"})
 		return
 	}
-	// Membership is transport metadata, not a persistent deployment permission.
-	var channels []agentHostSlackChannel
+
+	inventory := slackChannelInventory{Channels: []agentHostSlackChannel{}, Scope: "member"}
+	slackUserID := h.slackWorkspaceUserID(c, installation.BotToken)
+
+	// Falling back to public channels rather than to everything: an unresolved
+	// identity must never widen what is returned. Installs that predate the
+	// users:read.email scope keep working, with private channels withheld until
+	// the Slack app is reinstalled.
+	method, payload := "users.conversations", map[string]any{
+		"limit": 200, "exclude_archived": true,
+		"types": "public_channel,private_channel", "user": slackUserID,
+	}
+	if slackUserID == "" {
+		inventory.Scope = "public"
+		inventory.Notice = "Showing public channels only — we could not match your account to a Slack user. " +
+			"Private channels appear once your Slack email matches this one and the app has been reinstalled."
+		method, payload = "conversations.list", map[string]any{
+			"limit": 200, "exclude_archived": true, "types": "public_channel",
+		}
+	}
+
 	cursor := ""
 	for page := 0; page < 10; page++ {
 		var response struct {
@@ -1113,23 +1191,20 @@ func (h *WorkflowHandler) ListAgentHostChannels(c *gin.Context) {
 				NextCursor string `json:"next_cursor"`
 			} `json:"response_metadata"`
 		}
-		payload := map[string]any{
-			"limit": 200, "exclude_archived": true, "types": "public_channel,private_channel",
-		}
 		if cursor != "" {
 			payload["cursor"] = cursor
 		}
-		if err := slackAgentAPIGet(c.Request.Context(), installation.BotToken, "conversations.list", payload, &response); err != nil {
+		if err := slackAgentAPIGet(c.Request.Context(), installation.BotToken, method, payload, &response); err != nil {
 			c.JSON(http.StatusBadGateway, gin.H{"error": "could not list Slack channels", "detail": err.Error()})
 			return
 		}
-		channels = append(channels, response.Channels...)
+		inventory.Channels = append(inventory.Channels, response.Channels...)
 		cursor = strings.TrimSpace(response.Metadata.NextCursor)
 		if cursor == "" {
 			break
 		}
 	}
-	c.JSON(http.StatusOK, channels)
+	c.JSON(http.StatusOK, inventory)
 }
 
 // JoinAgentDeploymentSlackChannel lets a deployment manager add the shared bot
