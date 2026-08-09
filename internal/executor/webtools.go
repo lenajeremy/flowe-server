@@ -133,6 +133,10 @@ const (
 	// upstream reader, so unbounded fan-out turns a single research turn into a
 	// burst against it.
 	maxParallelTools = 4
+	// cacheWindow is how many turns hold a cache breakpoint at once. Anthropic
+	// accepts at most four per request, so this must stay well under that — see
+	// the breakpoint comment in callAnthropicWithTools for why it is 2 and not 1.
+	cacheWindow = 2
 )
 
 // wrapUpNotice is appended to the tool results once the loop is close to its
@@ -393,6 +397,10 @@ func callAnthropicWithTools(ctx context.Context, model, system, user string, max
 	tools := anthropicWebTools(keys.Brave != "")
 	cache := newReadCache()
 
+	// marked holds the blocks currently carrying a cache breakpoint, so the
+	// oldest can be cleared once the window is full.
+	marked := make([]map[string]any, 0, cacheWindow+1)
+
 	// Build initial user message
 	var userContent any
 	if len(imgs) > 0 {
@@ -503,19 +511,32 @@ func callAnthropicWithTools(ctx context.Context, model, system, user string, max
 		if i+1 >= maxToolIters-wrapUpAt {
 			resultBlocks = append(resultBlocks, map[string]any{"type": "text", "text": wrapUpNotice})
 		}
-		// One moving cache breakpoint, on the last block of the turn just
+		// Move the cache breakpoint onto the last block of the turn just
 		// appended. Everything ahead of it — tools, system, and every page
 		// already read — is a stable prefix, so the next iteration re-reads it at
 		// cache rates instead of paying full price for the same text again. Page
 		// text is the bulk of a research conversation, which is what makes this
 		// worth doing here.
 		//
-		// A breakpoint looks back at most 20 content blocks for the previous
-		// entry. One iteration adds 2N+2 blocks for N tool calls, so a turn
-		// asking for nine or more tools at once exceeds the window and simply
-		// pays full price — a silent miss, not a failure.
+		// The marker has to be *moved*, not just added: Anthropic accepts at most
+		// four breakpoints per request, so one per retained turn is rejected
+		// outright from the fifth marked turn on — which would lose the entire
+		// conversation, the exact failure the wrap-up above exists to avoid.
+		//
+		// The window is two rather than one because a breakpoint looks back only
+		// 20 content blocks for the previous entry. One iteration adds 2N+2 blocks
+		// for N tool calls, so a turn requesting nine or more tools at once
+		// overshoots the window; keeping the turn before last marked leaves a
+		// nearer read point. Beyond that it degrades to a silent miss, not a
+		// failure.
 		if len(resultBlocks) > 0 {
-			resultBlocks[len(resultBlocks)-1]["cache_control"] = map[string]any{"type": "ephemeral"}
+			newest := resultBlocks[len(resultBlocks)-1]
+			newest["cache_control"] = map[string]any{"type": "ephemeral"}
+			marked = append(marked, newest)
+			for len(marked) > cacheWindow {
+				delete(marked[0], "cache_control")
+				marked = marked[1:]
+			}
 		}
 		messages = append(messages, map[string]any{"role": "user", "content": resultBlocks})
 	}

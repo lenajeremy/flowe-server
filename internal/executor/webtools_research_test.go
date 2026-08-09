@@ -312,6 +312,95 @@ func TestEachTurnMarksACacheBreakpoint(t *testing.T) {
 	}
 }
 
+// countBreakpoints totals cache_control markers everywhere they can legally
+// appear in one request: tool definitions, system blocks, and every message's
+// content blocks. Counting only the newest turn is what let an accumulating
+// marker bug through.
+func countBreakpoints(t *testing.T, body map[string]any) int {
+	t.Helper()
+	marked := func(raw any) int {
+		block, ok := raw.(map[string]any)
+		if !ok {
+			return 0
+		}
+		if _, ok := block["cache_control"]; ok {
+			return 1
+		}
+		return 0
+	}
+
+	count := 0
+	for _, field := range []string{"system", "tools"} {
+		if blocks, ok := body[field].([]any); ok {
+			for _, raw := range blocks {
+				count += marked(raw)
+			}
+		}
+	}
+	msgs, _ := body["messages"].([]any)
+	for _, rawMsg := range msgs {
+		msg, ok := rawMsg.(map[string]any)
+		if !ok {
+			continue
+		}
+		if blocks, ok := msg["content"].([]any); ok {
+			for _, raw := range blocks {
+				count += marked(raw)
+			}
+		}
+	}
+	return count
+}
+
+// Anthropic accepts at most four cache breakpoints per request. Marking each
+// appended turn and leaving the marker there adds one per iteration, so a loop
+// that runs five rounds sends five — and gets the whole request rejected,
+// losing everything it had gathered. The markers have to slide, not accumulate.
+func TestCacheBreakpointsStayUnderTheProviderLimit(t *testing.T) {
+	const anthropicBreakpointLimit = 4
+
+	readers := newReaderStub(0)
+	readers.serve(t)
+	stub := &anthropicStub{}
+	stub.serve(t, "done")
+
+	if _, err := callAnthropicWithTools(context.Background(),
+		"claude-opus-4-8", "system prompt", "research this", 1024, "key", nil, APIKeys{}); err != nil {
+		t.Fatalf("loop returned an error: %v", err)
+	}
+	if stub.count() <= anthropicBreakpointLimit+1 {
+		t.Fatalf("need more than %d iterations to exercise the limit, got %d",
+			anthropicBreakpointLimit+1, stub.count())
+	}
+
+	if cacheWindow > anthropicBreakpointLimit {
+		t.Fatalf("cacheWindow of %d already exceeds the provider limit of %d",
+			cacheWindow, anthropicBreakpointLimit)
+	}
+	for i := range stub.count() {
+		got := countBreakpoints(t, stub.at(i))
+		if got > anthropicBreakpointLimit {
+			t.Errorf("request %d carries %d cache breakpoints; the provider allows %d",
+				i+1, got, anthropicBreakpointLimit)
+		}
+		// Once the window has filled it must hold steady, neither creeping up
+		// (rejection) nor collapsing to nothing (no caching at all).
+		if i >= cacheWindow && got != cacheWindow {
+			t.Errorf("request %d carries %d breakpoints, want the window size %d",
+				i+1, got, cacheWindow)
+		}
+	}
+
+	// Sliding must not mean giving up: the newest turn always carries a
+	// breakpoint, so each iteration still writes a longer prefix than the last.
+	for i := 1; i < stub.count(); i++ {
+		blocks := lastUserBlocks(t, stub.at(i))
+		if _, ok := blocks[len(blocks)-1].(map[string]any)["cache_control"]; !ok {
+			t.Errorf("request %d: newest turn lost its breakpoint, so nothing new is cached", i+1)
+		}
+	}
+}
+
 // Running out of iterations used to return an error and discard everything the
 // loop had paid to gather. It has to spend its last turn writing instead.
 func TestTheCeilingProducesAnAnswerNotAnError(t *testing.T) {
