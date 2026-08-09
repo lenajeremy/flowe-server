@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"workflow-ai/server/internal/telemetry"
@@ -107,9 +108,84 @@ func openAIWebTools(hasSearch bool) []map[string]any {
 	return tools
 }
 
+// Endpoints, as vars so tests can drive the loop against a stub. Same seam the
+// rest of the package already uses (asanaAPIURL, mondayAPIURL).
+var (
+	anthropicToolsURL = "https://api.anthropic.com/v1/messages"
+	openAIToolsURL    = "https://api.openai.com/v1/chat/completions"
+	braveSearchURL    = "https://api.search.brave.com/res/v1/web/search"
+	jinaReadBase      = "https://r.jina.ai/"
+)
+
+// ── Research budget ────────────────────────────────────────────
+
+const (
+	// maxToolIters bounds the loop. Every iteration is another billable model
+	// call, so this is a cost ceiling as much as a safety one. Real research —
+	// search, read several sources, search again on what those turned up, write
+	// it up — routinely needs more than the ten rounds this used to allow.
+	maxToolIters = 16
+	// wrapUpAt is how many iterations before the ceiling the model is told to
+	// stop gathering. Hitting the ceiling with nothing written is the failure
+	// this exists to prevent: the work is paid for and then discarded.
+	wrapUpAt = 3
+	// maxParallelTools caps concurrent tool execution. Reads go through one
+	// upstream reader, so unbounded fan-out turns a single research turn into a
+	// burst against it.
+	maxParallelTools = 4
+	// cacheWindow is how many turns hold a cache breakpoint at once. Anthropic
+	// accepts at most four per request, so this must stay well under that — see
+	// the breakpoint comment in callAnthropicWithTools for why it is 2 and not 1.
+	cacheWindow = 2
+)
+
+// wrapUpNotice is appended to the tool results once the loop is close to its
+// ceiling. It is our own text in our own message, not model or page content.
+const wrapUpNotice = "Note: you are nearly out of research budget. Stop gathering " +
+	"and write your final answer from what you already have."
+
 // ── Tool execution ─────────────────────────────────────────────
 
-func executeTool(ctx context.Context, name string, input json.RawMessage, keys APIKeys) string {
+// readCache memoizes read_url for the life of one tool loop.
+//
+// Research doubles back: two searches on related queries return overlapping
+// links, and the model re-reads a page it looked at three rounds ago. Without
+// this, each re-read pays the fetch latency, another reader call, and the tokens
+// to carry the same 20k characters through the conversation again.
+//
+// A duplicate URL inside a single parallel batch can still be fetched twice —
+// the lock is only held around map access, not across the fetch. That is a
+// deliberate trade: holding it across a 30-second fetch would serialize the
+// batch, and the same model turn asking for one URL twice is not a real case.
+type readCache struct {
+	mu    sync.Mutex
+	pages map[string]string
+}
+
+func newReadCache() *readCache { return &readCache{pages: map[string]string{}} }
+
+func (c *readCache) get(url string) (string, bool) {
+	if c == nil {
+		return "", false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	page, ok := c.pages[url]
+	return page, ok
+}
+
+// put stores a successful read. Failures are never cached — a timeout should
+// not permanently poison a URL for the rest of the run.
+func (c *readCache) put(url, page string) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.pages[url] = page
+}
+
+func executeTool(ctx context.Context, name string, input json.RawMessage, keys APIKeys, cache *readCache) string {
 	switch name {
 	case "web_search":
 		var params struct {
@@ -131,10 +207,14 @@ func executeTool(ctx context.Context, name string, input json.RawMessage, keys A
 		if err := json.Unmarshal(input, &params); err != nil {
 			return "error: invalid tool input"
 		}
+		if page, ok := cache.get(params.URL); ok {
+			return page
+		}
 		result, err := jinaRead(ctx, params.URL, keys.Jina)
 		if err != nil {
 			return "error: " + err.Error()
 		}
+		cache.put(params.URL, result)
 		return result
 
 	case ClockToolName:
@@ -146,6 +226,59 @@ func executeTool(ctx context.Context, name string, input json.RawMessage, keys A
 		return CurrentTime(params.Timezone)
 	}
 	return "error: unknown tool " + name
+}
+
+// toolCall is one requested invocation, in neither provider's wire shape so the
+// two loops can share the runner below.
+type toolCall struct {
+	ID    string
+	Name  string
+	Input json.RawMessage
+}
+
+// runToolBatch executes one turn's tool calls concurrently, returning results in
+// request order.
+//
+// A model that asks for four reads in one turn is telling you they are
+// independent. Running them in sequence made that turn take four times as long
+// as it needed to, against a 30-second per-read timeout.
+func runToolBatch(ctx context.Context, calls []toolCall, keys APIKeys, cache *readCache) []string {
+	results := make([]string, len(calls))
+	if len(calls) < 2 {
+		for i, call := range calls {
+			results[i] = executeTool(ctx, call.Name, call.Input, keys, cache)
+		}
+		return results
+	}
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, maxParallelTools)
+	for i, call := range calls {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			results[i] = executeTool(ctx, call.Name, call.Input, keys, cache)
+		}()
+	}
+	wg.Wait()
+	return results
+}
+
+// anthropicSystem renders the system prompt as blocks with the clock in its own
+// trailing block.
+//
+// The clock carries a Unix second, so glued onto the end of the prompt it makes
+// the whole prefix unique per request and nothing in front of it can ever be
+// reused. Held apart and placed last, the static instructions stay
+// byte-identical between runs. Anthropic rejects an empty text block, so a
+// caller with no system prompt gets the clock alone.
+func anthropicSystem(system string) []map[string]any {
+	blocks := make([]map[string]any, 0, 2)
+	if strings.TrimSpace(system) != "" {
+		blocks = append(blocks, map[string]any{"type": "text", "text": system})
+	}
+	return append(blocks, map[string]any{"type": "text", "text": ClockBlock(true)})
 }
 
 // ── Brave Search ──────────────────────────────────────────────
@@ -165,7 +298,7 @@ func braveSearch(ctx context.Context, query, apiKey string) (string, error) {
 	if apiKey == "" {
 		return "", fmt.Errorf("BRAVE_API_KEY not configured")
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://api.search.brave.com/res/v1/web/search", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, braveSearchURL, nil)
 	if err != nil {
 		return "", err
 	}
@@ -207,7 +340,7 @@ func braveSearch(ctx context.Context, query, apiKey string) (string, error) {
 // ── Jina Reader ───────────────────────────────────────────────
 
 func jinaRead(ctx context.Context, pageURL, apiKey string) (string, error) {
-	jinaURL := "https://r.jina.ai/" + pageURL
+	jinaURL := jinaReadBase + pageURL
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, jinaURL, nil)
 	if err != nil {
 		return "", err
@@ -260,8 +393,13 @@ func callAnthropicWithTools(ctx context.Context, model, system, user string, max
 	ctx, llmDone := telemetry.StartLLM(ctx, "anthropic", model)
 	defer func() { llmDone(len(out), err) }()
 
-	system = WithClockAndTool(system)
+	systemBlocks := anthropicSystem(system)
 	tools := anthropicWebTools(keys.Brave != "")
+	cache := newReadCache()
+
+	// marked holds the blocks currently carrying a cache breakpoint, so the
+	// oldest can be cleared once the window is full.
+	marked := make([]map[string]any, 0, cacheWindow+1)
 
 	// Build initial user message
 	var userContent any
@@ -287,16 +425,24 @@ func callAnthropicWithTools(ctx context.Context, model, system, user string, max
 		{"role": "user", "content": userContent},
 	}
 
-	const maxIter = 10
-	for range maxIter {
-		body, _ := json.Marshal(map[string]any{
+	for i := range maxToolIters {
+		payload := map[string]any{
 			"model":      model,
 			"max_tokens": maxTok,
-			"system":     system,
+			"system":     systemBlocks,
 			"tools":      tools,
 			"messages":   messages,
-		})
-		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://api.anthropic.com/v1/messages", bytes.NewReader(body))
+		}
+		if i == maxToolIters-1 {
+			// Out of budget. The tool definitions have to stay — the history is
+			// full of tool_use blocks that need them to validate — but forbid
+			// another call so this turn has to be the write-up. Without this the
+			// loop fell off the end and returned an error, throwing away every
+			// page it had paid to read.
+			payload["tool_choice"] = map[string]any{"type": "none"}
+		}
+		body, _ := json.Marshal(payload)
+		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, anthropicToolsURL, bytes.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("x-api-key", key)
 		req.Header.Set("anthropic-version", "2023-06-01")
@@ -346,23 +492,58 @@ func callAnthropicWithTools(ctx context.Context, model, system, user string, max
 		}
 		messages = append(messages, map[string]any{"role": "assistant", "content": assistantBlocks})
 
-		// Execute each tool and collect results
-		toolResults := make([]map[string]any, 0)
+		calls := make([]toolCall, 0, len(r.Content))
 		for _, b := range r.Content {
-			if b.Type != "tool_use" {
-				continue
+			if b.Type == "tool_use" {
+				calls = append(calls, toolCall{ID: b.ID, Name: b.Name, Input: b.Input})
 			}
-			result := executeTool(ctx, b.Name, b.Input, keys)
-			toolResults = append(toolResults, map[string]any{
+		}
+		results := runToolBatch(ctx, calls, keys, cache)
+
+		resultBlocks := make([]map[string]any, 0, len(calls)+1)
+		for j, call := range calls {
+			resultBlocks = append(resultBlocks, map[string]any{
 				"type":        "tool_result",
-				"tool_use_id": b.ID,
-				"content":     result,
+				"tool_use_id": call.ID,
+				"content":     results[j],
 			})
 		}
-		messages = append(messages, map[string]any{"role": "user", "content": toolResults})
+		if i+1 >= maxToolIters-wrapUpAt {
+			resultBlocks = append(resultBlocks, map[string]any{"type": "text", "text": wrapUpNotice})
+		}
+		// Move the cache breakpoint onto the last block of the turn just
+		// appended. Everything ahead of it — tools, system, and every page
+		// already read — is a stable prefix, so the next iteration re-reads it at
+		// cache rates instead of paying full price for the same text again. Page
+		// text is the bulk of a research conversation, which is what makes this
+		// worth doing here.
+		//
+		// The marker has to be *moved*, not just added: Anthropic accepts at most
+		// four breakpoints per request, so one per retained turn is rejected
+		// outright from the fifth marked turn on — which would lose the entire
+		// conversation, the exact failure the wrap-up above exists to avoid.
+		//
+		// The window is two rather than one because a breakpoint looks back only
+		// 20 content blocks for the previous entry. One iteration adds 2N+2 blocks
+		// for N tool calls, so a turn requesting nine or more tools at once
+		// overshoots the window; keeping the turn before last marked leaves a
+		// nearer read point. Beyond that it degrades to a silent miss, not a
+		// failure.
+		if len(resultBlocks) > 0 {
+			newest := resultBlocks[len(resultBlocks)-1]
+			newest["cache_control"] = map[string]any{"type": "ephemeral"}
+			marked = append(marked, newest)
+			for len(marked) > cacheWindow {
+				delete(marked[0], "cache_control")
+				marked = marked[1:]
+			}
+		}
+		messages = append(messages, map[string]any{"role": "user", "content": resultBlocks})
 	}
 
-	return "", fmt.Errorf("tool loop exceeded max iterations")
+	// Unreachable while the final iteration forbids tool use: that turn cannot
+	// stop on tool_use, so it always returns above.
+	return "", fmt.Errorf("tool loop ended without a final answer")
 }
 
 // ── OpenAI with tool loop ─────────────────────────────────────
@@ -389,8 +570,8 @@ func callOpenAIWithTools(ctx context.Context, model, system, user string, maxTok
 	ctx, llmDone := telemetry.StartLLM(ctx, "openai", model)
 	defer func() { llmDone(len(out), err) }()
 
-	system = WithClockAndTool(system)
 	tools := openAIWebTools(keys.Brave != "")
+	cache := newReadCache()
 
 	// Build initial user message content
 	var userContent any
@@ -408,22 +589,33 @@ func callOpenAIWithTools(ctx context.Context, model, system, user string, maxTok
 		userContent = user
 	}
 
-	messages := []map[string]any{
-		{"role": "system", "content": system},
-		{"role": "user", "content": userContent},
+	// The clock sits in its own trailing system message so the static prompt in
+	// front of it is a stable prefix. OpenAI-compatible caching is automatic on
+	// the longest common prefix, so a per-second timestamp in the first message
+	// is by itself enough to make every run a cold start.
+	messages := make([]map[string]any, 0, 3)
+	if strings.TrimSpace(system) != "" {
+		messages = append(messages, map[string]any{"role": "system", "content": system})
 	}
+	messages = append(messages,
+		map[string]any{"role": "system", "content": ClockBlock(true)},
+		map[string]any{"role": "user", "content": userContent},
+	)
 
-	const maxIter = 10
-	for range maxIter {
-		body, _ := json.Marshal(map[string]any{
+	for i := range maxToolIters {
+		payload := map[string]any{
 			"model": model,
 			// max_completion_tokens replaced max_tokens; gpt-5.x hard-errors on
 			// the old name (openAIRequest was fixed for this, this path wasn't).
 			"max_completion_tokens": maxTok,
 			"messages":              messages,
 			"tools":                 tools,
-		})
-		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://api.openai.com/v1/chat/completions", bytes.NewReader(body))
+		}
+		if i == maxToolIters-1 {
+			payload["tool_choice"] = "none"
+		}
+		body, _ := json.Marshal(payload)
+		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, openAIToolsURL, bytes.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Authorization", "Bearer "+key)
 
@@ -461,16 +653,28 @@ func callOpenAIWithTools(ctx context.Context, model, system, user string, maxTok
 			"tool_calls": choice.Message.ToolCalls,
 		})
 
-		// Execute each tool and add results
+		calls := make([]toolCall, 0, len(choice.Message.ToolCalls))
 		for _, tc := range choice.Message.ToolCalls {
-			result := executeTool(ctx, tc.Function.Name, json.RawMessage(tc.Function.Arguments), keys)
+			calls = append(calls, toolCall{
+				ID: tc.ID, Name: tc.Function.Name, Input: json.RawMessage(tc.Function.Arguments),
+			})
+		}
+		results := runToolBatch(ctx, calls, keys, cache)
+
+		// One tool message per call, in request order — a provider that sees
+		// results out of order relative to the tool_calls array rejects the turn.
+		for j, call := range calls {
 			messages = append(messages, map[string]any{
 				"role":         "tool",
-				"tool_call_id": tc.ID,
-				"content":      result,
+				"tool_call_id": call.ID,
+				"content":      results[j],
 			})
+		}
+		if i+1 >= maxToolIters-wrapUpAt {
+			messages = append(messages, map[string]any{"role": "user", "content": wrapUpNotice})
 		}
 	}
 
-	return "", fmt.Errorf("tool loop exceeded max iterations")
+	// Unreachable while the final iteration forbids tool use.
+	return "", fmt.Errorf("tool loop ended without a final answer")
 }
