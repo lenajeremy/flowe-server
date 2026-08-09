@@ -129,3 +129,21 @@ func TestSlackAgentStripSelfMentionPreservesMentionedTeammates(t *testing.T) {
 		t.Fatalf("legacy mention fallback = %q, want %q", legacy, got)
 	}
 }
+
+func TestSuccessfulHostedApprovalOutcomeSurvivesForRetry(t *testing.T) {
+	t.Parallel()
+	handler := &WorkflowHandler{}
+	approvalID := "approval-" + strconv.FormatInt(time.Now().UnixNano(), 10)
+	t.Cleanup(func() { handler.forgetHostedApprovalOutcome(context.Background(), approvalID) })
+
+	if err := handler.rememberHostedApprovalOutcome(context.Background(), approvalID, `{"id":"ISSUE-1"}`); err != nil {
+		t.Fatalf("remember outcome: %v", err)
+	}
+	outcome, found, err := handler.recoverHostedApprovalOutcome(context.Background(), approvalID)
+	if err != nil {
+		t.Fatalf("recover outcome: %v", err)
+	}
+	if !found || outcome.Output != `{"id":"ISSUE-1"}` {
+		t.Fatalf("recovered outcome = (%+v, %v)", outcome, found)
+	}
+}

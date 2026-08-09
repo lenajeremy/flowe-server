@@ -27,6 +27,7 @@ import (
 	"workflow-ai/server/internal/telemetry"
 
 	"github.com/gin-gonic/gin"
+	"github.com/redis/go-redis/v9"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
@@ -37,6 +38,7 @@ const (
 	hostedAgentThreadTextCap = 16 << 10
 	hostedAgentMessageCap    = 2000
 	hostedAgentThreadMsgCap  = 40
+	hostedApprovalOutcomeTTL = 24 * time.Hour
 )
 
 var (
@@ -45,7 +47,13 @@ var (
 	hostedWorkerOnce             sync.Once
 	errHostedThreadStale         = errors.New("Slack thread belongs to another agent deployment")
 	errHostedAgentAuthorityEnded = errors.New("the deployment owner is no longer authorized to act for this organization")
+	hostedApprovalOutcomeMemory  sync.Map
 )
+
+type hostedApprovalRecoverableOutcome struct {
+	Output     string    `json:"output"`
+	RecordedAt time.Time `json:"recordedAt"`
+}
 
 type slackAgentEventEnvelope struct {
 	Type      string `json:"type"`
@@ -378,12 +386,28 @@ func (h *WorkflowHandler) withHostedThreadLock(ctx context.Context, key string, 
 	if key == "::" {
 		return errors.New("hosted thread lock key is empty")
 	}
-	return h.db.DB.WithContext(ctx).Connection(func(connection *gorm.DB) error {
+	return withHostedAdvisoryLock(ctx, h.db.DB, key, func(_ *gorm.DB) error {
+		return run()
+	})
+}
+
+func (h *WorkflowHandler) withHostedAuthorityLock(ctx context.Context, organizationID, userID string, run func(*gorm.DB) error) error {
+	if organizationID == "" || userID == "" {
+		return errors.New("hosted authority lock identity is empty")
+	}
+	return withHostedAdvisoryLock(ctx, h.db.DB, "authority:"+organizationID+":"+userID, run)
+}
+
+// withHostedAdvisoryLock holds one connection-scoped PostgreSQL lock for the
+// entire callback. Approval execution and member removal use the same authority
+// key, so revocation cannot commit while an external mutation is still running.
+func withHostedAdvisoryLock(ctx context.Context, db *gorm.DB, key string, run func(*gorm.DB) error) error {
+	return db.WithContext(ctx).Connection(func(connection *gorm.DB) error {
 		if err := connection.Exec("SELECT pg_advisory_lock(hashtextextended(?, 0))", key).Error; err != nil {
 			return err
 		}
 		defer connection.Exec("SELECT pg_advisory_unlock(hashtextextended(?, 0))", key)
-		return run()
+		return run(connection)
 	})
 }
 
@@ -810,8 +834,9 @@ func (h *WorkflowHandler) processSlackAgentApproval(ctx context.Context, payload
 	case models.HostedAgentApprovalExecuting:
 		// Interactions for one thread hold the advisory lock. Seeing executing here
 		// means a prior worker stopped after the claim; it is not a concurrent live
-		// execution. The external outcome cannot safely be guessed or retried.
-		return h.markSlackAgentApprovalOutcomeUnknown(ctx, &approval, &deployment, &host, &thread)
+		// execution. Recover a known successful result from the outcome cache before
+		// treating a crash with no recorded result as genuinely indeterminate.
+		return h.recoverExecutingSlackAgentApproval(ctx, &approval, &deployment, &host, &thread)
 	case models.HostedAgentApprovalOutcomeUnknown:
 		return slackAgentPostText(ctx, host.BotToken, thread.ExternalChannelID, thread.ExternalThreadID,
 			"This action may have completed, but Fernary could not record its outcome. Verify the target system before requesting it again.", deployment.Name)
@@ -896,34 +921,53 @@ func (h *WorkflowHandler) executeSlackAgentApproval(ctx context.Context, approva
 	ctx = telemetry.WithSurface(ctx, telemetry.SurfaceAgent)
 	ctx = telemetry.WithBilling(ctx, billing.BillingContextFor(deployment.OrganizationID, deployment.DeployedByUserID, plan))
 
-	claimed, err := h.claimHostedAgentApproval(approval, deployment)
-	if errors.Is(err, errHostedAgentAuthorityEnded) {
-		h.failHostedApproval(approval, err)
+	var (
+		claimed bool
+		out     string
+		toolErr error
+	)
+	lockErr := h.withHostedAuthorityLock(ctx, deployment.OrganizationID, deployment.DeployedByUserID, func(connection *gorm.DB) error {
+		var claimErr error
+		claimed, claimErr = h.claimHostedAgentApprovalOn(connection, approval, deployment)
+		if claimErr != nil || !claimed {
+			return claimErr
+		}
+		state := map[string]string{}
+		_ = json.Unmarshal(session.State, &state)
+		keys := executor.APIKeys{
+			Anthropic: os.Getenv("ANTHROPIC_API_KEY"), OpenAI: os.Getenv("OPENAI_API_KEY"),
+			Brave: os.Getenv("BRAVE_API_KEY"), Jina: os.Getenv("JINA_API_KEY"),
+		}
+		out, toolErr = executor.ExecuteSingleNode(ctx, *node, authorized.Overrides, state, ast.Edges, keys,
+			"approval-"+approval.ID.String(), deployment.DeployedByUserID, deployment.OrganizationID, nil)
+		if toolErr != nil {
+			h.failHostedApprovalOn(connection, approval, toolErr)
+			return nil
+		}
+		if cacheErr := h.rememberHostedApprovalOutcome(ctx, approval.ID.String(), out); cacheErr != nil {
+			// The in-process copy still covers a transient PostgreSQL error. Log
+			// loss of the cross-replica copy, then attempt the authoritative write.
+			slog.WarnContext(ctx, "could not cache successful hosted approval outcome",
+				"approval_id", approval.ID, "error", cacheErr)
+		}
+		return h.recordHostedAgentApprovalExecutionOn(connection, approval, out)
+	})
+	if errors.Is(lockErr, errHostedAgentAuthorityEnded) {
+		h.failHostedApproval(approval, lockErr)
 		return slackAgentPostText(ctx, host.BotToken, thread.ExternalChannelID, thread.ExternalThreadID,
 			"This deployment can no longer act because its owner is not a current organization member.", deployment.Name)
 	}
-	if err != nil {
-		return err
+	if lockErr != nil {
+		return lockErr
 	}
 	if !claimed {
 		return nil
 	}
-	state := map[string]string{}
-	_ = json.Unmarshal(session.State, &state)
-	keys := executor.APIKeys{
-		Anthropic: os.Getenv("ANTHROPIC_API_KEY"), OpenAI: os.Getenv("OPENAI_API_KEY"),
-		Brave: os.Getenv("BRAVE_API_KEY"), Jina: os.Getenv("JINA_API_KEY"),
-	}
-	out, execErr := executor.ExecuteSingleNode(ctx, *node, authorized.Overrides, state, ast.Edges, keys,
-		"approval-"+approval.ID.String(), deployment.DeployedByUserID, deployment.OrganizationID, nil)
-	if execErr != nil {
-		h.failHostedApproval(approval, execErr)
+	if toolErr != nil {
 		return slackAgentPostText(ctx, host.BotToken, thread.ExternalChannelID, thread.ExternalThreadID,
-			"The approved action failed: "+truncate(execErr.Error(), 1500), deployment.Name)
+			"The approved action failed: "+truncate(toolErr.Error(), 1500), deployment.Name)
 	}
-	if err := h.recordHostedAgentApprovalExecution(approval, out); err != nil {
-		return err
-	}
+	h.forgetHostedApprovalOutcome(ctx, approval.ID.String())
 	if err := h.syncHostedAgentApprovalSession(approval, deployment, node.Data.Label); err != nil {
 		return err
 	}
@@ -946,15 +990,19 @@ func hostedApprovalSnapshot(deployment *models.AgentDeployment, approval *models
 	return executor.WorkflowAST{}, nil, errors.New("approved node is absent from the deployment snapshot")
 }
 
-// claimHostedAgentApproval is the authorization linearization point. It locks
-// and reloads the live deployment and its deployer's membership in the same
-// transaction that changes pending -> executing. Member removal revokes the
-// deployment before deleting that membership, so either the claim wins while
-// authority is live or removal wins and this call cannot execute.
+// claimHostedAgentApproval reloads the live deployment and membership in the
+// same transaction that changes pending -> executing. Production execution
+// calls the On variant while holding the deployer's authority advisory lock
+// through the external call and outcome persistence; member removal takes the
+// same lock before revoking authority.
 func (h *WorkflowHandler) claimHostedAgentApproval(approval *models.HostedAgentApproval, deployment *models.AgentDeployment) (bool, error) {
+	return h.claimHostedAgentApprovalOn(h.db.DB, approval, deployment)
+}
+
+func (h *WorkflowHandler) claimHostedAgentApprovalOn(db *gorm.DB, approval *models.HostedAgentApproval, deployment *models.AgentDeployment) (bool, error) {
 	claimed := false
 	now := time.Now().UTC()
-	err := h.db.DB.Transaction(func(tx *gorm.DB) error {
+	err := db.Transaction(func(tx *gorm.DB) error {
 		var live models.AgentDeployment
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
 			Where("id = ? AND organization_id = ? AND deployed_by_user_id = ? AND version = ? AND status = ?",
@@ -995,9 +1043,13 @@ func (h *WorkflowHandler) claimHostedAgentApproval(approval *models.HostedAgentA
 // session or Slack write. Once this succeeds, every later step is retryable and
 // must use the stored result instead of calling the tool again.
 func (h *WorkflowHandler) recordHostedAgentApprovalExecution(approval *models.HostedAgentApproval, output string) error {
+	return h.recordHostedAgentApprovalExecutionOn(h.db.DB, approval, output)
+}
+
+func (h *WorkflowHandler) recordHostedAgentApprovalExecutionOn(db *gorm.DB, approval *models.HostedAgentApproval, output string) error {
 	now := time.Now().UTC()
 	stored := truncate(output, agentResultCap)
-	result := h.db.DB.Model(&models.HostedAgentApproval{}).
+	result := db.Model(&models.HostedAgentApproval{}).
 		Where("id = ? AND status = ?", approval.ID, models.HostedAgentApprovalExecuting).
 		Updates(map[string]any{
 			"status":                       models.HostedAgentApprovalExecuted,
@@ -1017,6 +1069,68 @@ func (h *WorkflowHandler) recordHostedAgentApprovalExecution(approval *models.Ho
 	approval.ExecutionResult = stored
 	approval.ExecutionResultRecordedAt = &now
 	return nil
+}
+
+func hostedApprovalOutcomeKey(approvalID string) string {
+	return "hosted-agent:approval-outcome:" + approvalID
+}
+
+// rememberHostedApprovalOutcome keeps the known successful result outside
+// PostgreSQL before attempting the authoritative approval update. Memory covers
+// a transient write failure in this process; Redis lets another replica or a
+// restarted worker finish persistence without replaying the external mutation.
+func (h *WorkflowHandler) rememberHostedApprovalOutcome(ctx context.Context, approvalID, output string) error {
+	outcome := hostedApprovalRecoverableOutcome{
+		Output: truncate(output, agentResultCap), RecordedAt: time.Now().UTC(),
+	}
+	hostedApprovalOutcomeMemory.Store(approvalID, outcome)
+	if h.redis == nil {
+		return nil
+	}
+	raw, _ := json.Marshal(outcome)
+	cacheCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	return h.redis.Set(cacheCtx, hostedApprovalOutcomeKey(approvalID), raw, hostedApprovalOutcomeTTL).Err()
+}
+
+func (h *WorkflowHandler) recoverHostedApprovalOutcome(ctx context.Context, approvalID string) (hostedApprovalRecoverableOutcome, bool, error) {
+	if cached, ok := hostedApprovalOutcomeMemory.Load(approvalID); ok {
+		if outcome, valid := cached.(hostedApprovalRecoverableOutcome); valid {
+			return outcome, true, nil
+		}
+		hostedApprovalOutcomeMemory.Delete(approvalID)
+	}
+	if h.redis == nil {
+		return hostedApprovalRecoverableOutcome{}, false, nil
+	}
+	cacheCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	raw, err := h.redis.Get(cacheCtx, hostedApprovalOutcomeKey(approvalID)).Bytes()
+	if errors.Is(err, redis.Nil) {
+		return hostedApprovalRecoverableOutcome{}, false, nil
+	}
+	if err != nil {
+		return hostedApprovalRecoverableOutcome{}, false, err
+	}
+	var outcome hostedApprovalRecoverableOutcome
+	if err := json.Unmarshal(raw, &outcome); err != nil {
+		return hostedApprovalRecoverableOutcome{}, false, err
+	}
+	hostedApprovalOutcomeMemory.Store(approvalID, outcome)
+	return outcome, true, nil
+}
+
+func (h *WorkflowHandler) forgetHostedApprovalOutcome(ctx context.Context, approvalID string) {
+	hostedApprovalOutcomeMemory.Delete(approvalID)
+	if h.redis == nil {
+		return
+	}
+	cacheCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	if err := h.redis.Del(cacheCtx, hostedApprovalOutcomeKey(approvalID)).Err(); err != nil {
+		slog.WarnContext(ctx, "could not clear recovered hosted approval outcome",
+			"approval_id", approvalID, "error", err)
+	}
 }
 
 // syncHostedAgentApprovalSession merges an already-durable execution into the
@@ -1105,6 +1219,23 @@ func (h *WorkflowHandler) replaySlackAgentApprovalOutcome(ctx context.Context, a
 	return postSlackAgentApprovalSuccess(ctx, host, thread, deployment, approval)
 }
 
+func (h *WorkflowHandler) recoverExecutingSlackAgentApproval(ctx context.Context, approval *models.HostedAgentApproval, deployment *models.AgentDeployment, host *models.AgentHostInstallation, thread *models.HostedAgentThread) error {
+	outcome, found, err := h.recoverHostedApprovalOutcome(ctx, approval.ID.String())
+	if err != nil {
+		// A cache outage is not evidence that the external outcome is unknown.
+		// Leave the approval executing so a later delivery can recover it.
+		return fmt.Errorf("recover successful hosted approval outcome: %w", err)
+	}
+	if !found {
+		return h.markSlackAgentApprovalOutcomeUnknown(ctx, approval, deployment, host, thread)
+	}
+	if err := h.recordHostedAgentApprovalExecution(approval, outcome.Output); err != nil {
+		return err
+	}
+	h.forgetHostedApprovalOutcome(ctx, approval.ID.String())
+	return h.replaySlackAgentApprovalOutcome(ctx, approval, deployment, host, thread)
+}
+
 func (h *WorkflowHandler) markSlackAgentApprovalOutcomeUnknown(ctx context.Context, approval *models.HostedAgentApproval, deployment *models.AgentDeployment, host *models.AgentHostInstallation, thread *models.HostedAgentThread) error {
 	message := "execution was interrupted after it started; the external action may have completed and must not be retried automatically"
 	result := h.db.DB.Model(&models.HostedAgentApproval{}).
@@ -1132,8 +1263,12 @@ func postSlackAgentApprovalSuccess(ctx context.Context, host *models.AgentHostIn
 }
 
 func (h *WorkflowHandler) failHostedApproval(approval *models.HostedAgentApproval, err error) {
+	h.failHostedApprovalOn(h.db.DB, approval, err)
+}
+
+func (h *WorkflowHandler) failHostedApprovalOn(db *gorm.DB, approval *models.HostedAgentApproval, err error) {
 	now := time.Now().UTC()
-	h.db.DB.Model(&models.HostedAgentApproval{}).
+	db.Model(&models.HostedAgentApproval{}).
 		Where("id = ? AND status IN ?", approval.ID, []models.HostedAgentApprovalStatus{
 			models.HostedAgentApprovalPending, models.HostedAgentApprovalExecuting,
 		}).Updates(map[string]any{

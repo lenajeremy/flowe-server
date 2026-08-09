@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"os"
@@ -145,6 +146,84 @@ func TestHostedApprovalClaimRechecksDeployerMembership(t *testing.T) {
 	claimed, err = handler.claimHostedAgentApproval(&approval, &deployment)
 	if err != nil || !claimed {
 		t.Fatalf("claim with membership = (%v, %v), want success", claimed, err)
+	}
+}
+
+func TestHostedAuthorityLockBlocksRemovalUntilExecutionFinishes(t *testing.T) {
+	db := hostedAgentSafetyDB(t)
+	orgID, userID := uuid.NewString(), uuid.NewString()
+	cleanupHostedAgentSafety(t, db, orgID)
+	if err := db.Create(&models.OrgMember{
+		OrganizationID: orgID, UserID: userID, Role: models.RoleMember,
+	}).Error; err != nil {
+		t.Fatalf("create membership: %v", err)
+	}
+	deployment := safetyDeployment(orgID, userID)
+	if err := db.Create(&deployment).Error; err != nil {
+		t.Fatalf("create deployment: %v", err)
+	}
+	approval := models.HostedAgentApproval{
+		OrganizationID: orgID, DeploymentID: deployment.ID.String(), DeploymentVersion: deployment.Version,
+		ThreadID: uuid.NewString(), ChatSessionID: uuid.NewString(), RequesterExternalID: "U123",
+		SourceDeliveryID: uuid.NewString(), NodeID: "node-1", Operation: "create_issue", Reason: "requested",
+		EffectiveOverrides: models.JSONB(`{}`), EffectiveConfigHash: "hash", DisplayDetails: models.JSONB(`{}`),
+		Status: models.HostedAgentApprovalPending, ExpiresAt: time.Now().Add(time.Minute),
+	}
+	if err := db.Create(&approval).Error; err != nil {
+		t.Fatalf("create approval: %v", err)
+	}
+	handler := &WorkflowHandler{db: &database.DBClient{DB: db}}
+	claimed := make(chan struct{})
+	releaseExecution := make(chan struct{})
+	executionDone := make(chan error, 1)
+	go func() {
+		executionDone <- handler.withHostedAuthorityLock(context.Background(), orgID, userID, func(connection *gorm.DB) error {
+			ok, err := handler.claimHostedAgentApprovalOn(connection, &approval, &deployment)
+			if err != nil {
+				return err
+			}
+			if !ok {
+				return errors.New("approval was not claimed")
+			}
+			close(claimed)
+			<-releaseExecution
+			return nil
+		})
+	}()
+	select {
+	case <-claimed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("approval did not acquire authority lock")
+	}
+
+	removalDone := make(chan error, 1)
+	go func() {
+		removalDone <- handler.withHostedAuthorityLock(context.Background(), orgID, userID, func(connection *gorm.DB) error {
+			return removeMemberAndRevokeAgentAuthority(connection, orgID, userID)
+		})
+	}()
+	select {
+	case err := <-removalDone:
+		t.Fatalf("member removal completed during execution: %v", err)
+	case <-time.After(150 * time.Millisecond):
+		// Expected: removal is waiting on the authority lock.
+	}
+	close(releaseExecution)
+	if err := <-executionDone; err != nil {
+		t.Fatalf("approval execution lock: %v", err)
+	}
+	select {
+	case err := <-removalDone:
+		if err != nil {
+			t.Fatalf("remove member after execution: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("member removal did not resume after execution")
+	}
+	var memberCount int64
+	db.Model(&models.OrgMember{}).Where("organization_id = ? AND user_id = ?", orgID, userID).Count(&memberCount)
+	if memberCount != 0 {
+		t.Fatalf("membership remains after serialized removal: %d", memberCount)
 	}
 }
 

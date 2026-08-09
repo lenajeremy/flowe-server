@@ -268,11 +268,14 @@ func (h *WorkflowHandler) RemoveMember(c *gin.Context) {
 		c.JSON(http.StatusForbidden, gin.H{"error": "only owners and admins can remove people"})
 		return
 	}
-	// A hosted agent delegates its deployer's Fernary identity. Revocation and
-	// membership removal therefore form one authorization change: neither may
-	// commit without the other. Revoke the deployments first so approval claims
-	// that lock the same live deployment serialize ahead of the membership delete.
-	err := removeMemberAndRevokeAgentAuthority(h.db.DB, orgID, target)
+	// A hosted agent delegates its deployer's Fernary identity. The cross-replica
+	// authority lock is held by approved external mutations from claim through
+	// outcome persistence, so removal either revokes first or waits for the
+	// already-authorized operation to finish. Revocation and membership deletion
+	// then commit as one database transaction.
+	err := h.withHostedAuthorityLock(c.Request.Context(), orgID, target, func(connection *gorm.DB) error {
+		return removeMemberAndRevokeAgentAuthority(connection, orgID, target)
+	})
 	if err != nil {
 		if errors.Is(err, tenancy.ErrNotPermitted) {
 			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
