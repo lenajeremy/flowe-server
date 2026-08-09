@@ -3,6 +3,7 @@ package handlers
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"crypto/tls"
 	"encoding/json"
 	"errors"
@@ -1469,9 +1470,18 @@ func statusForRound(round int) string {
 	}
 }
 
-// consumeStream reads the Anthropic SSE stream, sends thinking/text events to
-// the client, and returns the stop_reason + full content blocks array.
+type streamEmitter func(eventType, data string)
+
+// consumeStream is the HTTP/SSE adapter used by the builder chat.
 func consumeStream(c *gin.Context, resp *http.Response, flusher http.Flusher, model string) (string, []any, error) {
+	return consumeAnthropicStream(c.Request.Context(), resp, model, func(eventType, data string) {
+		sendSSE(c.Writer, flusher, eventType, data)
+	})
+}
+
+// consumeAnthropicStream reads the provider stream without depending on Gin
+// or SSE. Callers decide how streamed thinking/text events are delivered.
+func consumeAnthropicStream(ctx context.Context, resp *http.Response, model string, emit streamEmitter) (string, []any, error) {
 	if resp.StatusCode != http.StatusOK {
 		raw, _ := io.ReadAll(resp.Body)
 		return "", nil, fmt.Errorf("anthropic %d: %s", resp.StatusCode, truncate(string(raw), 500))
@@ -1489,7 +1499,7 @@ func consumeStream(c *gin.Context, resp *http.Response, flusher http.Flusher, mo
 	)
 	// Recorded on the way out so a stream that errors mid-flight still bills for
 	// what it consumed.
-	defer func() { telemetry.LLMTokens(c.Request.Context(), "anthropic", model, usage) }()
+	defer func() { telemetry.LLMTokens(ctx, "anthropic", model, usage) }()
 
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -1545,10 +1555,14 @@ func consumeStream(c *gin.Context, resp *http.Response, flusher http.Flusher, mo
 			if event.Delta != nil && currentBlock != nil {
 				switch event.Delta.Type {
 				case "thinking_delta":
-					sendSSE(c.Writer, flusher, "thinking", event.Delta.Thinking)
+					if emit != nil {
+						emit("thinking", event.Delta.Thinking)
+					}
 					currentBlock["thinking"] = currentBlock["thinking"].(string) + event.Delta.Thinking
 				case "text_delta":
-					sendSSE(c.Writer, flusher, "text", event.Delta.Text)
+					if emit != nil {
+						emit("text", event.Delta.Text)
+					}
 					currentBlock["text"] = currentBlock["text"].(string) + event.Delta.Text
 				case "input_json_delta":
 					toolInputBuf.WriteString(event.Delta.PartialJSON)
@@ -1586,10 +1600,16 @@ func consumeStream(c *gin.Context, resp *http.Response, flusher http.Flusher, mo
 	return stopReason, contentBlocks, nil
 }
 
-// consumeOpenAIStream reads an OpenAI-compatible SSE stream, forwards text
-// (and reasoning, when the provider exposes it) to the client, and returns
-// the accumulated assistant text plus any tool calls.
+// consumeOpenAIStream is the HTTP/SSE adapter used by the builder chat.
 func consumeOpenAIStream(c *gin.Context, resp *http.Response, flusher http.Flusher, provider, model string) (string, []map[string]any, error) {
+	return consumeOpenAIProviderStream(c.Request.Context(), resp, provider, model, func(eventType, data string) {
+		sendSSE(c.Writer, flusher, eventType, data)
+	})
+}
+
+// consumeOpenAIProviderStream reads an OpenAI-compatible provider stream
+// without depending on Gin or SSE.
+func consumeOpenAIProviderStream(ctx context.Context, resp *http.Response, provider, model string, emit streamEmitter) (string, []map[string]any, error) {
 	if resp.StatusCode != http.StatusOK {
 		raw, _ := io.ReadAll(resp.Body)
 		return "", nil, fmt.Errorf("provider %d: %s", resp.StatusCode, truncate(string(raw), 500))
@@ -1604,7 +1624,7 @@ func consumeOpenAIStream(c *gin.Context, resp *http.Response, flusher http.Flush
 		byIndex = map[int]map[string]any{}
 		usage   telemetry.Usage
 	)
-	defer func() { telemetry.LLMTokens(c.Request.Context(), provider, model, usage) }()
+	defer func() { telemetry.LLMTokens(ctx, provider, model, usage) }()
 
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -1635,10 +1655,14 @@ func consumeOpenAIStream(c *gin.Context, resp *http.Response, flusher http.Flush
 		delta := chunk.Choices[0].Delta
 
 		if delta.Reasoning != "" {
-			sendSSE(c.Writer, flusher, "thinking", delta.Reasoning)
+			if emit != nil {
+				emit("thinking", delta.Reasoning)
+			}
 		}
 		if delta.Content != "" {
-			sendSSE(c.Writer, flusher, "text", delta.Content)
+			if emit != nil {
+				emit("text", delta.Content)
+			}
 			content += delta.Content
 		}
 		for _, tc := range delta.ToolCalls {
@@ -1690,7 +1714,11 @@ func consumeOpenAIStream(c *gin.Context, resp *http.Response, flusher http.Flush
 }
 
 func doOpenAIRequest(c *gin.Context, url, apiKey string, body []byte) (*http.Response, error) {
-	req, err := http.NewRequestWithContext(c.Request.Context(), http.MethodPost, url, bytes.NewReader(body))
+	return doOpenAIRequestContext(c.Request.Context(), url, apiKey, body)
+}
+
+func doOpenAIRequestContext(ctx context.Context, url, apiKey string, body []byte) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
 	}
@@ -1705,7 +1733,11 @@ func doOpenAIRequest(c *gin.Context, url, apiKey string, body []byte) (*http.Res
 }
 
 func doAnthropicRequest(c *gin.Context, apiKey string, body []byte) (*http.Response, error) {
-	req, err := http.NewRequestWithContext(c.Request.Context(), http.MethodPost,
+	return doAnthropicRequestContext(c.Request.Context(), apiKey, body)
+}
+
+func doAnthropicRequestContext(ctx context.Context, apiKey string, body []byte) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
 		"https://api.anthropic.com/v1/messages", bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)

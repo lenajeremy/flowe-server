@@ -112,3 +112,65 @@ func TestAgentChatKnowsAppTriggersButCannotCallThem(t *testing.T) {
 		}
 	}
 }
+
+func TestAgentToolDescriptionNeverIncludesSavedSecrets(t *testing.T) {
+	t.Parallel()
+
+	maxTokens := 250
+	ast := executor.WorkflowAST{
+		Nodes: []executor.WorkflowASTNode{{
+			ID: "http-1",
+			Data: executor.FlowNodeData{
+				NodeType:           executor.NodeTypeHTTPRequest,
+				Label:              "Internal API",
+				URL:                "https://example.test/projects",
+				MaxTokens:          &maxTokens,
+				IntegrationToken:   "oauth-secret",
+				RequestHeaders:     `{"Authorization":"Bearer header-secret"}`,
+				RequestBody:        `{"password":"body-secret"}`,
+				TypeformSecret:     "webhook-secret",
+				NetlifyEnvValue:    "environment-secret",
+				NetlifyEnvVarsJson: `[{"key":"SECRET","values":[{"value":"nested-secret"}]}]`,
+				SupabaseAuthConfig: `{"smtp_password":"auth-secret"}`,
+				SupabaseDbPass:     "database-secret",
+				SupabaseSecrets:    `{"SERVICE_KEY":"service-secret"}`,
+				GumroadLicenseKey:  "license-secret",
+			},
+		}},
+	}
+
+	tools := buildAgentTools(ast)
+	if len(tools) != 1 {
+		t.Fatalf("buildAgentTools returned %d tools, want 1", len(tools))
+	}
+	description, _ := tools[0].Schema["description"].(string)
+	for _, secret := range []string{
+		"oauth-secret", "header-secret", "webhook-secret", "environment-secret",
+		"nested-secret", "auth-secret", "database-secret", "service-secret", "license-secret", "body-secret",
+	} {
+		if strings.Contains(description, secret) {
+			t.Errorf("tool description leaked %q: %s", secret, description)
+		}
+	}
+	for _, safeDefault := range []string{"https://example.test/projects", `"maxTokens":250`} {
+		if !strings.Contains(description, safeDefault) {
+			t.Errorf("tool description lost safe default %q: %s", safeDefault, description)
+		}
+	}
+}
+
+func TestBoundedAgentHistoryKeepsRecentMessagesAndCapsText(t *testing.T) {
+	t.Parallel()
+	history := []agentStoredMessage{
+		{Role: "user", Content: "old"},
+		{Role: "assistant", Content: "middle"},
+		{Role: "user", Content: "123456789"},
+	}
+	bounded := boundedAgentHistory(history, 2, 5)
+	if len(bounded) != 2 || bounded[0].Content != "middl" || bounded[1].Content != "12345" {
+		t.Fatalf("bounded history = %#v", bounded)
+	}
+	if history[1].Content != "middle" {
+		t.Fatal("boundedAgentHistory mutated the caller's slice")
+	}
+}

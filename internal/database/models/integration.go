@@ -41,6 +41,10 @@ type IntegrationConnection struct {
 	WorkspaceName   string     `json:"workspace_name"`
 	WorkspaceID     string     `json:"workspace_id"`
 	Scope           string     `json:"scope"`
+	// BotUserID is transient OAuth exchange metadata used to bind a Slack host
+	// installation to the exact mention that should be removed from prompts.
+	// The durable copy lives on AgentHostInstallation.
+	BotUserID string `json:"-" gorm:"-"`
 }
 
 // BeforeSave encrypts tokens on the way to the database. Encrypt is idempotent

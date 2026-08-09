@@ -237,6 +237,7 @@ func exchangeSlackCode(code string) (*models.IntegrationConnection, error) {
 		Error       string `json:"error"`
 		AccessToken string `json:"access_token"` // bot token (xoxb-…)
 		Scope       string `json:"scope"`
+		BotUserID   string `json:"bot_user_id"`
 		Team        struct {
 			ID   string `json:"id"`
 			Name string `json:"name"`
@@ -256,6 +257,7 @@ func exchangeSlackCode(code string) (*models.IntegrationConnection, error) {
 		AccessToken:     tok.AccessToken,
 		UserAccessToken: tok.AuthedUser.AccessToken,
 		Scope:           tok.Scope,
+		BotUserID:       tok.BotUserID,
 		WorkspaceName:   tok.Team.Name,
 		WorkspaceID:     tok.Team.ID,
 	}, nil

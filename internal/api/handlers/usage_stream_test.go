@@ -108,6 +108,33 @@ func TestOpenAIStreamUsageSurvivesTheChoicelessTerminalChunk(t *testing.T) {
 	}
 }
 
+func TestOpenAIProviderStreamEmitsWithoutGin(t *testing.T) {
+	gotUsage := captureUsage(t)
+	stream := strings.Join([]string{
+		`data: {"choices":[{"delta":{"reasoning_content":"checking","content":"hello"},"finish_reason":"stop"}]}`,
+		`data: {"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12,"prompt_tokens_details":{"cached_tokens":0}}}`,
+		`data: [DONE]`,
+	}, "\n") + "\n"
+	resp := &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(stream))}
+
+	var events []string
+	content, _, err := consumeOpenAIProviderStream(context.Background(), resp, "openai", "gpt-test", func(eventType, data string) {
+		events = append(events, eventType+":"+data)
+	})
+	if err != nil {
+		t.Fatalf("consumeOpenAIProviderStream: %v", err)
+	}
+	if content != "hello" {
+		t.Fatalf("content = %q, want hello", content)
+	}
+	if strings.Join(events, "|") != "thinking:checking|text:hello" {
+		t.Fatalf("events = %#v", events)
+	}
+	if len(*gotUsage) != 1 {
+		t.Fatalf("usage records = %d, want 1", len(*gotUsage))
+	}
+}
+
 func TestStreamThatReportsNoUsageIsFlaggedNotSilent(t *testing.T) {
 	got := captureUsage(t)
 

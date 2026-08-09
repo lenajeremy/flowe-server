@@ -20,6 +20,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
+	"gorm.io/gorm"
 )
 
 type WorkflowHandler struct {
@@ -338,8 +339,24 @@ func (h *WorkflowHandler) Delete(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to delete workflow triggers"})
 		return
 	}
-	if err := h.orgScope(c).
-		Delete(&models.Workflow{}, "id = ?", id).Error; err != nil {
+	if err := h.db.DB.Transaction(func(tx *gorm.DB) error {
+		deploymentIDs := tx.Model(&models.AgentDeployment{}).
+			Select("id").Where("organization_id = ? AND workflow_id = ?", currentOrgID(c), id)
+		if err := tx.Model(&models.AgentDeploymentTarget{}).
+			Where("deployment_id IN (?)", deploymentIDs).Update("enabled", false).Error; err != nil {
+			return err
+		}
+		if err := tx.Where("deployment_id IN (?)", deploymentIDs).Delete(&models.AgentDeploymentTarget{}).Error; err != nil {
+			return err
+		}
+		if err := tx.Model(&models.AgentDeployment{}).
+			Where("organization_id = ? AND workflow_id = ?", currentOrgID(c), id).
+			Update("status", models.AgentDeploymentRevoked).Error; err != nil {
+			return err
+		}
+		return tx.Where("organization_id = ? AND id = ?", currentOrgID(c), id).
+			Delete(&models.Workflow{}).Error
+	}); err != nil {
 		slog.Error("failed to delete workflow", "id", id, "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to delete workflow"})
 		return

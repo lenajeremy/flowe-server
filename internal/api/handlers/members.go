@@ -276,6 +276,16 @@ func (h *WorkflowHandler) RemoveMember(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
 		return
 	}
+	// Hosted agents act as their deployer. Once that person no longer belongs to
+	// the organization, their delegated authority ends immediately; an owner can
+	// redeploy the same snapshot under a current member instead of inheriting it
+	// silently.
+	if err := h.db.DB.Model(&models.AgentDeployment{}).
+		Where("organization_id = ? AND deployed_by_user_id = ? AND status = ?", orgID, target, models.AgentDeploymentActive).
+		Update("status", models.AgentDeploymentPaused).Error; err != nil {
+		slog.ErrorContext(c.Request.Context(), "could not pause removed member's agent deployments",
+			"org_id", orgID, "user_id", target, "error", err)
+	}
 	slog.InfoContext(c.Request.Context(), "org member removed",
 		"org_id", orgID, "removed_by", me, "self", target == me)
 	c.JSON(http.StatusOK, gin.H{"removed": true})
