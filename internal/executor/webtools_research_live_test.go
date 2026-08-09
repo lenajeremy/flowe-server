@@ -184,11 +184,15 @@ func TestLiveOpenAIResearchLoopIsAccepted(t *testing.T) {
 	if model == "" {
 		model = "gpt-4o"
 	}
-	out, err := callOpenAIWithTools(context.Background(), model,
+	route, err := routeForModel(model, keys)
+	if err != nil {
+		t.Fatalf("route %s: %v", model, err)
+	}
+	out, err := callOpenAIWithTools(context.Background(), route, model,
 		"You are a research assistant. Cite the URLs you read.",
 		"Find the current stable version of the Go programming language. "+
 			"Search, then read two separate sources to confirm it, then answer in one sentence.",
-		2048, keys.OpenAI, nil, keys)
+		2048, nil, keys)
 	if err != nil {
 		t.Fatalf("live research loop failed: %v", err)
 	}

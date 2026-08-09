@@ -250,7 +250,7 @@ func (h *WorkflowHandler) CreateAgentDeployment(c *gin.Context) {
 		"analysisId": analysisRecord.ID.String(), "goal": analysisRecord.Goal,
 		"summary": analysisRecord.Summary, "warnings": analysisWarnings, "source": "ai",
 	})
-	modelID := resolveChatModel(request.ModelID).ID
+	modelID := resolveAgentModel(request.ModelID).ID
 	deployment := models.AgentDeployment{
 		OrganizationID: currentOrgID(c), WorkflowID: workflow.ID.String(),
 		DeployedByUserID: auth.UserID(c), HostInstallationID: installation.ID.String(),

@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"os"
 	"time"
 
 	"workflow-ai/server/internal/billing"
@@ -99,12 +98,7 @@ func (h *WorkflowHandler) executeRun(ctx context.Context, p *pendingRun) models.
 	defer h.bill.Finish(p.res)
 
 	runID := p.RunID()
-	keys := executor.APIKeys{
-		Anthropic: os.Getenv("ANTHROPIC_API_KEY"),
-		OpenAI:    os.Getenv("OPENAI_API_KEY"),
-		Brave:     os.Getenv("BRAVE_API_KEY"),
-		Jina:      os.Getenv("JINA_API_KEY"),
-	}
+	keys := executor.KeysFromEnv()
 
 	// Tell any open canvas for this workflow that a run started, so it can attach
 	// its event stream before the first node finishes.

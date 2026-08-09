@@ -8,7 +8,6 @@ import (
 	"os"
 	"strings"
 
-	"workflow-ai/server/config"
 	"workflow-ai/server/internal/database/models"
 	"workflow-ai/server/internal/executor"
 )
@@ -63,7 +62,7 @@ type agentRuntimeModel struct {
 // prepareAgentRuntimeModel resolves server-owned model credentials before a
 // turn starts. Hosted agents use Fernary's credentials, never a teammate's.
 func prepareAgentRuntimeModel(modelID string) (agentRuntimeModel, error) {
-	model := resolveChatModel(modelID)
+	model := resolveAgentModel(modelID)
 	provider := chatProviders[model.Provider]
 	apiKey := os.Getenv(provider.KeyEnv)
 	if apiKey == "" {
@@ -120,12 +119,7 @@ func (h *WorkflowHandler) RunAgentTurn(ctx context.Context, input AgentTurnInput
 
 	tools := buildAgentToolsWithPolicy(input.Workflow, input.Policy)
 	runID := "chat-" + input.Session.ID.String()
-	keys := executor.APIKeys{
-		Anthropic: config.GetEnv("ANTHROPIC_API_KEY"),
-		OpenAI:    config.GetEnv("OPENAI_API_KEY"),
-		Brave:     config.GetEnv("BRAVE_API_KEY"),
-		Jina:      config.GetEnv("JINA_API_KEY"),
-	}
+	keys := executor.KeysFromEnv()
 
 	var callRecords []agentToolCallRecord
 	execTool := func(name string, rawInput any) agentToolExecution {

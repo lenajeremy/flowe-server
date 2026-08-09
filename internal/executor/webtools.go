@@ -117,6 +117,17 @@ var (
 	jinaReadBase      = "https://r.jina.ai/"
 )
 
+// toolLoopURL is the endpoint for one tool-loop call.
+//
+// openAIToolsURL stays authoritative for OpenAI itself so the existing stub-based
+// tests keep working; other providers use the route resolved from the model id.
+func toolLoopURL(route llmRoute) string {
+	if route.URL == openAIChatCompletionsURL {
+		return openAIToolsURL
+	}
+	return route.URL
+}
+
 // ── Research budget ────────────────────────────────────────────
 
 const (
@@ -566,8 +577,8 @@ type openAIToolResp struct {
 	} `json:"choices"`
 }
 
-func callOpenAIWithTools(ctx context.Context, model, system, user string, maxTok int, key string, imgs []imageRef, keys APIKeys) (out string, err error) {
-	ctx, llmDone := telemetry.StartLLM(ctx, "openai", model)
+func callOpenAIWithTools(ctx context.Context, route llmRoute, model, system, user string, maxTok int, imgs []imageRef, keys APIKeys) (out string, err error) {
+	ctx, llmDone := telemetry.StartLLM(ctx, route.Provider, model)
 	defer func() { llmDone(len(out), err) }()
 
 	tools := openAIWebTools(keys.Brave != "")
@@ -614,10 +625,13 @@ func callOpenAIWithTools(ctx context.Context, model, system, user string, maxTok
 		if i == maxToolIters-1 {
 			payload["tool_choice"] = "none"
 		}
+		for key, value := range route.Body {
+			payload[key] = value
+		}
 		body, _ := json.Marshal(payload)
-		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, openAIToolsURL, bytes.NewReader(body))
+		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, toolLoopURL(route), bytes.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("Authorization", "Bearer "+key)
+		req.Header.Set("Authorization", "Bearer "+route.Key)
 
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {

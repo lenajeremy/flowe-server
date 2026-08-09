@@ -949,8 +949,11 @@ type WorkflowAST struct {
 type APIKeys struct {
 	Anthropic string
 	OpenAI    string
-	Brave     string
-	Jina      string
+	// Gemini and XAI reach OpenAI-compatible endpoints; see llmroute.go.
+	Gemini string
+	XAI    string
+	Brave  string
+	Jina   string
 }
 
 type RunRequest struct {

@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"time"
 
-	"workflow-ai/server/config"
 	"workflow-ai/server/internal/auth"
 	"workflow-ai/server/internal/billing"
 	"workflow-ai/server/internal/database"
@@ -129,12 +128,7 @@ func (h *WorkflowHandler) Run(c *gin.Context) {
 		}
 	}
 
-	keys := executor.APIKeys{
-		Anthropic: config.GetEnv("ANTHROPIC_API_KEY"),
-		OpenAI:    config.GetEnv("OPENAI_API_KEY"),
-		Brave:     config.GetEnv("BRAVE_API_KEY"),
-		Jina:      config.GetEnv("JINA_API_KEY"),
-	}
+	keys := executor.KeysFromEnv()
 
 	runCtx := executor.WithWorkflowID(c.Request.Context(), req.WorkflowID)
 	// Carries the plan (for the per-call token ceiling) and the hold, so each spend

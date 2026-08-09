@@ -1621,10 +1621,7 @@ func (h *WorkflowHandler) executeSlackAgentApproval(ctx context.Context, approva
 		if claimErr != nil || !claimed {
 			return claimErr
 		}
-		keys := executor.APIKeys{
-			Anthropic: os.Getenv("ANTHROPIC_API_KEY"), OpenAI: os.Getenv("OPENAI_API_KEY"),
-			Brave: os.Getenv("BRAVE_API_KEY"), Jina: os.Getenv("JINA_API_KEY"),
-		}
+		keys := executor.KeysFromEnv()
 		executionNode := *node
 		executionNode.Data = effective
 		out, toolErr = executor.ExecuteSingleNode(ctx, executionNode, nil, map[string]string{}, ast.Edges, keys,

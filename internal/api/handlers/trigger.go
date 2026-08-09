@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"os"
 	"strings"
 	"time"
 
@@ -93,12 +92,7 @@ func (h *WorkflowHandler) TriggerWorkflow(c *gin.Context) {
 		Edges:   edges,
 	}
 
-	keys := executor.APIKeys{
-		Anthropic: os.Getenv("ANTHROPIC_API_KEY"),
-		OpenAI:    os.Getenv("OPENAI_API_KEY"),
-		Brave:     os.Getenv("BRAVE_API_KEY"),
-		Jina:      os.Getenv("JINA_API_KEY"),
-	}
+	keys := executor.KeysFromEnv()
 
 	runID := run.ID.String()
 	slog.InfoContext(c.Request.Context(), "api trigger accepted",
