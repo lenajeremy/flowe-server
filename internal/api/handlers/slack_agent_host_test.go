@@ -6,9 +6,11 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -71,6 +73,19 @@ func TestSlackAgentHostScopesRequireThreadReadAccess(t *testing.T) {
 	}
 	if slackAgentHostScopesReady(strings.ReplaceAll(complete, "groups:history", "")) {
 		t.Fatal("host without private-channel thread history was accepted")
+	}
+}
+
+func TestSlackAgentHostRequestsOptionalPublicChannelJoin(t *testing.T) {
+	t.Parallel()
+	if !slices.Contains(slackAgentHostRequestedScopes, "channels:join") {
+		t.Fatal("hosted-agent OAuth does not request channels:join")
+	}
+	// Existing installations without the convenience scope must remain usable;
+	// they fall back to opening Slack for a manual invite.
+	completeRequired := "app_mentions:read chat:write chat:write.customize channels:read channels:history groups:read groups:history"
+	if !slackAgentHostScopesReady(completeRequired) {
+		t.Fatal("optional channels:join scope was incorrectly made deployment-critical")
 	}
 }
 
@@ -149,6 +164,54 @@ func TestSlackAgentAPIErrorIncludesResponseMetadata(t *testing.T) {
 	err := slackAgentAPIGet(context.Background(), "xoxb-test", "conversations.info", map[string]any{"channel": "C123"}, nil)
 	if err == nil || !strings.Contains(err.Error(), "missing required field: channel") {
 		t.Fatalf("Slack error = %v, want response metadata", err)
+	}
+}
+
+func TestJoinSlackAgentPublicChannelUsesJoinAPIAndRejectsPrivateChannels(t *testing.T) {
+	oldClient := slackAgentHTTPClient
+	t.Cleanup(func() { slackAgentHTTPClient = oldClient })
+	requests := 0
+	slackAgentHTTPClient = &http.Client{Transport: slackRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+		requests++
+		switch requests {
+		case 1:
+			if request.Method != http.MethodGet || request.URL.Path != "/api/conversations.info" || request.URL.Query().Get("channel") != "C123" {
+				t.Fatalf("unexpected channel inspection request: %s %s", request.Method, request.URL.String())
+			}
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(
+				`{"ok":true,"channel":{"id":"C123","name":"general","is_member":false,"is_private":false}}`,
+			)), Header: http.Header{}}, nil
+		case 2:
+			if request.Method != http.MethodPost || request.URL.Path != "/api/conversations.join" {
+				t.Fatalf("unexpected channel join request: %s %s", request.Method, request.URL.String())
+			}
+			var payload map[string]any
+			if err := json.NewDecoder(request.Body).Decode(&payload); err != nil || payload["channel"] != "C123" {
+				t.Fatalf("join payload = %#v, error = %v", payload, err)
+			}
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(
+				`{"ok":true,"channel":{"id":"C123","name":"general","is_member":true,"is_private":false}}`,
+			)), Header: http.Header{}}, nil
+		default:
+			t.Fatalf("unexpected extra Slack request: %s", request.URL.String())
+			return nil, nil
+		}
+	})}
+	channel, err := joinSlackAgentPublicChannel(context.Background(), "xoxb-test", "C123")
+	if err != nil || !channel.IsMember || channel.ID != "C123" || requests != 2 {
+		t.Fatalf("public join = (%#v, %v, %d requests), want joined channel", channel, err, requests)
+	}
+
+	requests = 0
+	slackAgentHTTPClient = &http.Client{Transport: slackRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+		requests++
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(
+			`{"ok":true,"channel":{"id":"G123","name":"private","is_member":false,"is_private":true}}`,
+		)), Header: http.Header{}}, nil
+	})}
+	_, err = joinSlackAgentPublicChannel(context.Background(), "xoxb-test", "G123")
+	if !errors.Is(err, errSlackAgentPrivateChannel) || requests != 1 {
+		t.Fatalf("private join = (%v, %d requests), want rejection without join API", err, requests)
 	}
 }
 

@@ -75,9 +75,10 @@ type AgentPermissionAnalysisRecord struct {
 	ExpiresAt         time.Time `json:"expires_at" gorm:"not null;index"`
 }
 
-// AgentDeployment is an immutable, reviewed workflow snapshot. Redeploying
-// creates a new version rather than silently changing what an active agent can
-// do when the canvas is edited.
+// AgentDeployment is an immutable workflow snapshot. Redeploying creates a new
+// version rather than silently changing nodes when the canvas is edited. Its
+// reviewed capability policy is intentionally mutable through the management
+// API; policy edits are serialized with hosted execution and fully revalidated.
 type AgentDeployment struct {
 	BaseModel
 	OrganizationID     string                `json:"organization_id" gorm:"type:uuid;not null;index"`

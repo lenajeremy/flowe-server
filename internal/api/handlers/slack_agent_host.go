@@ -599,43 +599,44 @@ func (h *WorkflowHandler) resolveSlackDeployment(workspaceID, channelID string) 
 	return &resolvedSlackDeployment{Deployment: deployment, Target: target, Host: host}, nil
 }
 
-func verifyHostedAgentAuthorityOn(db *gorm.DB, resolved *resolvedSlackDeployment) error {
+func verifyHostedAgentAuthorityOn(db *gorm.DB, resolved *resolvedSlackDeployment) (*models.AgentDeployment, error) {
 	var deployment models.AgentDeployment
-	if err := db.Where("id = ? AND organization_id = ? AND deployed_by_user_id = ? AND version = ? AND status = ?",
-		resolved.Deployment.ID, resolved.Deployment.OrganizationID, resolved.Deployment.DeployedByUserID,
-		resolved.Deployment.Version, models.AgentDeploymentActive).First(&deployment).Error; err != nil {
+	if err := db.Session(&gorm.Session{NewDB: true}).
+		Where("id = ? AND organization_id = ? AND deployed_by_user_id = ? AND version = ? AND status = ?",
+			resolved.Deployment.ID, resolved.Deployment.OrganizationID, resolved.Deployment.DeployedByUserID,
+			resolved.Deployment.Version, models.AgentDeploymentActive).First(&deployment).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return errHostedAgentAuthorityEnded
+			return nil, errHostedAgentAuthorityEnded
 		}
-		return err
+		return nil, err
 	}
 	var membership int64
-	if err := db.Model(&models.OrgMember{}).
+	if err := db.Session(&gorm.Session{NewDB: true}).Model(&models.OrgMember{}).
 		Where("organization_id = ? AND user_id = ?", deployment.OrganizationID, deployment.DeployedByUserID).
 		Count(&membership).Error; err != nil {
-		return err
+		return nil, err
 	}
 	if membership != 1 {
-		return errHostedAgentAuthorityEnded
+		return nil, errHostedAgentAuthorityEnded
 	}
 	var hostCount int64
-	if err := db.Model(&models.AgentHostInstallation{}).
+	if err := db.Session(&gorm.Session{NewDB: true}).Model(&models.AgentHostInstallation{}).
 		Where("id = ? AND organization_id = ? AND external_workspace_id = ? AND status = ?",
 			resolved.Host.ID, deployment.OrganizationID, resolved.Host.ExternalWorkspaceID, models.AgentHostActive).
 		Count(&hostCount).Error; err != nil {
-		return err
+		return nil, err
 	}
 	var targetCount int64
-	if err := db.Model(&models.AgentDeploymentTarget{}).
+	if err := db.Session(&gorm.Session{NewDB: true}).Model(&models.AgentDeploymentTarget{}).
 		Where("id = ? AND deployment_id = ? AND organization_id = ? AND enabled = true",
 			resolved.Target.ID, deployment.ID, deployment.OrganizationID).
 		Count(&targetCount).Error; err != nil {
-		return err
+		return nil, err
 	}
 	if hostCount != 1 || targetCount != 1 {
-		return errHostedAgentAuthorityEnded
+		return nil, errHostedAgentAuthorityEnded
 	}
-	return nil
+	return &deployment, nil
 }
 
 func (h *WorkflowHandler) loadOrCreateHostedThread(resolved *resolvedSlackDeployment, payload hostedSlackEventPayload) (*models.HostedAgentThread, *models.ChatSession, error) {
@@ -694,6 +695,15 @@ func (h *WorkflowHandler) processSlackAgentMention(ctx context.Context, delivery
 	}
 	if err != nil {
 		return err
+	}
+	associated, err := h.associateHostedAgentDeliveryWithDeployment(delivery, resolved.Deployment.ID.String())
+	if err != nil {
+		return err
+	}
+	if !associated {
+		// The provider retried an event after its channel was moved to another
+		// deployment. Never rerun the old event under new delegated authority.
+		return nil
 	}
 	if delivery.ResponseRecordedAt != nil {
 		if delivery.ResponseDeploymentID != resolved.Deployment.ID.String() {
@@ -770,13 +780,6 @@ func (h *WorkflowHandler) processSlackAgentMention(ctx context.Context, delivery
 	if json.Unmarshal(resolved.Deployment.SnapshotNodes, &ast.Nodes) != nil || json.Unmarshal(resolved.Deployment.SnapshotEdges, &ast.Edges) != nil {
 		return errors.New("deployment snapshot is unreadable")
 	}
-	var policy AgentCapabilityPolicy
-	if json.Unmarshal(resolved.Deployment.CapabilityPolicy, &policy) != nil {
-		return errors.New("deployment policy is unreadable")
-	}
-	var analysis map[string]any
-	_ = json.Unmarshal(resolved.Deployment.PermissionAnalysis, &analysis)
-	goal, _ := analysis["goal"].(string)
 	runtimeModel, err := prepareAgentRuntimeModel(resolved.Deployment.ModelID)
 	if err != nil {
 		return h.slackAgentPostDeliveryText(ctx, delivery, &resolved.Deployment, resolved.Host.BotToken, payload.ChannelID, payload.ThreadID,
@@ -801,9 +804,23 @@ func (h *WorkflowHandler) processSlackAgentMention(ctx context.Context, delivery
 	var result AgentTurnResult
 	var turnErr error
 	lockErr := h.withHostedAuthorityLock(ctx, resolved.Deployment.OrganizationID, resolved.Deployment.DeployedByUserID, func(connection *gorm.DB) error {
-		if err := verifyHostedAgentAuthorityOn(connection, resolved); err != nil {
+		liveDeployment, err := verifyHostedAgentAuthorityOn(connection, resolved)
+		if err != nil {
 			return err
 		}
+		// Capability policies are intentionally mutable. Read the authoritative
+		// value only after acquiring the same authority lock used by permission
+		// edits, so a turn can never execute with a stale policy after an edit has
+		// committed.
+		var policy AgentCapabilityPolicy
+		if json.Unmarshal(liveDeployment.CapabilityPolicy, &policy) != nil {
+			return errors.New("deployment policy is unreadable")
+		}
+		var analysis map[string]any
+		_ = json.Unmarshal(liveDeployment.PermissionAnalysis, &analysis)
+		goal, _ := analysis["goal"].(string)
+		resolved.Deployment.CapabilityPolicy = liveDeployment.CapabilityPolicy
+		resolved.Deployment.PermissionAnalysis = liveDeployment.PermissionAnalysis
 		result, turnErr = h.RunAgentTurn(ctx, AgentTurnInput{
 			Session: session, Workflow: ast, Policy: &policy,
 			OwnerUserID: resolved.Deployment.DeployedByUserID, OrganizationID: resolved.Deployment.OrganizationID,
@@ -813,6 +830,14 @@ func (h *WorkflowHandler) processSlackAgentMention(ctx context.Context, delivery
 		return nil
 	})
 	if errors.Is(lockErr, errHostedAgentAuthorityEnded) {
+		current, resolveErr := h.resolveSlackDeployment(payload.WorkspaceID, payload.ChannelID)
+		if resolveErr != nil || current.Deployment.ID != resolved.Deployment.ID {
+			// Revocation, host disconnection, or a destination edit may have
+			// removed this channel while the event waited for the authority lock.
+			// Do not leak even an operational reply into a destination that is no
+			// longer allowlisted.
+			return nil
+		}
 		return h.slackAgentPostDeliveryText(ctx, delivery, &resolved.Deployment, resolved.Host.BotToken, payload.ChannelID, payload.ThreadID,
 			"This deployment can no longer act because its owner or destination is no longer active.")
 	}
@@ -844,6 +869,28 @@ func (h *WorkflowHandler) processSlackAgentMention(ctx context.Context, delivery
 	}
 	return h.slackAgentPostDeliveryText(ctx, delivery, &resolved.Deployment, resolved.Host.BotToken, payload.ChannelID, payload.ThreadID,
 		slackAgentSanitizeGeneratedText(answer))
+}
+
+func (h *WorkflowHandler) associateHostedAgentDeliveryWithDeployment(delivery *models.HostedAgentDelivery, deploymentID string) (bool, error) {
+	if delivery.ResponseDeploymentID != "" {
+		return delivery.ResponseDeploymentID == deploymentID, nil
+	}
+	result := h.db.DB.Model(&models.HostedAgentDelivery{}).
+		Where("id = ? AND (response_deployment_id = '' OR response_deployment_id IS NULL)", delivery.ID).
+		Update("response_deployment_id", deploymentID)
+	if result.Error != nil {
+		return false, fmt.Errorf("associate hosted delivery with deployment: %w", result.Error)
+	}
+	if result.RowsAffected == 1 {
+		delivery.ResponseDeploymentID = deploymentID
+		return true, nil
+	}
+	var durable models.HostedAgentDelivery
+	if err := h.db.DB.Select("response_deployment_id").First(&durable, "id = ?", delivery.ID).Error; err != nil {
+		return false, fmt.Errorf("recover hosted delivery deployment: %w", err)
+	}
+	delivery.ResponseDeploymentID = durable.ResponseDeploymentID
+	return delivery.ResponseDeploymentID == deploymentID, nil
 }
 
 // slackAgentPostDeliveryText stores the exact reply before contacting Slack.
