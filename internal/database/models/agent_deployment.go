@@ -166,6 +166,11 @@ const (
 	// it could durably record whether the external side effect succeeded. It is
 	// terminal and must never be retried automatically.
 	HostedAgentApprovalOutcomeUnknown HostedAgentApprovalStatus = "outcome_unknown"
+	// ReconciledDone and ReconciledVoid are requester-confirmed terminal states
+	// for an indeterminate execution. The former records that the external
+	// action completed; the latter records that it did not complete.
+	HostedAgentApprovalReconciledDone HostedAgentApprovalStatus = "reconciled_done"
+	HostedAgentApprovalReconciledVoid HostedAgentApprovalStatus = "reconciled_void"
 	HostedAgentApprovalFailed         HostedAgentApprovalStatus = "failed"
 )
 
@@ -173,23 +178,31 @@ const (
 // EffectiveOverrides directly; it never asks the model to regenerate them.
 type HostedAgentApproval struct {
 	BaseModel
-	OrganizationID      string                    `json:"organization_id" gorm:"type:uuid;not null;index"`
-	DeploymentID        string                    `json:"deployment_id" gorm:"type:uuid;not null;index"`
-	DeploymentVersion   int                       `json:"deployment_version" gorm:"not null"`
-	ThreadID            string                    `json:"thread_id" gorm:"type:uuid;not null;index"`
-	ChatSessionID       string                    `json:"chat_session_id" gorm:"type:uuid;not null;index"`
-	RequesterExternalID string                    `json:"requester_external_id" gorm:"not null;index"`
-	SourceDeliveryID    string                    `json:"source_delivery_id" gorm:"type:uuid;not null;uniqueIndex"`
-	NodeID              string                    `json:"node_id" gorm:"not null"`
-	Operation           string                    `json:"operation" gorm:"not null"`
-	Reason              string                    `json:"reason" gorm:"not null"`
-	EffectiveOverrides  JSONB                     `json:"effective_overrides" gorm:"type:jsonb;not null"`
-	EffectiveConfigHash string                    `json:"effective_config_hash" gorm:"not null"`
-	DisplayDetails      JSONB                     `json:"display_details" gorm:"type:jsonb;not null"`
-	Status              HostedAgentApprovalStatus `json:"status" gorm:"type:varchar(20);not null;default:'pending';index"`
-	ExpiresAt           time.Time                 `json:"expires_at" gorm:"not null;index"`
-	ResolvedAt          *time.Time                `json:"resolved_at,omitempty"`
-	ExecutedAt          *time.Time                `json:"executed_at,omitempty"`
+	OrganizationID       string                    `json:"organization_id" gorm:"type:uuid;not null;index"`
+	DeploymentID         string                    `json:"deployment_id" gorm:"type:uuid;not null;index"`
+	DeploymentVersion    int                       `json:"deployment_version" gorm:"not null"`
+	ThreadID             string                    `json:"thread_id" gorm:"type:uuid;not null;index"`
+	ChatSessionID        string                    `json:"chat_session_id" gorm:"type:uuid;not null;index"`
+	RequesterExternalID  string                    `json:"requester_external_id" gorm:"not null;index"`
+	SourceDeliveryID     string                    `json:"source_delivery_id" gorm:"type:uuid;not null;uniqueIndex"`
+	NodeID               string                    `json:"node_id" gorm:"not null"`
+	Operation            string                    `json:"operation" gorm:"not null"`
+	Reason               string                    `json:"reason" gorm:"not null"`
+	EffectiveOverrides   JSONB                     `json:"effective_overrides" gorm:"type:jsonb;not null"`
+	EffectiveConfigHash  string                    `json:"effective_config_hash" gorm:"not null"`
+	ExecutionFingerprint string                    `json:"-" gorm:"index"`
+	DisplayDetails       JSONB                     `json:"display_details" gorm:"type:jsonb;not null"`
+	Status               HostedAgentApprovalStatus `json:"status" gorm:"type:varchar(20);not null;default:'pending';index"`
+	ExpiresAt            time.Time                 `json:"expires_at" gorm:"not null;index"`
+	ResolvedAt           *time.Time                `json:"resolved_at,omitempty"`
+	ExecutedAt           *time.Time                `json:"executed_at,omitempty"`
+	// ExecutionKey is a stable, durable attempt identity written before any
+	// external side effect. It follows the call through logs and billing, while
+	// unresolved equivalent calls are blocked by the pinned call fields above.
+	ExecutionKey        string     `json:"-" gorm:"index"`
+	ExecutionStartedAt  *time.Time `json:"execution_started_at,omitempty"`
+	OutcomeReconciledAt *time.Time `json:"outcome_reconciled_at,omitempty"`
+	OutcomeReconciledBy string     `json:"-"`
 	// ExecutionResult is written immediately after a successful tool call,
 	// before the result is merged into the chat session. SessionRecordedAt makes
 	// that merge idempotently retryable after a database or Slack failure.

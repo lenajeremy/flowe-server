@@ -12,6 +12,10 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"workflow-ai/server/internal/database/models"
+
+	"github.com/google/uuid"
 )
 
 type slackRoundTripFunc func(*http.Request) (*http.Response, error)
@@ -145,5 +149,58 @@ func TestSuccessfulHostedApprovalOutcomeSurvivesForRetry(t *testing.T) {
 	}
 	if !found || outcome.Output != `{"id":"ISSUE-1"}` {
 		t.Fatalf("recovered outcome = (%+v, %v)", outcome, found)
+	}
+}
+
+func TestSlackUnknownOutcomeIncludesRequesterReconciliationControls(t *testing.T) {
+	oldClient := slackAgentHTTPClient
+	t.Cleanup(func() { slackAgentHTTPClient = oldClient })
+	var payload map[string]any
+	slackAgentHTTPClient = &http.Client{Transport: slackRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+		if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode Slack payload: %v", err)
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(`{"ok":true}`)),
+			Header:     http.Header{},
+		}, nil
+	})}
+	approval := models.HostedAgentApproval{
+		BaseModel: models.BaseModel{ID: uuid.New()}, RequesterExternalID: "U123",
+		Operation: "create_issue", Reason: "The teammate requested a tracked issue.",
+		ExecutionKey: uuid.NewString(), DisplayDetails: models.JSONB(`{"title":"Production incident"}`),
+	}
+	if err := slackAgentPostUnknownOutcome(
+		context.Background(), "xoxb-test", "C123", "100.1", &approval, "Ops Agent",
+	); err != nil {
+		t.Fatalf("post unknown outcome: %v", err)
+	}
+	raw, _ := json.Marshal(payload)
+	message := string(raw)
+	for _, want := range []string{
+		"fernary_agent_outcome_completed", "fernary_agent_outcome_not_run", "Production incident", "U123", approval.ExecutionKey,
+	} {
+		if !strings.Contains(message, want) {
+			t.Errorf("Slack reconciliation payload is missing %q: %s", want, message)
+		}
+	}
+}
+
+func TestHostedApprovalInteractionActionsIncludeReconciliation(t *testing.T) {
+	t.Parallel()
+	tests := map[string]string{
+		"fernary_agent_approve":           "approve",
+		"fernary_agent_reject":            "reject",
+		"fernary_agent_outcome_completed": "reconcile_completed",
+		"fernary_agent_outcome_not_run":   "reconcile_not_run",
+	}
+	for actionID, want := range tests {
+		if got, ok := hostedApprovalInteractionAction(actionID); !ok || got != want {
+			t.Errorf("interaction action %q = (%q, %v), want (%q, true)", actionID, got, ok, want)
+		}
+	}
+	if got, ok := hostedApprovalInteractionAction("untrusted_action"); ok || got != "" {
+		t.Fatalf("unsupported interaction action = (%q, %v), want rejected", got, ok)
 	}
 }
