@@ -31,6 +31,7 @@ var (
 	ErrInviteInvalid  = errors.New("this invitation is no longer valid")
 	ErrAlreadyMember  = errors.New("already a member of this organization")
 	ErrNotPermitted   = errors.New("not permitted")
+	ErrNotMember      = errors.New("not a member of this organization")
 	ErrWrongRecipient = errors.New("this invitation was sent to a different email address")
 )
 
@@ -254,25 +255,36 @@ func Revoke(db *gorm.DB, orgID, inviteID string) error {
 // manage billing or membership, and there is no self-service way back from that.
 func RemoveMember(db *gorm.DB, orgID, memberUserID string) error {
 	return db.Transaction(func(tx *gorm.DB) error {
-		var m models.OrgMember
-		if err := tx.Where("organization_id = ? AND user_id = ?", orgID, memberUserID).
-			First(&m).Error; err != nil {
-			return fmt.Errorf("not a member of this organization")
-		}
-		if m.Role == models.RoleOwner {
-			var owners int64
-			if err := tx.Model(&models.OrgMember{}).
-				Where("organization_id = ? AND role = ?", orgID, models.RoleOwner).
-				Count(&owners).Error; err != nil {
-				return err
-			}
-			if owners <= 1 {
-				return fmt.Errorf("%w: an organization needs at least one owner", ErrNotPermitted)
-			}
-		}
-		return tx.Where("organization_id = ? AND user_id = ?", orgID, memberUserID).
-			Delete(&models.OrgMember{}).Error
+		return RemoveMemberWithinTransaction(tx, orgID, memberUserID)
 	})
+}
+
+// RemoveMemberWithinTransaction applies the membership checks and deletion on
+// a transaction owned by the caller. It exists for invariants that must commit
+// atomically with membership removal, such as revoking authority delegated to
+// hosted agents. Callers must not pass a non-transactional database handle.
+func RemoveMemberWithinTransaction(tx *gorm.DB, orgID, memberUserID string) error {
+	var m models.OrgMember
+	if err := tx.Where("organization_id = ? AND user_id = ?", orgID, memberUserID).
+		First(&m).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return ErrNotMember
+		}
+		return err
+	}
+	if m.Role == models.RoleOwner {
+		var owners int64
+		if err := tx.Model(&models.OrgMember{}).
+			Where("organization_id = ? AND role = ?", orgID, models.RoleOwner).
+			Count(&owners).Error; err != nil {
+			return err
+		}
+		if owners <= 1 {
+			return fmt.Errorf("%w: an organization needs at least one owner", ErrNotPermitted)
+		}
+	}
+	return tx.Where("organization_id = ? AND user_id = ?", orgID, memberUserID).
+		Delete(&models.OrgMember{}).Error
 }
 
 // CanManageMembers reports whether a user may invite and remove people.

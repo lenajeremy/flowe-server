@@ -6,13 +6,11 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"os"
 	"reflect"
 	"regexp"
 	"strings"
 	"time"
 
-	"workflow-ai/server/config"
 	"workflow-ai/server/internal/auth"
 	"workflow-ai/server/internal/billing"
 	"workflow-ai/server/internal/database/models"
@@ -148,10 +146,29 @@ func agentSkipNode(t executor.NodeType) bool {
 // FlowNodeData reflection, descriptions from the AI catalog. All optional —
 // omitted fields fall back to the node's saved config.
 func buildAgentTools(ast executor.WorkflowAST) []agentTool {
+	return buildAgentToolsWithPolicy(ast, nil)
+}
+
+func buildAgentToolsWithPolicy(ast executor.WorkflowAST, policy *AgentCapabilityPolicy) []agentTool {
 	tools := make([]agentTool, 0, len(ast.Nodes))
 	for _, node := range ast.Nodes {
 		if agentSkipNode(node.Data.NodeType) {
 			continue
+		}
+		var (
+			grant      AgentNodeGrant
+			capability AgentNodeCapability
+		)
+		if policy != nil {
+			var exposed bool
+			grant, exposed = agentPolicyGrant(*policy, node.ID)
+			if !exposed {
+				continue
+			}
+			capability, exposed = agentNodeCapability(node)
+			if !exposed {
+				continue
+			}
 		}
 		entry := catalogEntry(string(node.Data.NodeType))
 		fieldDocs := map[string]any{}
@@ -166,8 +183,18 @@ func buildAgentTools(ast executor.WorkflowAST) []agentTool {
 		}
 
 		props := map[string]any{}
+		var required []string
+		allowedFields := map[string]bool{}
+		if policy != nil {
+			for _, field := range grant.AllowedOverrideFields {
+				allowedFields[field] = true
+			}
+		}
 		for field, doc := range fieldDocs {
 			if field == "label" || field == "integrationToken" {
+				continue
+			}
+			if policy != nil && field != capability.OperationField && !allowedFields[field] {
 				continue
 			}
 			jsonType, exists := flowDataFieldType(field)
@@ -175,30 +202,112 @@ func buildAgentTools(ast executor.WorkflowAST) []agentTool {
 				continue
 			}
 			docStr, _ := doc.(string)
-			props[field] = map[string]any{"type": jsonType, "description": docStr}
+			property := map[string]any{"type": jsonType, "description": docStr}
+			if policy != nil && field == capability.OperationField {
+				property["enum"] = grant.AllowedOperations
+				required = append(required, field)
+			}
+			props[field] = property
+		}
+		if policy != nil {
+			containsWrite := false
+			containsRead := false
+			for _, operation := range capability.Operations {
+				if !stringSliceContains(grant.AllowedOperations, operation.ID) {
+					continue
+				}
+				if operation.Effect == AgentEffectRead {
+					containsRead = true
+				} else {
+					containsWrite = true
+				}
+			}
+			if containsWrite {
+				props["reason"] = map[string]any{
+					"type":        "string",
+					"description": "Why this operation is necessary for the teammate's request. Required for writes and shown in the approval request.",
+				}
+				if capability.OperationField == "" || !containsRead {
+					required = append(required, "reason")
+				}
+			}
 		}
 
-		// Saved config = the tool's defaults; show them so the model knows
-		// what happens with no arguments.
-		savedJSON, _ := json.Marshal(node.Data)
+		// Saved config = the tool's defaults; show a secret-safe representation
+		// so the model understands pinned behaviour without receiving credentials.
+		savedJSON := agentSafeSavedConfig(node.Data)
 		toolDesc := fmt.Sprintf(
 			"Run the workflow node %q (%s). %s\nSaved configuration (used for any argument you omit): %s\nPass arguments ONLY to adjust behaviour for this one call — the workflow itself is never modified.",
-			node.Data.Label, node.Data.NodeType, desc, truncate(string(savedJSON), 1200),
+			node.Data.Label, node.Data.NodeType, desc, truncate(savedJSON, 1200),
 		)
 
+		inputSchema := map[string]any{
+			"type":       "object",
+			"properties": props,
+		}
+		if len(required) > 0 {
+			inputSchema["required"] = required
+		}
 		tools = append(tools, agentTool{
 			Schema: map[string]any{
-				"name":        agentToolName(node),
-				"description": toolDesc,
-				"input_schema": map[string]any{
-					"type":       "object",
-					"properties": props,
-				},
+				"name":         agentToolName(node),
+				"description":  toolDesc,
+				"input_schema": inputSchema,
 			},
 			Node: node,
 		})
 	}
 	return tools
+}
+
+func stringSliceContains(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
+
+var agentSecretConfigFields = map[string]bool{
+	"integrationtoken":   true,
+	"requestheaders":     true,
+	"requestbody":        true,
+	"resendheaders":      true,
+	"typeformsecret":     true,
+	"netlifyenvvalue":    true,
+	"netlifyenvvarsjson": true,
+	"supabaseauthconfig": true,
+	"supabasedbpass":     true,
+	"supabaserevealkeys": true,
+	"supabasesecrets":    true,
+	"gumroadlicensekey":  true,
+	"contactspagetoken":  true,
+	"frontpagetoken":     true,
+}
+
+// agentSafeSavedConfig produces the representation that may be sent to a
+// model. Execution still receives the original data through the server-side
+// node; this copy exists only to explain its pinned defaults.
+func agentSafeSavedConfig(data executor.FlowNodeData) string {
+	raw, err := json.Marshal(data)
+	if err != nil {
+		return "{}"
+	}
+	var fields map[string]any
+	if json.Unmarshal(raw, &fields) != nil {
+		return "{}"
+	}
+	for field := range fields {
+		if agentSecretConfigFields[strings.ToLower(field)] {
+			delete(fields, field)
+		}
+	}
+	safe, err := json.Marshal(fields)
+	if err != nil {
+		return "{}"
+	}
+	return string(safe)
 }
 
 // flowDataFieldType maps a FlowNodeData JSON field to its JSON-schema type.
@@ -262,7 +371,7 @@ type agentToolCallRecord struct {
 	// labeled "Create Linear Ticket" that gets called to list issues must
 	// surface "List issues", not its label.
 	Op     string `json:"op,omitempty"`
-	Status string `json:"status"` // ok | error
+	Status string `json:"status"` // ok | error | pending
 }
 
 // agentEffectiveOp humanizes the operation a tool call ran ("list_issues" →
@@ -326,21 +435,11 @@ func (h *WorkflowHandler) AgentChatTurn(c *gin.Context) {
 	}
 	_ = json.Unmarshal(wf.Edges, &ast.Edges)
 
-	model := resolveChatModel(req.Model)
-	prov := chatProviders[model.Provider]
-	apiKey := os.Getenv(prov.KeyEnv)
-	if apiKey == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": prov.KeyEnv + " not configured on server"})
+	runtimeModel, err := prepareAgentRuntimeModel(req.Model)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-
-	// Session state + history
-	state := map[string]string{}
-	_ = json.Unmarshal(sess.State, &state)
-	var history []agentStoredMessage
-	_ = json.Unmarshal(sess.Messages, &history)
-
-	tools := buildAgentTools(ast)
 
 	// SSE setup
 	c.Header("Content-Type", "text/event-stream")
@@ -355,84 +454,31 @@ func (h *WorkflowHandler) AgentChatTurn(c *gin.Context) {
 	telemetry.AddSSEStream(c.Request.Context(), "agent_chat", 1)
 	defer telemetry.AddSSEStream(c.Request.Context(), "agent_chat", -1)
 
-	runID := "chat-" + sess.ID.String()
-	keys := executor.APIKeys{
-		Anthropic: config.GetEnv("ANTHROPIC_API_KEY"),
-		OpenAI:    config.GetEnv("OPENAI_API_KEY"),
-		Brave:     config.GetEnv("BRAVE_API_KEY"),
-		Jina:      config.GetEnv("JINA_API_KEY"),
+	sink := func(event AgentTurnEvent) {
+		data := event.Text
+		if event.Tool != nil {
+			encoded, _ := json.Marshal(event.Tool)
+			data = string(encoded)
+		}
+		sendSSE(c.Writer, flusher, string(event.Type), data)
 	}
-
-	// execTool runs one node with overrides against session state.
-	var callRecords []agentToolCallRecord
-	execTool := func(name string, input any) string {
-		// The clock is the one tool that isn't a node — answer it before the
-		// node lookup, and don't record it as a node call.
-		if name == executor.ClockToolName {
-			tz := ""
-			if m, ok := input.(map[string]any); ok {
-				tz, _ = m["timezone"].(string)
-			}
-			return executor.CurrentTime(tz)
-		}
-		var tool *agentTool
-		for i := range tools {
-			if tools[i].Schema["name"] == name {
-				tool = &tools[i]
-				break
-			}
-		}
-		if tool == nil {
-			return fmt.Sprintf(`{"error":"unknown tool %s"}`, name)
-		}
-		overrides, _ := input.(map[string]any)
-		op := agentEffectiveOp(tool.Node.Data, overrides)
-		chip, _ := json.Marshal(map[string]string{"node": tool.Node.Data.Label, "nodeId": tool.Node.ID, "op": op})
-		sendSSE(c.Writer, flusher, "tool_start", string(chip))
-
-		out, err := executor.ExecuteSingleNode(c.Request.Context(), tool.Node, overrides, state, ast.Edges, keys, runID, uid, currentOrgID(c), nil)
-		rec := agentToolCallRecord{Node: tool.Node.Data.Label, NodeID: tool.Node.ID, Op: op, Status: "ok"}
-		if err != nil {
-			rec.Status = "error"
-			callRecords = append(callRecords, rec)
-			result, _ := json.Marshal(map[string]string{"node": tool.Node.Data.Label, "nodeId": tool.Node.ID, "op": op, "status": "error", "error": err.Error()})
-			sendSSE(c.Writer, flusher, "tool_result", string(result))
-			return fmt.Sprintf(`{"error":%q}`, err.Error())
-		}
-		callRecords = append(callRecords, rec)
-		state[tool.Node.ID] = truncate(out, agentStateCap)
-		result, _ := json.Marshal(map[string]string{"node": tool.Node.Data.Label, "nodeId": tool.Node.ID, "op": op, "status": "ok"})
-		sendSSE(c.Writer, flusher, "tool_result", string(result))
-		return truncate(out, agentResultCap)
-	}
-
-	system := agentSystemPrompt(ast, tools, state)
-
-	var finalText string
-	if model.Provider == "anthropic" {
-		finalText = h.agentAnthropicLoop(c, flusher, model, apiKey, system, history, req.Message, tools, execTool)
-	} else {
-		finalText = h.agentOpenAILoop(c, flusher, model, apiKey, prov.URL, system, history, req.Message, tools, execTool)
-	}
-	sendSSE(c.Writer, flusher, "done", "")
+	result, turnErr := h.RunAgentTurn(c.Request.Context(), AgentTurnInput{
+		Session:        sess,
+		Workflow:       ast,
+		OwnerUserID:    uid,
+		OrganizationID: currentOrgID(c),
+		Message:        req.Message,
+		Model:          runtimeModel,
+	}, sink)
 
 	slog.InfoContext(c.Request.Context(), "agent chat turn finished",
 		"session_id", sess.ID.String(),
 		"duration_ms", time.Since(turnStart).Milliseconds(),
-		"tool_calls", len(callRecords))
-
-	// Persist transcript + state. Title from the first user message.
-	history = append(history,
-		agentStoredMessage{Role: "user", Content: req.Message},
-		agentStoredMessage{Role: "assistant", Content: finalText, ToolCalls: callRecords},
-	)
-	msgJSON, _ := json.Marshal(history)
-	stateJSON, _ := json.Marshal(state)
-	updates := map[string]any{"messages": models.JSONB(msgJSON), "state": models.JSONB(stateJSON)}
-	if sess.Title == "" || sess.Title == "New chat" {
-		updates["title"] = truncate(req.Message, 80)
+		"tool_calls", len(result.ToolCalls),
+		"error", turnErr)
+	if turnErr != nil {
+		slog.WarnContext(c.Request.Context(), "agent chat turn ended with error", "error", turnErr)
 	}
-	h.db.DB.Model(sess).Updates(updates)
 }
 
 // agentSystemPrompt frames the workflow-as-agent contract.
@@ -443,6 +489,10 @@ func (h *WorkflowHandler) AgentChatTurn(c *gin.Context) {
 // stays byte-identical from turn to turn. The model still receives both, in the
 // same order.
 func agentSystemPrompt(ast executor.WorkflowAST, tools []agentTool, state map[string]string) string {
+	return agentSystemPromptWithGoal(ast, tools, state, "")
+}
+
+func agentSystemPromptWithGoal(ast executor.WorkflowAST, tools []agentTool, state map[string]string, goal string) string {
 	var names []string
 	for _, t := range tools {
 		names = append(names, fmt.Sprintf("%s (%s)", t.Node.Data.Label, t.Node.Data.NodeType))
@@ -468,7 +518,12 @@ func agentSystemPrompt(ast executor.WorkflowAST, tools []agentTool, state map[st
 	for k := range state {
 		stateKeys = append(stateKeys, k)
 	}
+	goalContext := ""
+	if strings.TrimSpace(goal) != "" {
+		goalContext = fmt.Sprintf("\nThis deployment's AI-inferred, owner-reviewed goal is: %q. Use it to interpret ambiguous requests, but never use it to exceed the tool policy or the teammate's current request.\n", truncate(strings.TrimSpace(goal), 1000))
+	}
 	return fmt.Sprintf(`You are the workflow %q, acting as a conversational agent for its owner.
+%s
 
 Your tools are this workflow's nodes: %s. Each tool's saved configuration is its default behaviour; pass arguments only to adjust a call to the user's current request (e.g. tweak a prompt, change a search query). You NEVER modify the workflow itself. You also have get_current_time, which is not a node — it runs nothing and changes nothing.
 
@@ -479,146 +534,5 @@ Rules:
 - Prior tool outputs are stored as state (current keys: [%s]) and template tokens like {{nodeId.output.field}} in tool arguments resolve against that state.
 - If the user asks for something no tool can do, say so plainly and describe what this workflow CAN do.
 - Be concise. Summarize tool results in plain language rather than dumping raw JSON, unless asked.`,
-		ast.Name, strings.Join(names, ", "), triggerContext, strings.Join(stateKeys, ", "))
-}
-
-// ── Provider loops (mirrors the builder-chat loops, different tools) ──
-
-func (h *WorkflowHandler) agentAnthropicLoop(c *gin.Context, flusher http.Flusher, model chatModelSpec, apiKey, system string, history []agentStoredMessage, userMsg string, tools []agentTool, execTool func(string, any) string) string {
-	toolSchemas := make([]map[string]any, 0, len(tools)+1)
-	for _, t := range tools {
-		toolSchemas = append(toolSchemas, t.Schema)
-	}
-	toolSchemas = append(toolSchemas, map[string]any{
-		"name":         executor.ClockToolName,
-		"description":  executor.ClockToolDesc,
-		"input_schema": executor.ClockToolSchema(),
-	})
-	var messages []map[string]any
-	for _, m := range history {
-		if m.Content != "" {
-			messages = append(messages, map[string]any{"role": m.Role, "content": m.Content})
-		}
-	}
-	messages = append(messages, map[string]any{"role": "user", "content": userMsg})
-
-	var finalText strings.Builder
-	for round := 0; round < agentMaxToolRounds; round++ {
-		body, _ := json.Marshal(map[string]any{
-			"model":      model.ID,
-			"max_tokens": 8000,
-			"thinking":   model.Thinking,
-			"stream":     true,
-			"system":     cachedSystem(system),
-			"tools":      toolSchemas,
-			"messages":   messages,
-		})
-		resp, err := doAnthropicRequest(c, apiKey, body)
-		if err != nil {
-			sendSSE(c.Writer, flusher, "error", fmt.Sprintf("Request failed: %v", err))
-			break
-		}
-		stopReason, assistantContent, err := consumeStream(c, resp, flusher, model.ID)
-		resp.Body.Close()
-		if err != nil {
-			sendSSE(c.Writer, flusher, "error", fmt.Sprintf("Stream error: %v", err))
-			break
-		}
-		for _, block := range assistantContent {
-			if bm, ok := block.(map[string]any); ok && bm["type"] == "text" {
-				if txt, ok := bm["text"].(string); ok {
-					finalText.WriteString(txt)
-				}
-			}
-		}
-		messages = append(messages, map[string]any{"role": "assistant", "content": assistantContent})
-		if stopReason != "tool_use" {
-			break
-		}
-		var toolResults []any
-		for _, block := range assistantContent {
-			bm, ok := block.(map[string]any)
-			if !ok || bm["type"] != "tool_use" {
-				continue
-			}
-			name, _ := bm["name"].(string)
-			id, _ := bm["id"].(string)
-			toolResults = append(toolResults, map[string]any{
-				"type": "tool_result", "tool_use_id": id, "content": execTool(name, bm["input"]),
-			})
-		}
-		messages = append(messages, map[string]any{"role": "user", "content": toolResults})
-	}
-	return finalText.String()
-}
-
-func (h *WorkflowHandler) agentOpenAILoop(c *gin.Context, flusher http.Flusher, model chatModelSpec, apiKey, url, system string, history []agentStoredMessage, userMsg string, tools []agentTool, execTool func(string, any) string) string {
-	toolSchemas := make([]map[string]any, 0, len(tools)+1)
-	for _, t := range tools {
-		toolSchemas = append(toolSchemas, map[string]any{
-			"type": "function",
-			"function": map[string]any{
-				"name":        t.Schema["name"],
-				"description": t.Schema["description"],
-				"parameters":  t.Schema["input_schema"],
-			},
-		})
-	}
-	toolSchemas = append(toolSchemas, map[string]any{
-		"type": "function",
-		"function": map[string]any{
-			"name":        executor.ClockToolName,
-			"description": executor.ClockToolDesc,
-			"parameters":  executor.ClockToolSchema(),
-		},
-	})
-	messages := cachedSystemMessages(system)
-	for _, m := range history {
-		if m.Content != "" {
-			messages = append(messages, map[string]any{"role": m.Role, "content": m.Content})
-		}
-	}
-	messages = append(messages, map[string]any{"role": "user", "content": userMsg})
-
-	var finalText strings.Builder
-	for round := 0; round < agentMaxToolRounds; round++ {
-		body, _ := json.Marshal(map[string]any{
-			"model":    model.ID,
-			"stream":   true,
-			"messages": messages,
-			"tools":    toolSchemas,
-		})
-		resp, err := doOpenAIRequest(c, url, apiKey, body)
-		if err != nil {
-			sendSSE(c.Writer, flusher, "error", fmt.Sprintf("Request failed: %v", err))
-			break
-		}
-		content, toolCalls, err := consumeOpenAIStream(c, resp, flusher, model.Provider, model.ID)
-		resp.Body.Close()
-		if err != nil {
-			sendSSE(c.Writer, flusher, "error", fmt.Sprintf("Stream error: %v", err))
-			break
-		}
-		finalText.WriteString(content)
-		assistantMsg := map[string]any{"role": "assistant", "content": content}
-		if len(toolCalls) > 0 {
-			assistantMsg["tool_calls"] = toolCalls
-		}
-		messages = append(messages, assistantMsg)
-		if len(toolCalls) == 0 {
-			break
-		}
-		for _, tc := range toolCalls {
-			fn, _ := tc["function"].(map[string]any)
-			name, _ := fn["name"].(string)
-			argsRaw, _ := fn["arguments"].(string)
-			var input any
-			_ = json.Unmarshal([]byte(argsRaw), &input)
-			id, _ := tc["id"].(string)
-			messages = append(messages, map[string]any{
-				"role": "tool", "tool_call_id": id, "content": execTool(name, input),
-			})
-		}
-	}
-	return finalText.String()
+		ast.Name, goalContext, strings.Join(names, ", "), triggerContext, strings.Join(stateKeys, ", "))
 }

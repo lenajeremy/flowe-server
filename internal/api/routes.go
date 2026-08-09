@@ -89,6 +89,10 @@ func InitServer(port int, db *database.DBClient, rdb *redis.Client) {
 		public.GET("/org/invites/info", wh.InviteInfo)
 		// Authenticated by Stripe's signature over the raw body, not by a session.
 		public.POST("/billing/stripe/webhook", wh.StripeWebhook)
+
+		// Signed Slack Events API and Block Kit interaction callbacks for hosted agents.
+		public.POST("/agent-hosts/slack/events", wh.ReceiveSlackAgentEvent)
+		public.POST("/agent-hosts/slack/interactions", wh.ReceiveSlackAgentInteraction)
 	}
 
 	// Everything else requires a session.
@@ -180,6 +184,19 @@ func InitServer(port int, db *database.DBClient, rdb *redis.Client) {
 		api.DELETE("/chat-sessions/:id", wh.DeleteChatSession)
 		api.POST("/chat-sessions/:id/message", wh.AgentChatTurn)
 
+		// Deploy workflow agents into team chat hosts.
+		api.GET("/agent-hosts", wh.ListAgentHosts)
+		api.GET("/agent-hosts/:provider/connect", wh.ConnectAgentHost)
+		api.GET("/agent-hosts/:id/channels", wh.ListAgentHostChannels)
+		api.DELETE("/agent-hosts/:id", wh.DeleteAgentHost)
+		api.POST("/workflows/:id/agent-deployments/analyze", wh.AnalyzeAgentDeployment)
+		api.GET("/workflows/:id/agent-deployments/capabilities", wh.AgentDeploymentCapabilities)
+		api.POST("/workflows/:id/agent-deployments", wh.CreateAgentDeployment)
+		api.GET("/workflows/:id/agent-deployments", wh.ListAgentDeployments)
+		api.GET("/agent-deployments/:id", wh.GetAgentDeployment)
+		api.PATCH("/agent-deployments/:id", wh.PatchAgentDeployment)
+		api.DELETE("/agent-deployments/:id", wh.DeleteAgentDeployment)
+
 		// Workflow versions
 		api.GET("/workflows/:id/versions", wh.ListVersions)
 		api.POST("/workflows/:id/versions", wh.SaveVersion)
@@ -194,6 +211,7 @@ func InitServer(port int, db *database.DBClient, rdb *redis.Client) {
 		api.DELETE("/integrations/:provider", wh.DisconnectIntegration)
 	}
 
+	wh.StartHostedAgentWorker()
 	wh.StartScheduler()
 	s.Start(port)
 }

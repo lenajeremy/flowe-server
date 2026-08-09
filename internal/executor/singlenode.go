@@ -45,6 +45,16 @@ func ExecuteSingleNode(
 	return executeNode(ctx, node, outputs, edges, keys, runID, ownerID, emit)
 }
 
+// ResolveSingleNodeData returns the exact node configuration ExecuteSingleNode
+// will use after applying per-call overrides. Approval systems use it to pin,
+// hash, and display the effective call before any side effect occurs.
+func ResolveSingleNodeData(node WorkflowASTNode, overrides map[string]any) (FlowNodeData, error) {
+	if len(overrides) == 0 {
+		return node.Data, nil
+	}
+	return mergeNodeData(node.Data, overrides)
+}
+
 // mergeNodeData overlays override values onto a copy of the node data using
 // the JSON representation, so callers speak the same field names the frontend
 // and AI catalog use. Unknown keys are rejected to surface orchestrator

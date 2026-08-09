@@ -156,7 +156,7 @@ var oauthProviders = map[string]oauthProvider{
 		// the im/mpim user scopes let workflows list and read the connecting
 		// user's DMs and group chats (bots are never members of those).
 		extraAuthQ: url.Values{
-			"scope":      {"chat:write,chat:write.customize,chat:write.public,channels:read,channels:history,channels:manage,channels:join,groups:read,groups:write,users:read,users:read.email,reactions:write,pins:write,files:write"},
+			"scope":      {"app_mentions:read,chat:write,chat:write.customize,chat:write.public,channels:read,channels:history,channels:manage,channels:join,groups:read,groups:history,groups:write,users:read,users:read.email,reactions:write,pins:write,files:write"},
 			"user_scope": {"chat:write,im:write,im:read,im:history,mpim:read,mpim:history,search:read"},
 		},
 	},
@@ -481,7 +481,11 @@ type oauthStateEntry struct {
 	// into OAuth, then verified against the resulting GitHub App user token.
 	githubInstall        bool
 	githubInstallationID string
-	expires              time.Time
+	// agentHost distinguishes an org-level team-chat installation from an
+	// ordinary user-owned Slack action credential, even though both use the same
+	// Slack OAuth application and callback.
+	agentHost bool
+	expires   time.Time
 }
 
 var (
@@ -500,6 +504,12 @@ func newOAuthStateShop(userID, orgID, origin, shop string) string {
 func newOAuthStateFull(userID, orgID, origin, shop, verifier string) string {
 	return newOAuthStateEntry(oauthStateEntry{
 		userID: userID, orgID: orgID, origin: origin, shop: shop, verifier: verifier,
+	})
+}
+
+func newAgentHostOAuthState(userID, orgID, origin, verifier string) string {
+	return newOAuthStateEntry(oauthStateEntry{
+		userID: userID, orgID: orgID, origin: origin, verifier: verifier, agentHost: true,
 	})
 }
 
@@ -678,7 +688,11 @@ func (h *WorkflowHandler) ConnectIntegration(c *gin.Context) {
 		q.Set("code_challenge", pkceChallenge(verifier))
 		q.Set("code_challenge_method", "S256")
 	}
-	q.Set("state", newOAuthStateFull(currentUserID(c), currentOrgID(c), openerOrigin(c), "", verifier))
+	if agentHost, _ := c.Get("agent-host-connect"); agentHost == true {
+		q.Set("state", newAgentHostOAuthState(currentUserID(c), currentOrgID(c), openerOrigin(c), verifier))
+	} else {
+		q.Set("state", newOAuthStateFull(currentUserID(c), currentOrgID(c), openerOrigin(c), "", verifier))
+	}
 	for k, vs := range prov.extraAuthQ {
 		for _, v := range vs {
 			q.Set(k, v)
@@ -811,6 +825,14 @@ func (h *WorkflowHandler) CallbackIntegration(c *gin.Context) {
 		telemetry.AuthEvent(ctx, "integration_oauth", "error")
 		oauthResultPage(c, provider, openerOrig, false, "failed to store connection")
 		return
+	}
+	if provider == "slack" && st.agentHost {
+		if err := h.syncSlackAgentHost(orgID, userID, conn); err != nil {
+			slog.WarnContext(ctx, "slack agent host sync failed", "reason", truncate(err.Error(), 200))
+			telemetry.AuthEvent(ctx, "integration_oauth", "error")
+			oauthResultPage(c, provider, openerOrig, false, err.Error())
+			return
+		}
 	}
 	slog.InfoContext(ctx, "integration connected", "provider", provider, "user_id", userID)
 	telemetry.AuthEvent(ctx, "integration_oauth", "ok")

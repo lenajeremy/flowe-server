@@ -268,17 +268,50 @@ func (h *WorkflowHandler) RemoveMember(c *gin.Context) {
 		c.JSON(http.StatusForbidden, gin.H{"error": "only owners and admins can remove people"})
 		return
 	}
-	if err := tenancy.RemoveMember(h.db.DB, orgID, target); err != nil {
+	// A hosted agent delegates its deployer's Fernary identity. The cross-replica
+	// authority lock is held by approved external mutations from claim through
+	// outcome persistence, so removal either revokes first or waits for the
+	// already-authorized operation to finish. Revocation and membership deletion
+	// then commit as one database transaction.
+	err := h.withHostedAuthorityLock(c.Request.Context(), orgID, target, func(connection *gorm.DB) error {
+		return removeMemberAndRevokeAgentAuthority(connection, orgID, target)
+	})
+	if err != nil {
 		if errors.Is(err, tenancy.ErrNotPermitted) {
 			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
 			return
 		}
-		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+		if errors.Is(err, tenancy.ErrNotMember) {
+			c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+			return
+		}
+		slog.ErrorContext(c.Request.Context(), "could not atomically remove organization member",
+			"org_id", orgID, "user_id", target, "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not remove organization member"})
 		return
 	}
 	slog.InfoContext(c.Request.Context(), "org member removed",
 		"org_id", orgID, "removed_by", me, "self", target == me)
 	c.JSON(http.StatusOK, gin.H{"removed": true})
+}
+
+func removeMemberAndRevokeAgentAuthority(db *gorm.DB, orgID, target string) error {
+	return db.Transaction(func(tx *gorm.DB) error {
+		deploymentIDs := tx.Model(&models.AgentDeployment{}).Select("id").
+			Where("organization_id = ? AND deployed_by_user_id = ?", orgID, target)
+		if err := tx.Model(&models.AgentDeployment{}).
+			Where("organization_id = ? AND deployed_by_user_id = ? AND status <> ?",
+				orgID, target, models.AgentDeploymentRevoked).
+			Update("status", models.AgentDeploymentRevoked).Error; err != nil {
+			return err
+		}
+		if err := tx.Model(&models.AgentDeploymentTarget{}).
+			Where("deployment_id IN (?)", deploymentIDs).
+			Update("enabled", false).Error; err != nil {
+			return err
+		}
+		return tenancy.RemoveMemberWithinTransaction(tx, orgID, target)
+	})
 }
 
 // AcceptInvite — POST /api/org/invites/accept {"token":"…"}
