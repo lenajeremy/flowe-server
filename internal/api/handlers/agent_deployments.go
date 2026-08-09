@@ -456,10 +456,9 @@ func (h *WorkflowHandler) ListAgentHosts(c *gin.Context) {
 }
 
 func (h *WorkflowHandler) ConnectAgentHost(c *gin.Context) {
-	if c.Param("provider") != "slack" {
-		c.JSON(http.StatusNotFound, gin.H{"error": "unknown agent host"})
-		return
-	}
+	// The agent-host OAuth route is intentionally static. Inject the provider
+	// expected by the shared integration OAuth implementation.
+	c.Params = append(c.Params, gin.Param{Key: "provider", Value: "slack"})
 	c.Set("agent-host-connect", true)
 	h.ConnectIntegration(c)
 }
