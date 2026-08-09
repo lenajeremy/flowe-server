@@ -42,9 +42,35 @@ type AgentNodeGrant struct {
 	AllowedOverrideFields []string `json:"allowedOverrideFields"`
 }
 
+// MarshalJSON keeps the public policy contract stable when a least-privilege
+// grant has no editable fields. encoding/json normally renders nil slices as
+// null, but clients should always receive JSON arrays for collection fields.
+func (grant AgentNodeGrant) MarshalJSON() ([]byte, error) {
+	type grantJSON AgentNodeGrant
+	encoded := grantJSON(grant)
+	if encoded.AllowedOperations == nil {
+		encoded.AllowedOperations = []string{}
+	}
+	if encoded.AllowedOverrideFields == nil {
+		encoded.AllowedOverrideFields = []string{}
+	}
+	return json.Marshal(encoded)
+}
+
 type AgentCapabilityPolicy struct {
 	Version int              `json:"version"`
 	Nodes   []AgentNodeGrant `json:"nodes"`
+}
+
+// MarshalJSON applies the same collection guarantee to an entirely closed
+// policy, which has no node grants.
+func (policy AgentCapabilityPolicy) MarshalJSON() ([]byte, error) {
+	type policyJSON AgentCapabilityPolicy
+	encoded := policyJSON(policy)
+	if encoded.Nodes == nil {
+		encoded.Nodes = []AgentNodeGrant{}
+	}
+	return json.Marshal(encoded)
 }
 
 type AgentAuthorizedCall struct {
@@ -78,6 +104,7 @@ func agentNodeCapability(node executor.WorkflowASTNode) (AgentNodeCapability, bo
 
 	capability := AgentNodeCapability{
 		NodeID: node.ID, NodeType: node.Data.NodeType, Label: node.Data.Label,
+		Operations: []AgentOperationCapability{}, OverridableFields: []string{},
 	}
 	entry := catalogEntry(string(node.Data.NodeType))
 	fieldDocs := map[string]any{}

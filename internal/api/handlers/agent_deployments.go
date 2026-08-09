@@ -89,7 +89,13 @@ func summarizeAgentPolicy(ast executor.WorkflowAST, policy AgentCapabilityPolicy
 	for _, node := range ast.Nodes {
 		byNode[node.ID] = node
 	}
-	summary := AgentPermissionSummary{Goal: strings.TrimSpace(goal), Warnings: append([]string(nil), warnings...)}
+	summary := AgentPermissionSummary{
+		Goal:                    strings.TrimSpace(goal),
+		CanRead:                 []string{},
+		WritesRequiringApproval: []string{},
+		FixedSettings:           []string{},
+		Warnings:                append([]string{}, warnings...),
+	}
 	for _, grant := range policy.Nodes {
 		node, exists := byNode[grant.NodeID]
 		if !exists {
