@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -32,6 +34,7 @@ func hostedAgentSafetyDB(t *testing.T) *gorm.DB {
 	}
 	if err := db.AutoMigrate(
 		&models.OrgMember{},
+		&models.AgentHostInstallation{},
 		&models.AgentDeployment{},
 		&models.AgentDeploymentTarget{},
 		&models.HostedAgentDelivery{},
@@ -101,6 +104,7 @@ func cleanupHostedAgentSafety(t *testing.T, db *gorm.DB, orgID string) {
 		db.Unscoped().Where("organization_id = ?", orgID).Delete(&models.AgentDeploymentTarget{})
 		db.Unscoped().Where("organization_id = ?", orgID).Delete(&models.AgentDeployment{})
 		db.Unscoped().Where("organization_id = ?", orgID).Delete(&models.ChatSession{})
+		db.Unscoped().Where("organization_id = ?", orgID).Delete(&models.AgentHostInstallation{})
 		db.Unscoped().Where("organization_id = ?", orgID).Delete(&models.OrgMember{})
 	})
 }
@@ -176,6 +180,281 @@ func TestAgentDeploymentStatusUpdateUsesCleanLockedStatement(t *testing.T) {
 	}
 	if stored.Status != models.AgentDeploymentPaused {
 		t.Fatalf("deployment status = %q, want paused", stored.Status)
+	}
+}
+
+func TestHostedAuthorityVerificationUsesCleanLockedStatements(t *testing.T) {
+	db := hostedAgentSafetyDB(t)
+	orgID, userID := uuid.NewString(), uuid.NewString()
+	cleanupHostedAgentSafety(t, db, orgID)
+	if err := db.Create(&models.OrgMember{
+		OrganizationID: orgID, UserID: userID, Role: models.RoleMember,
+	}).Error; err != nil {
+		t.Fatalf("create membership: %v", err)
+	}
+	host := models.AgentHostInstallation{
+		OrganizationID: orgID, InstalledByUserID: userID, Provider: slackAgentProvider,
+		ExternalWorkspaceID:   "T" + strings.ReplaceAll(uuid.NewString(), "-", "")[:10],
+		ExternalWorkspaceName: "Safety workspace", BotUserID: "U123", BotToken: "xoxb-test",
+		Status: models.AgentHostActive,
+	}
+	if err := db.Create(&host).Error; err != nil {
+		t.Fatalf("create host: %v", err)
+	}
+	deployment := safetyDeployment(orgID, userID)
+	deployment.HostInstallationID = host.ID.String()
+	if err := db.Create(&deployment).Error; err != nil {
+		t.Fatalf("create deployment: %v", err)
+	}
+	target := models.AgentDeploymentTarget{
+		OrganizationID: orgID, DeploymentID: deployment.ID.String(), Provider: slackAgentProvider,
+		ExternalWorkspaceID: host.ExternalWorkspaceID, ExternalChannelID: "C" + strings.ReplaceAll(uuid.NewString(), "-", "")[:10],
+		ExternalChannelName: "safety", Enabled: true,
+	}
+	if err := db.Create(&target).Error; err != nil {
+		t.Fatalf("create target: %v", err)
+	}
+	handler := &WorkflowHandler{db: &database.DBClient{DB: db}}
+	resolved := &resolvedSlackDeployment{Deployment: deployment, Target: target, Host: host}
+	updatedPolicy := models.JSONB(`{"version":1,"nodes":[{"nodeId":"live-node","allowedOperations":["list"],"allowedOverrideFields":[]}]}`)
+	if err := db.Model(&models.AgentDeployment{}).Where("id = ?", deployment.ID).
+		Update("capability_policy", updatedPolicy).Error; err != nil {
+		t.Fatalf("update live deployment policy: %v", err)
+	}
+	var verified *models.AgentDeployment
+	if err := handler.withHostedAuthorityLock(context.Background(), orgID, userID, func(connection *gorm.DB) error {
+		var err error
+		verified, err = verifyHostedAgentAuthorityOn(connection, resolved)
+		return err
+	}); err != nil {
+		t.Fatalf("verify hosted authority under advisory lock: %v", err)
+	}
+	if verified == nil {
+		t.Fatal("authority verification returned no live deployment")
+	}
+	assertJSONEqual(t, verified.CapabilityPolicy, updatedPolicy)
+}
+
+func TestAgentDeploymentManagementAuthorization(t *testing.T) {
+	db := hostedAgentSafetyDB(t)
+	orgID := uuid.NewString()
+	deployerID, adminID, memberID := uuid.NewString(), uuid.NewString(), uuid.NewString()
+	cleanupHostedAgentSafety(t, db, orgID)
+	members := []models.OrgMember{
+		{OrganizationID: orgID, UserID: deployerID, Role: models.RoleMember},
+		{OrganizationID: orgID, UserID: adminID, Role: models.RoleAdmin},
+		{OrganizationID: orgID, UserID: memberID, Role: models.RoleMember},
+	}
+	if err := db.Create(&members).Error; err != nil {
+		t.Fatalf("create memberships: %v", err)
+	}
+	deployment := safetyDeployment(orgID, deployerID)
+	handler := &WorkflowHandler{db: &database.DBClient{DB: db}}
+	if !handler.canManageAgentDeployment(db, &deployment, deployerID) {
+		t.Fatal("deployment owner cannot manage their agent")
+	}
+	if !handler.canManageAgentDeployment(db, &deployment, adminID) {
+		t.Fatal("organization admin cannot manage an agent")
+	}
+	if handler.canManageAgentDeployment(db, &deployment, memberID) {
+		t.Fatal("plain organization member can manage another member's agent")
+	}
+	if handler.canManageAgentDeployment(db, &deployment, uuid.NewString()) {
+		t.Fatal("non-member can manage an agent")
+	}
+}
+
+func TestAgentPolicyUpdateExpiresPendingApprovals(t *testing.T) {
+	db := hostedAgentSafetyDB(t)
+	orgID, userID := uuid.NewString(), uuid.NewString()
+	cleanupHostedAgentSafety(t, db, orgID)
+	deployment := safetyDeployment(orgID, userID)
+	if err := db.Create(&deployment).Error; err != nil {
+		t.Fatalf("create deployment: %v", err)
+	}
+	approval := models.HostedAgentApproval{
+		OrganizationID: orgID, DeploymentID: deployment.ID.String(), DeploymentVersion: deployment.Version,
+		ThreadID: uuid.NewString(), ChatSessionID: uuid.NewString(), RequesterExternalID: "U123",
+		SourceDeliveryID: uuid.NewString(), NodeID: "node-1", Operation: "create_issue", Reason: "requested",
+		EffectiveOverrides: models.JSONB(`{}`), EffectiveConfigHash: "hash", DisplayDetails: models.JSONB(`{}`),
+		Status: models.HostedAgentApprovalPending, ExpiresAt: time.Now().Add(time.Minute),
+	}
+	if err := db.Create(&approval).Error; err != nil {
+		t.Fatalf("create approval: %v", err)
+	}
+	newPolicy := models.JSONB(`{"version":1,"nodes":[{"nodeId":"node-1","allowedOperations":["list"],"allowedOverrideFields":[]}]}`)
+	if err := db.Transaction(func(tx *gorm.DB) error {
+		return updateAgentDeploymentAndExpireApprovals(tx, &deployment, map[string]any{
+			"capability_policy": newPolicy,
+		}, "Deployment permissions changed before approval")
+	}); err != nil {
+		t.Fatalf("update policy: %v", err)
+	}
+	var storedDeployment models.AgentDeployment
+	if err := db.First(&storedDeployment, "id = ?", deployment.ID).Error; err != nil {
+		t.Fatalf("reload deployment: %v", err)
+	}
+	assertJSONEqual(t, storedDeployment.CapabilityPolicy, newPolicy)
+	var storedApproval models.HostedAgentApproval
+	if err := db.First(&storedApproval, "id = ?", approval.ID).Error; err != nil {
+		t.Fatalf("reload approval: %v", err)
+	}
+	if storedApproval.Status != models.HostedAgentApprovalExpired || storedApproval.ResolvedAt == nil {
+		t.Fatalf("approval after policy edit = (%q, %v), want expired with resolved time", storedApproval.Status, storedApproval.ResolvedAt)
+	}
+}
+
+func TestAgentDestinationUpdateAtomicallyReplacesTargetsAndExpiresApprovals(t *testing.T) {
+	db := hostedAgentSafetyDB(t)
+	orgID, userID := uuid.NewString(), uuid.NewString()
+	cleanupHostedAgentSafety(t, db, orgID)
+	oldHost := models.AgentHostInstallation{
+		OrganizationID: orgID, InstalledByUserID: userID, Provider: slackAgentProvider,
+		ExternalWorkspaceID:   "T" + strings.ReplaceAll(uuid.NewString(), "-", "")[:10],
+		ExternalWorkspaceName: "Old workspace", BotToken: "xoxb-old", Status: models.AgentHostActive,
+	}
+	newHost := models.AgentHostInstallation{
+		OrganizationID: orgID, InstalledByUserID: userID, Provider: slackAgentProvider,
+		ExternalWorkspaceID:   "T" + strings.ReplaceAll(uuid.NewString(), "-", "")[:10],
+		ExternalWorkspaceName: "New workspace", BotToken: "xoxb-new", Status: models.AgentHostActive,
+	}
+	if err := db.Create(&oldHost).Error; err != nil {
+		t.Fatalf("create old host: %v", err)
+	}
+	if err := db.Create(&newHost).Error; err != nil {
+		t.Fatalf("create new host: %v", err)
+	}
+	deployment := safetyDeployment(orgID, userID)
+	deployment.HostInstallationID = oldHost.ID.String()
+	if err := db.Create(&deployment).Error; err != nil {
+		t.Fatalf("create deployment: %v", err)
+	}
+	oldTarget := models.AgentDeploymentTarget{
+		OrganizationID: orgID, DeploymentID: deployment.ID.String(), Provider: slackAgentProvider,
+		ExternalWorkspaceID: oldHost.ExternalWorkspaceID, ExternalChannelID: "COLD123", ExternalChannelName: "old", Enabled: true,
+	}
+	if err := db.Create(&oldTarget).Error; err != nil {
+		t.Fatalf("create old target: %v", err)
+	}
+	approval := models.HostedAgentApproval{
+		OrganizationID: orgID, DeploymentID: deployment.ID.String(), DeploymentVersion: deployment.Version,
+		ThreadID: uuid.NewString(), ChatSessionID: uuid.NewString(), RequesterExternalID: "U123",
+		SourceDeliveryID: uuid.NewString(), NodeID: "node-1", Operation: "create_issue", Reason: "requested",
+		EffectiveOverrides: models.JSONB(`{}`), EffectiveConfigHash: "hash", DisplayDetails: models.JSONB(`{}`),
+		Status: models.HostedAgentApprovalPending, ExpiresAt: time.Now().Add(time.Minute),
+	}
+	if err := db.Create(&approval).Error; err != nil {
+		t.Fatalf("create approval: %v", err)
+	}
+	channels := []agentDeploymentChannelInput{{ID: "CNEW123", Name: "new"}}
+	if err := db.Transaction(func(tx *gorm.DB) error {
+		if err := updateAgentDeploymentAndExpireApprovals(tx, &deployment, map[string]any{
+			"host_installation_id": newHost.ID.String(), "provider": newHost.Provider,
+		}, "Deployment Slack destination changed before approval"); err != nil {
+			return err
+		}
+		return replaceAgentDeploymentTargets(tx, &deployment, &newHost, channels)
+	}); err != nil {
+		t.Fatalf("replace destination: %v", err)
+	}
+	var storedDeployment models.AgentDeployment
+	if err := db.First(&storedDeployment, "id = ?", deployment.ID).Error; err != nil {
+		t.Fatalf("reload deployment: %v", err)
+	}
+	if storedDeployment.HostInstallationID != newHost.ID.String() {
+		t.Fatalf("deployment host = %q, want %q", storedDeployment.HostInstallationID, newHost.ID)
+	}
+	var liveTargets []models.AgentDeploymentTarget
+	if err := db.Where("deployment_id = ?", deployment.ID).Find(&liveTargets).Error; err != nil {
+		t.Fatalf("load live targets: %v", err)
+	}
+	if len(liveTargets) != 1 || liveTargets[0].ExternalWorkspaceID != newHost.ExternalWorkspaceID || liveTargets[0].ExternalChannelID != "CNEW123" {
+		t.Fatalf("live targets = %#v, want only new destination", liveTargets)
+	}
+	var storedApproval models.HostedAgentApproval
+	if err := db.First(&storedApproval, "id = ?", approval.ID).Error; err != nil {
+		t.Fatalf("reload approval: %v", err)
+	}
+	if storedApproval.Status != models.HostedAgentApprovalExpired {
+		t.Fatalf("approval status = %q, want expired", storedApproval.Status)
+	}
+}
+
+func assertJSONEqual(t *testing.T, got, want []byte) {
+	t.Helper()
+	var gotValue, wantValue any
+	if err := json.Unmarshal(got, &gotValue); err != nil {
+		t.Fatalf("decode actual JSON %s: %v", got, err)
+	}
+	if err := json.Unmarshal(want, &wantValue); err != nil {
+		t.Fatalf("decode expected JSON %s: %v", want, err)
+	}
+	if !reflect.DeepEqual(gotValue, wantValue) {
+		t.Fatalf("JSON = %s, want %s", got, want)
+	}
+}
+
+func TestHostedDeliveryKeepsItsFirstResolvedDeployment(t *testing.T) {
+	db := hostedAgentSafetyDB(t)
+	delivery := models.HostedAgentDelivery{
+		Provider: slackAgentProvider, ExternalDeliveryID: uuid.NewString(), ExternalWorkspaceID: "T123",
+		EventKind: "mention", Payload: models.JSONB(`{}`), Status: models.HostedAgentDeliveryProcessing,
+		AvailableAt: time.Now().UTC(),
+	}
+	if err := db.Create(&delivery).Error; err != nil {
+		t.Fatalf("create delivery: %v", err)
+	}
+	t.Cleanup(func() { db.Unscoped().Delete(&models.HostedAgentDelivery{}, "id = ?", delivery.ID) })
+	handler := &WorkflowHandler{db: &database.DBClient{DB: db}}
+	firstID, secondID := uuid.NewString(), uuid.NewString()
+	associated, err := handler.associateHostedAgentDeliveryWithDeployment(&delivery, firstID)
+	if err != nil || !associated {
+		t.Fatalf("first association = (%v, %v), want success", associated, err)
+	}
+	associated, err = handler.associateHostedAgentDeliveryWithDeployment(&delivery, secondID)
+	if err != nil || associated {
+		t.Fatalf("replacement association = (%v, %v), want safely rejected", associated, err)
+	}
+	var stored models.HostedAgentDelivery
+	if err := db.First(&stored, "id = ?", delivery.ID).Error; err != nil {
+		t.Fatalf("reload delivery: %v", err)
+	}
+	if stored.ResponseDeploymentID != firstID {
+		t.Fatalf("delivery deployment = %q, want first deployment %q", stored.ResponseDeploymentID, firstID)
+	}
+}
+
+func TestLatestHostedAgentDeliveriesReturnsOneNewestRowPerDeployment(t *testing.T) {
+	db := hostedAgentSafetyDB(t)
+	firstDeploymentID, secondDeploymentID := uuid.NewString(), uuid.NewString()
+	base := time.Now().UTC().Add(-time.Minute)
+	deliveries := []models.HostedAgentDelivery{
+		{BaseModel: models.BaseModel{CreatedAt: base}, Provider: slackAgentProvider, ExternalDeliveryID: uuid.NewString(), EventKind: "mention", Payload: models.JSONB(`{}`), Status: models.HostedAgentDeliveryFailed, AvailableAt: base, ResponseDeploymentID: firstDeploymentID, LastError: "old failure"},
+		{BaseModel: models.BaseModel{CreatedAt: base.Add(time.Second)}, Provider: slackAgentProvider, ExternalDeliveryID: uuid.NewString(), EventKind: "mention", Payload: models.JSONB(`{}`), Status: models.HostedAgentDeliveryCompleted, AvailableAt: base, ResponseDeploymentID: firstDeploymentID},
+		{BaseModel: models.BaseModel{CreatedAt: base.Add(2 * time.Second)}, Provider: slackAgentProvider, ExternalDeliveryID: uuid.NewString(), EventKind: "mention", Payload: models.JSONB(`{}`), Status: models.HostedAgentDeliveryProcessing, AvailableAt: base, ResponseDeploymentID: secondDeploymentID},
+	}
+	if err := db.Create(&deliveries).Error; err != nil {
+		t.Fatalf("create delivery history: %v", err)
+	}
+	t.Cleanup(func() {
+		db.Unscoped().Where("response_deployment_id IN ?", []string{firstDeploymentID, secondDeploymentID}).Delete(&models.HostedAgentDelivery{})
+	})
+	latest, err := latestHostedAgentDeliveries(db, []string{firstDeploymentID, secondDeploymentID})
+	if err != nil {
+		t.Fatalf("load latest deliveries: %v", err)
+	}
+	if len(latest) != 2 {
+		t.Fatalf("latest deliveries = %d, want 2", len(latest))
+	}
+	byDeployment := map[string]models.HostedAgentDelivery{}
+	for _, delivery := range latest {
+		byDeployment[delivery.ResponseDeploymentID] = delivery
+	}
+	if byDeployment[firstDeploymentID].Status != models.HostedAgentDeliveryCompleted {
+		t.Fatalf("first deployment latest status = %q, want completed", byDeployment[firstDeploymentID].Status)
+	}
+	if byDeployment[secondDeploymentID].Status != models.HostedAgentDeliveryProcessing {
+		t.Fatalf("second deployment latest status = %q, want processing", byDeployment[secondDeploymentID].Status)
 	}
 }
 

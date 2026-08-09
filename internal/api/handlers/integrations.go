@@ -701,7 +701,7 @@ func (h *WorkflowHandler) ConnectIntegration(c *gin.Context) {
 		}
 	}
 	if agentHost == true && prov.name == "slack" {
-		q.Set("scope", strings.Join(slackAgentHostRequiredScopes, ","))
+		q.Set("scope", strings.Join(slackAgentHostRequestedScopes, ","))
 		q.Del("user_scope")
 	}
 	// Return the authorize URL (not a 302) so the SPA can call this with an
