@@ -162,7 +162,11 @@ const (
 	HostedAgentApprovalRejected  HostedAgentApprovalStatus = "rejected"
 	HostedAgentApprovalExpired   HostedAgentApprovalStatus = "expired"
 	HostedAgentApprovalExecuted  HostedAgentApprovalStatus = "executed"
-	HostedAgentApprovalFailed    HostedAgentApprovalStatus = "failed"
+	// OutcomeUnknown means execution was claimed but the worker stopped before
+	// it could durably record whether the external side effect succeeded. It is
+	// terminal and must never be retried automatically.
+	HostedAgentApprovalOutcomeUnknown HostedAgentApprovalStatus = "outcome_unknown"
+	HostedAgentApprovalFailed         HostedAgentApprovalStatus = "failed"
 )
 
 // HostedAgentApproval pins the exact authorized call. Approval execution uses
@@ -186,5 +190,11 @@ type HostedAgentApproval struct {
 	ExpiresAt           time.Time                 `json:"expires_at" gorm:"not null;index"`
 	ResolvedAt          *time.Time                `json:"resolved_at,omitempty"`
 	ExecutedAt          *time.Time                `json:"executed_at,omitempty"`
-	LastError           string                    `json:"last_error,omitempty"`
+	// ExecutionResult is written immediately after a successful tool call,
+	// before the result is merged into the chat session. SessionRecordedAt makes
+	// that merge idempotently retryable after a database or Slack failure.
+	ExecutionResult           string     `json:"-" gorm:"type:text"`
+	ExecutionResultRecordedAt *time.Time `json:"-"`
+	SessionRecordedAt         *time.Time `json:"session_recorded_at,omitempty"`
+	LastError                 string     `json:"last_error,omitempty"`
 }
