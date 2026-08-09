@@ -185,10 +185,7 @@ func InitServer(port int, db *database.DBClient, rdb *redis.Client) {
 		api.POST("/chat-sessions/:id/message", wh.AgentChatTurn)
 
 		// Deploy workflow agents into team chat hosts.
-		api.GET("/agent-hosts", wh.ListAgentHosts)
-		api.GET("/agent-hosts/:provider/connect", wh.ConnectAgentHost)
-		api.GET("/agent-hosts/:id/channels", wh.ListAgentHostChannels)
-		api.DELETE("/agent-hosts/:id", wh.DeleteAgentHost)
+		registerAgentHostRoutes(api, wh)
 		api.POST("/workflows/:id/agent-deployments/analyze", wh.AnalyzeAgentDeployment)
 		api.GET("/workflows/:id/agent-deployments/capabilities", wh.AgentDeploymentCapabilities)
 		api.POST("/workflows/:id/agent-deployments", wh.CreateAgentDeployment)
@@ -214,4 +211,14 @@ func InitServer(port int, db *database.DBClient, rdb *redis.Client) {
 	wh.StartHostedAgentWorker()
 	wh.StartScheduler()
 	s.Start(port)
+}
+
+// registerAgentHostRoutes keeps the provider-specific OAuth entry point static.
+// Gin requires sibling wildcard segments to use the same name, so a dynamic
+// /:provider/connect route cannot coexist with the installation /:id routes.
+func registerAgentHostRoutes(api *gin.RouterGroup, wh *handlers.WorkflowHandler) {
+	api.GET("/agent-hosts", wh.ListAgentHosts)
+	api.GET("/agent-hosts/slack/connect", wh.ConnectAgentHost)
+	api.GET("/agent-hosts/:id/channels", wh.ListAgentHostChannels)
+	api.DELETE("/agent-hosts/:id", wh.DeleteAgentHost)
 }
