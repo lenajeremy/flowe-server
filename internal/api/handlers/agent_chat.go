@@ -285,6 +285,7 @@ var agentSecretConfigFields = map[string]bool{
 	"typeformsecret":     true,
 	"netlifyenvvalue":    true,
 	"netlifyenvvarsjson": true,
+	"vercelenvvalue":     true,
 	"supabaseauthconfig": true,
 	"supabasedbpass":     true,
 	"supabaserevealkeys": true,

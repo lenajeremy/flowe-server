@@ -50,6 +50,7 @@ const (
 	NodeTypeCalendly            NodeType = "calendly"
 	NodeTypeDropbox             NodeType = "dropbox"
 	NodeTypeNetlify             NodeType = "netlify"
+	NodeTypeVercel              NodeType = "vercel"
 	NodeTypeSupabase            NodeType = "supabase"
 	NodeTypeGumroad             NodeType = "gumroad"
 	NodeTypeGoogleSearchConsole NodeType = "googlesearchconsole"
@@ -755,6 +756,35 @@ type FlowNodeData struct {
 	NetlifyLogType             string `json:"netlifyLogType,omitempty"`
 	NetlifyPage                int    `json:"netlifyPage,omitempty"`    // 1-based
 	NetlifyPerPage             int    `json:"netlifyPerPage,omitempty"` // capped at 100
+
+	// vercel
+	//
+	// VercelTeamId (or VercelTeamSlug) is sent on every call. Without it the token
+	// resolves to its owner's personal scope, and a team project 404s.
+	VercelTeamId   string `json:"vercelTeamId,omitempty"`
+	VercelTeamSlug string `json:"vercelTeamSlug,omitempty"`
+	// Project accepts an id or a name; deployment accepts an id or a deployment URL.
+	VercelProjectId     string `json:"vercelProjectId,omitempty"`
+	VercelDeploymentId  string `json:"vercelDeploymentId,omitempty"`
+	VercelName          string `json:"vercelName,omitempty"`   // project name; redeploy reads it back when unset
+	VercelTarget        string `json:"vercelTarget,omitempty"` // production|preview|development
+	VercelState         string `json:"vercelState,omitempty"`  // READY, ERROR, BUILDING, … (CSV allowed)
+	VercelBranch        string `json:"vercelBranch,omitempty"`
+	VercelSha           string `json:"vercelSha,omitempty"`
+	VercelAlias         string `json:"vercelAlias,omitempty"`
+	VercelDomain        string `json:"vercelDomain,omitempty"`
+	VercelRedirect      string `json:"vercelRedirect,omitempty"`
+	VercelGitBranch     string `json:"vercelGitBranch,omitempty"` // branch-scoped env var, or a branch-locked domain
+	VercelEnvKey        string `json:"vercelEnvKey,omitempty"`
+	VercelEnvValue      string `json:"vercelEnvValue,omitempty"`
+	VercelEnvVarId      string `json:"vercelEnvVarId,omitempty"`      // from list_env_vars
+	VercelEnvTarget     string `json:"vercelEnvTarget,omitempty"`     // CSV: production,preview,development
+	VercelEnvType       string `json:"vercelEnvType,omitempty"`       // encrypted|plain|sensitive
+	VercelProjectConfig string `json:"vercelProjectConfig,omitempty"` // raw JSON body for update_project
+	VercelUrl           string `json:"vercelUrl,omitempty"`
+	VercelSearch        string `json:"vercelSearch,omitempty"`
+	VercelBuildId       string `json:"vercelBuildId,omitempty"` // narrows build logs to one build
+	VercelLimit         int    `json:"vercelLimit,omitempty"`
 
 	// supabase
 	SupabaseAllowWrite          string `json:"supabaseAllowWrite,omitempty"` // "true" is required before run_sql will execute
