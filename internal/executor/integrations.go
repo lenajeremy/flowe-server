@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // Native Notion / Linear API calls. These replaced an n8n sidecar that only
@@ -521,11 +522,29 @@ func toInt(v any, fallback int) int {
 	return fallback
 }
 
+// Both helpers cut on a RUNE boundary, not a byte offset.
+//
+// n counts bytes, because it exists to bound a response's size, but a plain
+// s[:n] or s[len(s)-n:] can land inside a multibyte character and emit its
+// continuation bytes on their own. That is invalid UTF-8, and integration
+// payloads are full of multibyte text — build logs use ✓ and ▲, and product
+// names, email subjects and page titles are routinely non-ASCII. Go does not
+// error on it: json.Marshal silently substitutes U+FFFD, so the corruption
+// surfaces as mojibake in a run output rather than as a failure.
+//
+// Adjusting to the boundary drops at most three further bytes.
+
 func truncateStr(s string, n int) string {
 	if len(s) <= n {
 		return s
 	}
-	return s[:n] + "..."
+	// s[n] is the first excluded byte. If it continues a rune, that rune began
+	// inside the kept range and would be left incomplete, so retreat to its start.
+	end := n
+	for end > 0 && !utf8.RuneStart(s[end]) {
+		end--
+	}
+	return s[:end] + "..."
 }
 
 // tailStr keeps the END of an oversized string rather than the beginning.
@@ -537,5 +556,11 @@ func tailStr(s string, n int) string {
 	if len(s) <= n {
 		return s
 	}
-	return "..." + s[len(s)-n:]
+	// Advance past any continuation bytes at the cut, which would otherwise be
+	// returned as a headless fragment of the rune they belong to.
+	start := len(s) - n
+	for start < len(s) && !utf8.RuneStart(s[start]) {
+		start++
+	}
+	return "..." + s[start:]
 }

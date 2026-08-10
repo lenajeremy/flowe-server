@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 // What we actually send to Vercel.
@@ -428,5 +429,65 @@ func TestBuildLogTruncationKeepsTheEnd(t *testing.T) {
 	}
 	if got := tailStr("short", 200); got != "short" {
 		t.Errorf("tailStr mangled a short string: %q", got)
+	}
+}
+
+// Both truncation helpers cut at a byte offset, which can land inside a
+// multibyte character and emit its continuation bytes alone. Go does not error
+// on invalid UTF-8 — json.Marshal substitutes U+FFFD — so the only symptom is
+// mojibake in a run output. Real payloads hit this constantly: a Next.js build
+// log is full of ✓ and ▲, and names and subjects are routinely non-ASCII.
+//
+// Reported by review against tailStr and reproduced before fixing: tailStr("a€b", 3)
+// returned bytes 2e 2e 2e 82 ac 62. truncateStr had the same defect.
+func TestTruncationNeverSplitsAMultibyteCharacter(t *testing.T) {
+	// Every cut position across a string of mixed rune widths: 1-byte, 3-byte and
+	// the 4-byte emoji, so each n lands inside a rune at some point.
+	subject := "a€b✓c🚀d"
+	for n := 0; n <= len(subject)+2; n++ {
+		if got := truncateStr(subject, n); !utf8.ValidString(got) {
+			t.Errorf("truncateStr(%q, %d) = %q — invalid UTF-8 (% x)", subject, n, got, []byte(got))
+		}
+		if got := tailStr(subject, n); !utf8.ValidString(got) {
+			t.Errorf("tailStr(%q, %d) = %q — invalid UTF-8 (% x)", subject, n, got, []byte(got))
+		}
+	}
+
+	// The exact case from the review.
+	if got := tailStr("a€b", 3); !utf8.ValidString(got) {
+		t.Errorf("the reported case still yields invalid UTF-8: %q (% x)", got, []byte(got))
+	}
+
+	// Adjusting to a boundary must not swallow the whole string, or a log tail
+	// becomes an ellipsis. At most three bytes are given up.
+	long := strings.Repeat("✓", 500) + "FATAL"
+	tail := tailStr(long, 100)
+	if !strings.HasSuffix(tail, "FATAL") {
+		t.Errorf("boundary adjustment lost the end of the string: %q", tail)
+	}
+	if len(tail) < 100-3 {
+		t.Errorf("tailStr gave up %d bytes adjusting to a boundary, want at most 3",
+			100-len(tail))
+	}
+
+	// A string that is entirely one multibyte rune, cut below its width, must
+	// still be valid — the degenerate case that would tempt an off-by-one.
+	for n := 0; n < 4; n++ {
+		if got := tailStr("🚀", n); !utf8.ValidString(got) {
+			t.Errorf("tailStr(%q, %d) = %q — invalid", "🚀", n, got)
+		}
+		if got := truncateStr("🚀", n); !utf8.ValidString(got) {
+			t.Errorf("truncateStr(%q, %d) = %q — invalid", "🚀", n, got)
+		}
+	}
+
+	// Pure ASCII must be unaffected, since that is the overwhelming majority of
+	// payloads and any change there would be a silent regression in output size.
+	ascii := strings.Repeat("x", 50)
+	if got := truncateStr(ascii, 10); got != strings.Repeat("x", 10)+"..." {
+		t.Errorf("ASCII truncation changed: %q", got)
+	}
+	if got := tailStr(ascii, 10); got != "..."+strings.Repeat("x", 10) {
+		t.Errorf("ASCII tail changed: %q", got)
 	}
 }
