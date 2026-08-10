@@ -79,12 +79,26 @@ func (s *slackStub) serve(t *testing.T) {
 			_, _ = w.Write([]byte(`{"ok":false,"error":"users_not_found"}`))
 
 		case "users.conversations":
-			// Slack only returns a private channel here when both the named user
-			// and the bot are in it, so a correctly scoped call cannot see
-			// #board-acquisition.
+			// Deliberately no is_member: Slack's reference states it is not returned
+			// by this method. The stub used to invent it, which is why a version
+			// that left every channel disabled passed.
+			//
+			// A request naming a user is that user's list; one with no user is the
+			// bot's own, which is how is_member gets filled. The bot is in
+			// #engineering and #my-private-team but not #user-only.
+			if r.URL.Query().Get("user") == "" {
+				_, _ = w.Write([]byte(`{"ok":true,"channels":[
+					{"id":"C_ENG","name":"engineering","is_private":false},
+					{"id":"C_MINE","name":"my-private-team","is_private":true}
+				],"response_metadata":{"next_cursor":""}}`))
+				return
+			}
+			// Slack returns a private channel here only when the bot shares
+			// membership, so #board-acquisition can never appear.
 			_, _ = w.Write([]byte(`{"ok":true,"channels":[
-				{"id":"C_ENG","name":"engineering","is_member":true,"is_private":false},
-				{"id":"C_MINE","name":"my-private-team","is_member":true,"is_private":true}
+				{"id":"C_ENG","name":"engineering","is_private":false},
+				{"id":"C_MINE","name":"my-private-team","is_private":true},
+				{"id":"C_USERONLY","name":"user-only","is_private":false}
 			],"response_metadata":{"next_cursor":""}}`))
 
 		case "conversations.list":
@@ -117,6 +131,20 @@ func (s *slackStub) asked(method string) (url.Values, bool) {
 	defer s.mu.Unlock()
 	for i, m := range s.methods {
 		if m == method {
+			return s.calls[i], true
+		}
+	}
+	return nil, false
+}
+
+// askedFor finds the call to method whose query sets param to value. Order is not
+// asserted: the handler makes two users.conversations calls — the caller's list
+// and the bot's own — and which comes first is not a guarantee worth pinning.
+func (s *slackStub) askedFor(method, param, value string) (url.Values, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i, m := range s.methods {
+		if m == method && s.calls[i].Get(param) == value {
 			return s.calls[i], true
 		}
 	}
@@ -198,12 +226,8 @@ func TestChannelListIsScopedToTheCallersOwnMembership(t *testing.T) {
 
 	// The request has to name the caller. Without a user id Slack answers for the
 	// whole workspace, which is the bug.
-	query, called := stub.asked("users.conversations")
-	if !called {
-		t.Fatal("handler never asked for the caller's own conversations")
-	}
-	if got := query.Get("user"); got != "U_CALLER" {
-		t.Errorf("scoped to user %q, want U_CALLER — an unscoped list is workspace-wide", got)
+	if _, called := stub.askedFor("users.conversations", "user", "U_CALLER"); !called {
+		t.Error("handler never asked for the caller's own conversations; an unscoped list is workspace-wide")
 	}
 	if _, wideOpen := stub.asked("conversations.list"); wideOpen {
 		t.Error("handler still called conversations.list, which ignores who is asking")
@@ -218,6 +242,23 @@ func TestChannelListIsScopedToTheCallersOwnMembership(t *testing.T) {
 	}
 	if !names["engineering"] || !names["my-private-team"] {
 		t.Errorf("caller lost channels they are entitled to: %v", names)
+	}
+
+	// The picker disables any channel with is_member false, so an absent flag
+	// means nothing is selectable and no deployment can be created. Slack does
+	// not send it on this method, so it has to be filled from the bot's own list.
+	botIn := map[string]bool{}
+	for _, ch := range inventory.Channels {
+		botIn[ch.Name] = ch.IsMember
+	}
+	if !botIn["engineering"] {
+		t.Error("engineering came back not-a-member, so the picker would disable it")
+	}
+	if !botIn["my-private-team"] {
+		t.Error("my-private-team came back not-a-member, so the picker would disable it")
+	}
+	if botIn["user-only"] {
+		t.Error("user-only is a channel the bot is not in; marking it joinable would let a deployment post nowhere")
 	}
 	if inventory.Scope != "member" {
 		t.Errorf("scope = %q, want member", inventory.Scope)

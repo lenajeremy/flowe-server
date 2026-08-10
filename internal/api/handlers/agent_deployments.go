@@ -29,6 +29,7 @@ var slackAgentHostRequiredScopes = []string{
 	"app_mentions:read", "chat:write", "chat:write.customize",
 	"channels:read", "channels:history", "groups:read", "groups:history",
 }
+
 // users:read.email maps a Fernary member onto their Slack account so the channel
 // picker can be scoped to what that person can already see. Requested but not
 // required: installs that predate it keep working, and offer public channels
@@ -1139,6 +1140,50 @@ func (h *WorkflowHandler) slackWorkspaceUserID(c *gin.Context, botToken string) 
 	return strings.TrimSpace(lookup.User.ID)
 }
 
+// pageSlackChannels walks a cursor-paginated Slack channel listing.
+func (h *WorkflowHandler) pageSlackChannels(c *gin.Context, botToken, method string, payload map[string]any) ([]agentHostSlackChannel, error) {
+	var channels []agentHostSlackChannel
+	cursor := ""
+	for page := 0; page < 10; page++ {
+		var response struct {
+			Channels []agentHostSlackChannel `json:"channels"`
+			Metadata struct {
+				NextCursor string `json:"next_cursor"`
+			} `json:"response_metadata"`
+		}
+		if cursor != "" {
+			payload["cursor"] = cursor
+		}
+		if err := slackAgentAPIGet(c.Request.Context(), botToken, method, payload, &response); err != nil {
+			return nil, err
+		}
+		channels = append(channels, response.Channels...)
+		cursor = strings.TrimSpace(response.Metadata.NextCursor)
+		if cursor == "" {
+			break
+		}
+	}
+	return channels, nil
+}
+
+// slackConversations lists conversations for one user, or for the bot itself when
+// userID is empty. Errors are swallowed on purpose: this only decides whether a
+// channel is shown as ready or as "invite Fernary first", and failing that check
+// should degrade the label rather than the whole picker.
+func (h *WorkflowHandler) slackConversations(c *gin.Context, botToken, userID string) []agentHostSlackChannel {
+	payload := map[string]any{
+		"limit": 200, "exclude_archived": true, "types": "public_channel,private_channel",
+	}
+	if userID != "" {
+		payload["user"] = userID
+	}
+	channels, err := h.pageSlackChannels(c, botToken, "users.conversations", payload)
+	if err != nil {
+		return nil
+	}
+	return channels
+}
+
 // ListAgentHostChannels offers the channels this caller may deploy an agent to.
 //
 // The list is scoped to the caller's own Slack membership, not the bot's. The
@@ -1166,6 +1211,19 @@ func (h *WorkflowHandler) ListAgentHostChannels(c *gin.Context) {
 	inventory := slackChannelInventory{Channels: []agentHostSlackChannel{}, Scope: "member"}
 	slackUserID := h.slackWorkspaceUserID(c, installation.BotToken)
 
+	// users.conversations does not return is_member — Slack's reference says so
+	// explicitly — and the picker disables any channel the bot is not in, so
+	// without this every channel arrives undefined and nothing is selectable.
+	// The bot's own membership is a separate question from the caller's, so it
+	// takes a separate call. Nothing workspace-wide is returned: this is only
+	// used to flag channels already in the caller's own list.
+	botChannels := map[string]bool{}
+	if slackUserID != "" {
+		for _, channel := range h.slackConversations(c, installation.BotToken, "") {
+			botChannels[channel.ID] = true
+		}
+	}
+
 	// Falling back to public channels rather than to everything: an unresolved
 	// identity must never widen what is returned. Installs that predate the
 	// users:read.email scope keep working, with private channels withheld until
@@ -1183,26 +1241,18 @@ func (h *WorkflowHandler) ListAgentHostChannels(c *gin.Context) {
 		}
 	}
 
-	cursor := ""
-	for page := 0; page < 10; page++ {
-		var response struct {
-			Channels []agentHostSlackChannel `json:"channels"`
-			Metadata struct {
-				NextCursor string `json:"next_cursor"`
-			} `json:"response_metadata"`
+	channels, err := h.pageSlackChannels(c, installation.BotToken, method, payload)
+	if err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": "could not list Slack channels", "detail": err.Error()})
+		return
+	}
+	for _, channel := range channels {
+		// On the scoped path is_member is absent, so fill it from the bot's own
+		// list. On the public fallback conversations.list supplies it already.
+		if slackUserID != "" {
+			channel.IsMember = botChannels[channel.ID]
 		}
-		if cursor != "" {
-			payload["cursor"] = cursor
-		}
-		if err := slackAgentAPIGet(c.Request.Context(), installation.BotToken, method, payload, &response); err != nil {
-			c.JSON(http.StatusBadGateway, gin.H{"error": "could not list Slack channels", "detail": err.Error()})
-			return
-		}
-		inventory.Channels = append(inventory.Channels, response.Channels...)
-		cursor = strings.TrimSpace(response.Metadata.NextCursor)
-		if cursor == "" {
-			break
-		}
+		inventory.Channels = append(inventory.Channels, channel)
 	}
 	c.JSON(http.StatusOK, inventory)
 }
