@@ -1218,6 +1218,16 @@ func runNodeInner(ctx context.Context, node WorkflowASTNode, outputs map[string]
 		}
 		return runNetlify(ctx, token, d, outputs)
 
+	case NodeTypeVercel:
+		token := substituteTemplates(d.IntegrationToken, outputs)
+		if token == "" && IntegrationCredsLookup != nil {
+			token, _ = IntegrationCredsLookup(ownerID, "vercel")
+		}
+		if token == "" {
+			return "", fmt.Errorf("Vercel is not connected — use Connect Vercel in the node settings")
+		}
+		return runVercel(ctx, token, d, outputs)
+
 	case NodeTypeSupabase:
 		token := substituteTemplates(d.IntegrationToken, outputs)
 		if token == "" && IntegrationCredsLookup != nil {

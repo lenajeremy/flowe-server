@@ -61,6 +61,22 @@ var apiKeyProviders = map[string]apiKeyProvider{
 		hint:      "Granola → Settings → Workspace → API access (Business or Enterprise plan)",
 		verifyURL: "https://public-api.granola.ai/v1/notes?limit=1",
 	},
+	// Vercel is key-authenticated rather than OAuth on purpose. Its OAuth
+	// "connectable account" integration has to be registered and approved in
+	// Vercel's Integrations Console, and the newer Sign in with Vercel issues
+	// tokens whose API permissions are, per Vercel's docs, "currently in private
+	// beta" — so a personal access token is the only thing that reaches the REST
+	// API today.
+	//
+	// No keyPrefix: token metadata carries a per-token "prefix" field for
+	// identification, but there is no single documented prefix every token starts
+	// with, and a wrong guess here would reject valid tokens at paste time.
+	"vercel": {
+		name: "vercel", label: "Vercel",
+		hint: "Vercel → Settings → Tokens → Create. Set Scope to the team whose projects " +
+			"the workflow should reach — a personal-scope token cannot see team projects",
+		verifyURL: "https://api.vercel.com/v2/user",
+	},
 }
 
 // knownProvider reports whether a provider name is one we support at all,

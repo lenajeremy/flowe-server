@@ -527,3 +527,15 @@ func truncateStr(s string, n int) string {
 	}
 	return s[:n] + "..."
 }
+
+// tailStr keeps the END of an oversized string rather than the beginning.
+//
+// For logs that is the only useful half: a failed build is mostly a long, boring
+// install phase followed by the error that stopped it, so truncating from the
+// front throws away the reason and keeps the noise.
+func tailStr(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return "..." + s[len(s)-n:]
+}

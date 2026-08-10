@@ -443,7 +443,7 @@ var allProviders = []string{
 	"googleslides", "googleforms", "googlemeet", "googlechat", "googletasks",
 	"googlekeep", "outlook", "slack", "notion", "linear",
 	"github", "gitlab", "jira", "confluence", "bitbucket",
-	"stripe", "shopify", "granola", "resend", "sendgrid", "kit", "airtable", "clickup", "monday", "asana", "typeform", "calendly", "dropbox", "netlify", "supabase", "gumroad",
+	"stripe", "shopify", "granola", "resend", "sendgrid", "kit", "airtable", "clickup", "monday", "asana", "typeform", "calendly", "dropbox", "netlify", "vercel", "supabase", "gumroad",
 	"googlesearchconsole", "googlecontacts", "hubspot", "front",
 }
 
