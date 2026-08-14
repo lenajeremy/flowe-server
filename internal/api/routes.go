@@ -99,6 +99,7 @@ func InitServer(port int, db *database.DBClient, rdb *redis.Client) {
 	api := r.Group("/api", auth.RequireAuth(rdb))
 	{
 		api.POST("/run", wh.Run)
+		api.POST("/run/node", wh.RunNode)
 
 		// Organization members and invitations. Seats are the Team billing unit, so
 		// these are billing endpoints in all but name.

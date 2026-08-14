@@ -1516,8 +1516,12 @@ func extractLoopItems(input, field string) []string {
 
 // RunWorkflow executes a workflow AST. ownerID is the workflow owner's user
 // ID, used to resolve their integration connections (OAuth tokens).
-func RunWorkflow(ctx context.Context, workflow WorkflowAST, keys APIKeys, runID, ownerID, orgID string, emit EmitFn) {
+func RunWorkflow(ctx context.Context, workflow WorkflowAST, keys APIKeys, runID, ownerID, orgID string, emit EmitFn, runOptions ...RunOptions) {
 	start := time.Now()
+	var options RunOptions
+	if len(runOptions) > 0 {
+		options = runOptions[0]
+	}
 
 	trigger := triggerFromContext(ctx)
 	ctx, span := telemetry.Tracer.Start(ctx, "workflow.run",
@@ -1610,6 +1614,46 @@ func RunWorkflow(ctx context.Context, workflow WorkflowAST, keys APIKeys, runID,
 	nodeMap := make(map[string]WorkflowASTNode, len(nodes))
 	for _, n := range nodes {
 		nodeMap[n.ID] = n
+	}
+
+	// A node test uses the same credential lookup, billing, telemetry, approval,
+	// and dispatch code as a graph run, but seeds template resolution from the
+	// most recent outputs of upstream nodes instead of re-executing them.
+	if options.OnlyNodeID != "" {
+		node, ok := nodeMap[options.OnlyNodeID]
+		if !ok {
+			emit(mk(EventWorkflowError, nil, nil, "Test node is not present in this workflow"))
+			return
+		}
+		upstream := upstreamNodeSet(options.OnlyNodeID, edges)
+		for id, output := range options.InitialOutputs {
+			if upstream[id] {
+				outputs[id] = output
+			}
+		}
+		for _, requiredID := range requiredOutputNodeIDs(node, edges) {
+			if _, ok := outputs[requiredID]; ok {
+				continue
+			}
+			label := requiredID
+			if requiredNode, exists := nodeMap[requiredID]; exists && requiredNode.Data.Label != "" {
+				label = requiredNode.Data.Label
+			}
+			emit(mk(EventWorkflowError, nil, nil, fmt.Sprintf("Run this graph first — %q has no previous output", label)))
+			return
+		}
+
+		emit(mk(EventNodeStarted, &node, nil, node.Data.Label))
+		out, err := executeNode(ctx, node, outputs, edges, keys, runID, ownerID, emit)
+		if err != nil {
+			emit(mk(EventNodeError, &node, nil, "Error: "+err.Error()))
+			emit(mk(EventWorkflowError, nil, nil, fmt.Sprintf("Node test failed at %q", node.Data.Label)))
+			return
+		}
+		emit(mk(EventNodeOutput, &node, strPtr(out), node.Data.Label))
+		emit(mk(EventNodeCompleted, &node, nil, node.Data.Label+" completed"))
+		emit(mk(EventWorkflowCompleted, nil, nil, "Node test completed successfully"))
+		return
 	}
 
 	loopHandled := make(map[string]bool) // nodes fully handled inside a loop iteration
@@ -1760,4 +1804,57 @@ func RunWorkflow(ctx context.Context, workflow WorkflowAST, keys APIKeys, runID,
 		}
 	}
 	emit(mk(EventWorkflowCompleted, nil, nil, "Workflow completed successfully"))
+}
+
+func upstreamNodeSet(targetID string, edges []WorkflowASTEdge) map[string]bool {
+	upstream := make(map[string]bool)
+	seen := map[string]bool{targetID: true}
+	queue := []string{targetID}
+	for len(queue) > 0 {
+		current := queue[0]
+		queue = queue[1:]
+		for _, edge := range edges {
+			if edge.Target != current || seen[edge.Source] {
+				continue
+			}
+			seen[edge.Source] = true
+			upstream[edge.Source] = true
+			queue = append(queue, edge.Source)
+		}
+	}
+	return upstream
+}
+
+// requiredOutputNodeIDs finds every cached upstream value a standalone node
+// test needs. Explicit {{node.output}} templates always count. Nodes whose
+// runtime consumes their first incoming edge implicitly count that source too.
+func requiredOutputNodeIDs(node WorkflowASTNode, edges []WorkflowASTEdge) []string {
+	seen := make(map[string]bool)
+	var required []string
+	add := func(id string) {
+		if id == "" || id == node.ID || seen[id] {
+			return
+		}
+		seen[id] = true
+		required = append(required, id)
+	}
+
+	if raw, err := json.Marshal(node.Data); err == nil {
+		for _, match := range templateRe.FindAllSubmatch(raw, -1) {
+			if len(match) > 1 {
+				add(string(match[1]))
+			}
+		}
+	}
+
+	switch node.Data.NodeType {
+	case NodeTypeBranch, NodeTypeLoop, NodeTypeTextOutput:
+		for _, edge := range edges {
+			if edge.Target == node.ID {
+				add(edge.Source)
+				break
+			}
+		}
+	}
+	return required
 }

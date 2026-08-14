@@ -39,10 +39,63 @@ func NewWorkflowHandler(db *database.DBClient, rdb *redis.Client) *WorkflowHandl
 // ── Run (SSE) ─────────────────────────────────────────────────
 
 func (h *WorkflowHandler) Run(c *gin.Context) {
+	h.run(c, false)
+}
+
+// RunNode uses a distinct endpoint so a newer frontend talking to an older
+// backend fails closed with 404. Sending onlyNodeId to the historical /run
+// endpoint would otherwise be ignored by an older JSON decoder and could run
+// the entire workflow instead of only the requested node.
+func (h *WorkflowHandler) RunNode(c *gin.Context) {
+	h.run(c, true)
+}
+
+func (h *WorkflowHandler) run(c *gin.Context, nodeOnly bool) {
 	var req executor.RunRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
+	}
+	if nodeOnly && req.OnlyNodeID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "onlyNodeId is required"})
+		return
+	}
+	if !nodeOnly && req.OnlyNodeID != "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "single-node tests must use /api/run/node"})
+		return
+	}
+	if req.OnlyNodeID == "" && len(req.InitialOutputs) > 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "initial outputs require onlyNodeId"})
+		return
+	}
+	if req.OnlyNodeID != "" {
+		found := false
+		for _, node := range req.Workflow.Nodes {
+			if node.ID == req.OnlyNodeID {
+				found = true
+				break
+			}
+		}
+		if !found {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "test node is not present in this workflow"})
+			return
+		}
+		if len(req.InitialOutputs) > 100 {
+			c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": "too many cached node outputs"})
+			return
+		}
+		totalBytes := 0
+		for _, output := range req.InitialOutputs {
+			if len(output) > 1<<20 {
+				c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": "a cached node output is too large to test safely"})
+				return
+			}
+			totalBytes += len(output)
+		}
+		if totalBytes > 4<<20 {
+			c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": "cached node outputs are too large to test safely"})
+			return
+		}
 	}
 
 	uid := auth.UserID(c)
@@ -140,7 +193,16 @@ func (h *WorkflowHandler) Run(c *gin.Context) {
 	// Carries the plan (for the per-call token ceiling) and the hold, so each spend
 	// settles against this run's reservation rather than only the balance.
 	runCtx = res.Context(runCtx, runID)
-	executor.RunWorkflow(executor.WithTrigger(runCtx, "manual"), req.Workflow, keys, runID, uid, currentOrgID(c), emit)
+	executor.RunWorkflow(
+		executor.WithTrigger(runCtx, "manual"),
+		req.Workflow,
+		keys,
+		runID,
+		uid,
+		currentOrgID(c),
+		emit,
+		executor.RunOptions{OnlyNodeID: req.OnlyNodeID, InitialOutputs: req.InitialOutputs},
+	)
 
 	// Serialize buffered events and update run record
 	eventsJSON, _ := json.Marshal(bufferedEvents)

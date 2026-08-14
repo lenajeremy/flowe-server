@@ -984,8 +984,18 @@ type APIKeys struct {
 }
 
 type RunRequest struct {
-	Workflow   WorkflowAST `json:"workflow"`
-	WorkflowID string      `json:"workflowId,omitempty"`
+	Workflow       WorkflowAST       `json:"workflow"`
+	WorkflowID     string            `json:"workflowId,omitempty"`
+	OnlyNodeID     string            `json:"onlyNodeId,omitempty"`
+	InitialOutputs map[string]string `json:"initialOutputs,omitempty"`
+}
+
+// RunOptions narrows a normal manual run without introducing a second
+// execution path. OnlyNodeID executes exactly one node; InitialOutputs supplies
+// cached values from its upstream ancestors for template/input resolution.
+type RunOptions struct {
+	OnlyNodeID     string
+	InitialOutputs map[string]string
 }
 
 type ExecutionEventType string
