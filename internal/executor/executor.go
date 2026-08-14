@@ -462,7 +462,7 @@ func executeNode(ctx context.Context, node WorkflowASTNode, outputs map[string]s
 	start := time.Now()
 	slog.DebugContext(ctx, "node started",
 		"run_id", runID, "node_id", node.ID, "node_type", node.Data.NodeType, "label", node.Data.Label)
-	out, err := runNodeInner(ctx, node, outputs, edges, keys, runID, ownerID, emit)
+	out, err := runNodeInner(ctx, node, outputsForNode(node.ID, outputs, edges), edges, keys, runID, ownerID, emit)
 
 	// The audit line: caller, arguments, and what came back.
 	telemetry.RecordNodeCall(ctx, cc, node.Data, out, err, time.Since(start))
@@ -499,6 +499,29 @@ func executeNode(ctx context.Context, node WorkflowASTNode, outputs map[string]s
 	telemetry.RecordNodeExecution(ctx, string(node.Data.NodeType), err, time.Since(start))
 	span.End()
 	return out, err
+}
+
+// outputsForNode preserves support for the original canvas default
+// {{previousNode.output}}. Modern templates use a concrete node ID, but older
+// saved workflows rely on this alias. Resolve it from the first incoming edge,
+// matching the executor's existing implicit-input behavior.
+func outputsForNode(nodeID string, outputs map[string]string, edges []WorkflowASTEdge) map[string]string {
+	for _, edge := range edges {
+		if edge.Target != nodeID {
+			continue
+		}
+		output, ok := outputs[edge.Source]
+		if !ok {
+			continue
+		}
+		resolved := make(map[string]string, len(outputs)+1)
+		for id, value := range outputs {
+			resolved[id] = value
+		}
+		resolved["previousNode"] = output
+		return resolved
+	}
+	return outputs
 }
 
 func runNodeInner(ctx context.Context, node WorkflowASTNode, outputs map[string]string, edges []WorkflowASTEdge, keys APIKeys, runID, ownerID string, emit func(ExecutionEvent)) (string, error) {
@@ -1842,7 +1865,16 @@ func requiredOutputNodeIDs(node WorkflowASTNode, edges []WorkflowASTEdge) []stri
 	if raw, err := json.Marshal(node.Data); err == nil {
 		for _, match := range templateRe.FindAllSubmatch(raw, -1) {
 			if len(match) > 1 {
-				add(string(match[1]))
+				id := string(match[1])
+				if id == "previousNode" {
+					for _, edge := range edges {
+						if edge.Target == node.ID {
+							id = edge.Source
+							break
+						}
+					}
+				}
+				add(id)
 			}
 		}
 	}

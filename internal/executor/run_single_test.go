@@ -87,3 +87,25 @@ func TestRequiredOutputNodeIDsIncludesTemplates(t *testing.T) {
 		t.Fatalf("required outputs = %v, want [source]", required)
 	}
 }
+
+func TestPreviousNodeAliasUsesIncomingEdgeOutput(t *testing.T) {
+	edges := []WorkflowASTEdge{{ID: "edge", Source: "source", Target: "target"}}
+	resolved := outputsForNode("target", map[string]string{"source": `{"body":"hello"}`}, edges)
+	if resolved["previousNode"] != `{"body":"hello"}` {
+		t.Fatalf("previousNode output = %q", resolved["previousNode"])
+	}
+	if got := substituteTemplates("Summarize {{previousNode.output.body}}", resolved); got != "Summarize hello" {
+		t.Fatalf("resolved prompt = %q, want %q", got, "Summarize hello")
+	}
+
+	prompt := "Summarize {{previousNode.output.body}}"
+	target := WorkflowASTNode{ID: "target", Data: FlowNodeData{
+		NodeType:   NodeTypeLLM,
+		Label:      "Summarize",
+		UserPrompt: &prompt,
+	}}
+	required := requiredOutputNodeIDs(target, edges)
+	if len(required) != 1 || required[0] != "source" {
+		t.Fatalf("required outputs = %v, want [source]", required)
+	}
+}
