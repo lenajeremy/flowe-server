@@ -109,6 +109,9 @@ func InitServer(port int, db *database.DBClient, rdb *redis.Client) {
 	// Everything else requires a session.
 	api := r.Group("/api", auth.RequireAuth(rdb))
 	{
+		// In-app annotated screenshots sent to the private product-feedback inbox.
+		api.POST("/feedback", wh.SubmitFeedback)
+
 		api.POST("/run", wh.Run)
 		api.POST("/run/node", wh.RunNode)
 
