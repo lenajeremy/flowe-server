@@ -31,6 +31,7 @@ import (
 type aiGenerateRequest struct {
 	Prompt       string `json:"prompt"`
 	Model        string `json:"model,omitempty"`
+	CurrentName  string `json:"currentName,omitempty"`
 	CurrentNodes []any  `json:"currentNodes,omitempty"`
 	CurrentEdges []any  `json:"currentEdges,omitempty"`
 	// WorkflowID is the canvas workflow's db id — scopes list_data_stores to
@@ -38,6 +39,39 @@ type aiGenerateRequest struct {
 	WorkflowID string `json:"workflowId,omitempty"`
 	// History is the prior conversation as [{role, content}] pairs (user/assistant text only).
 	History []map[string]any `json:"history,omitempty"`
+}
+
+func autoWorkflowName(current, proposed string) string {
+	current = compactWorkflowName(current)
+	if !isPlaceholderWorkflowName(current) {
+		return current
+	}
+	proposed = compactWorkflowName(proposed)
+	if proposed == "" || isPlaceholderWorkflowName(proposed) {
+		if current != "" {
+			return current
+		}
+		return "New Workflow"
+	}
+	return proposed
+}
+
+func compactWorkflowName(name string) string {
+	name = strings.Join(strings.Fields(name), " ")
+	runes := []rune(name)
+	if len(runes) > 80 {
+		name = strings.TrimSpace(string(runes[:80]))
+	}
+	return name
+}
+
+func isPlaceholderWorkflowName(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "", "new workflow", "untitled", "untitled workflow", "workflow", "automation":
+		return true
+	default:
+		return false
+	}
 }
 
 // applyOpsToCanvas mirrors the frontend's applyPatch onto the request's working
@@ -308,10 +342,14 @@ var toolListIntegrationResources = map[string]any{
 
 var toolCreateWorkflow = map[string]any{
 	"name":        "create_workflow",
-	"description": "Creates a workflow on the user's canvas. Call this with the nodes and edges arrays to build the workflow. The workflow will appear on the canvas immediately.",
+	"description": "Creates and names a workflow on the user's canvas. Call this with a concise descriptive name plus the nodes and edges arrays. The workflow will appear on the canvas immediately.",
 	"input_schema": map[string]any{
 		"type": "object",
 		"properties": map[string]any{
+			"name": map[string]any{
+				"type":        "string",
+				"description": "Concise 2-6 word workflow name describing its outcome, title case, maximum 80 characters",
+			},
 			"nodes": map[string]any{
 				"type":        "array",
 				"description": "Array of workflow nodes",
@@ -351,7 +389,7 @@ var toolCreateWorkflow = map[string]any{
 				},
 			},
 		},
-		"required": []string{"nodes", "edges"},
+		"required": []string{"name", "nodes", "edges"},
 	},
 }
 
@@ -962,7 +1000,7 @@ Decision rules:
 
 Tool order for NEW workflows:
 1. get_available_nodes — learn node schemas
-2. create_workflow — place all nodes and edges
+2. create_workflow — choose a concise descriptive name and place all nodes and edges
 
 Tool order for EDITS:
 1. get_current_workflow — see what's already on the canvas
@@ -977,6 +1015,8 @@ update_workflow operations:
 
 Rules:
 - Never tell the user what a node can or cannot do from memory. Node capabilities change between releases; get_available_nodes is the only current answer. If you have not read a node's fields this turn, read them before describing its limits.
+- Name every new workflow after its purpose or outcome using a concise 2-6 word title (for example, "Weekly Sales Digest" or "Fix GitHub Issues"). Never use generic names such as "New Workflow", "Untitled Workflow", or "Automation".
+- Preserve an existing custom workflow name. The server replaces only default placeholder names when creating the initial graph; users can still rename workflows directly in the editor.
 - Every node's data MUST include nodeType (matching the node type) and label.
 - For branch nodes, edges need sourceHandle "true" or "false".
 - Space new nodes ~250px apart from existing ones.
@@ -1200,6 +1240,11 @@ func (h *WorkflowHandler) execChatTool(c *gin.Context, flusher http.Flusher, req
 		return executor.CurrentTime(tz)
 
 	case "create_workflow":
+		if m, ok := input.(map[string]any); ok {
+			proposedName, _ := m["name"].(string)
+			m["name"] = autoWorkflowName(req.CurrentName, proposedName)
+			req.CurrentName, _ = m["name"].(string)
+		}
 		inputJSON, _ := json.Marshal(input)
 		sendSSE(c.Writer, flusher, "workflow", string(inputJSON))
 		// Keep the server's working copy in step with the canvas.
@@ -1215,6 +1260,7 @@ func (h *WorkflowHandler) execChatTool(c *gin.Context, flusher http.Flusher, req
 
 	case "get_current_workflow":
 		workflowJSON, _ := json.Marshal(map[string]any{
+			"name":  req.CurrentName,
 			"nodes": req.CurrentNodes,
 			"edges": req.CurrentEdges,
 		})
