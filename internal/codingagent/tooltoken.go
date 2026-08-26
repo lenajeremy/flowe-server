@@ -24,11 +24,15 @@ import (
 // ToolCallbackPath is where the sandbox reaches the workflow's node tools.
 const ToolCallbackPath = "/api/mcp/coding-agent"
 
-// PublicBaseURL is the address the sandbox can reach this server on. It is not
-// the app URL: the sandbox runs in the provider's cloud, so a loopback or a
-// private hostname is useless to it and a tunnel is required in development.
+// PublicBaseURL is the address the sandbox can reach this server on.
+//
+// Same order as trigger hook registration, and for the same reason its comment
+// gives: this is the one "where does the outside world find us" setting, and a
+// second variable of our own would only be able to disagree with it. The
+// sandbox runs in the provider's cloud, so a loopback address is useless to it
+// and a tunnel is needed in development.
 func PublicBaseURL() string {
-	for _, key := range []string{"PUBLIC_API_URL", "APP_URL"} {
+	for _, key := range []string{"PUBLIC_BASE_URL", "OAUTH_REDIRECT_BASE"} {
 		if value := strings.TrimRight(strings.TrimSpace(os.Getenv(key)), "/"); value != "" {
 			return value
 		}
@@ -57,7 +61,7 @@ func (s *Service) toolGrantCount(job *models.CodingAgentJob) int {
 func (s *Service) mintToolToken(ctx context.Context, job *models.CodingAgentJob) (string, string, error) {
 	base := PublicBaseURL()
 	if base == "" {
-		return "", "", errors.New("no publicly reachable server address is configured (set PUBLIC_API_URL)")
+		return "", "", errors.New("no publicly reachable server address is configured (set PUBLIC_BASE_URL)")
 	}
 	if !strings.HasPrefix(base, "https://") && !strings.Contains(base, "localhost") && !strings.Contains(base, "127.0.0.1") {
 		// The token is a bearer credential; sending it in clear over the public
