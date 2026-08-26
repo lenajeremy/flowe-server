@@ -83,7 +83,7 @@ func (r *Runtime) Run(ctx context.Context, sandbox codingagent.Sandbox, req codi
 		if refreshed, err := sandbox.Download(cleanupCtx, authPath); err == nil && json.Valid(refreshed) && len(refreshed) <= maxAuthBundleSize {
 			result.RefreshedAuthBundle = refreshed
 		}
-		cleanupCommand := "rm -f -- " + shellQuote(authPath) + " " + shellQuote(configPath) + " " + shellQuote(promptPath) + " " + shellQuote(schemaPath) + " " + shellQuote(resultPath) + " && rmdir -- " + shellQuote(secretDir)
+		cleanupCommand := "rm -f -- " + shellQuote(authPath) + " " + shellQuote(configPath) + " " + shellQuote(promptPath) + " " + shellQuote(schemaPath) + " " + shellQuote(resultPath) + " " + shellQuote(secretDir+"/mcp-token") + " && rmdir -- " + shellQuote(secretDir)
 		_, _ = sandbox.Run(cleanupCtx, codingagent.CommandSpec{Command: cleanupCommand, WorkingDir: "/tmp", Timeout: 30 * time.Second}, nil)
 	}()
 
@@ -105,10 +105,15 @@ func (r *Runtime) Run(ctx context.Context, sandbox codingagent.Sandbox, req codi
 	// The token travels in the process environment rather than the config file
 	// or the command line: config.toml is uploaded to the workspace, and argv
 	// is readable by anything else running in the sandbox.
+	// The token is written as a mode-0600 file and exported by the command that
+	// reads it, never passed as a command environment variable: Daytona records
+	// the rendered command AND its environment in process session metadata, so
+	// a secret placed there is retained by the provider. Only the path travels.
 	commandEnvironment := map[string]string{"CODEX_HOME": secretDir}
+	toolTokenPath := ""
 	if toolServer, ok := mcpServerConfig(req.ToolEndpoint); ok && req.ToolToken != "" {
 		config = append(config, toolServer...)
-		commandEnvironment[toolTokenEnvVar] = req.ToolToken
+		toolTokenPath = secretDir + "/mcp-token"
 	}
 	for path, file := range map[string]struct {
 		content []byte
@@ -124,7 +129,13 @@ func (r *Runtime) Run(ctx context.Context, sandbox codingagent.Sandbox, req codi
 		}
 	}
 
-	command := buildCommand(req, secretDir, promptPath, schemaPath, resultPath)
+	if toolTokenPath != "" {
+		if err := sandbox.Upload(ctx, toolTokenPath, []byte(req.ToolToken), 0o600); err != nil {
+			return result, fmt.Errorf("prepare Codex tool token: %w", err)
+		}
+	}
+
+	command := buildCommand(req, secretDir, promptPath, schemaPath, resultPath, toolTokenPath)
 	taskTimeout := req.Timeout
 	if taskTimeout <= 0 || taskTimeout > 2*time.Hour {
 		taskTimeout = 2 * time.Hour
@@ -205,7 +216,7 @@ func ensureCodexCommand(version string) string {
 	return "if ! command -v codex >/dev/null 2>&1 || ! codex --version | grep -Fqx -- " + expected + "; then npm install -g " + packageName + "; fi"
 }
 
-func buildCommand(req codingagent.RuntimeRequest, secretDir, promptPath, schemaPath, resultPath string) string {
+func buildCommand(req codingagent.RuntimeRequest, secretDir, promptPath, schemaPath, resultPath, toolTokenPath string) string {
 	parts := []string{
 		"codex", "--ask-for-approval", "never", "--search", "exec", "--json", "--color", "never", "--ignore-user-config",
 		"--sandbox", map[bool]string{true: "workspace-write", false: "read-only"}[req.AllowWrite],
@@ -219,7 +230,13 @@ func buildCommand(req codingagent.RuntimeRequest, secretDir, promptPath, schemaP
 		parts = append(parts, "resume", shellQuote(req.ExternalThreadID))
 	}
 	parts = append(parts, "-", "<", shellQuote(promptPath))
-	return strings.Join(parts, " ")
+	command := strings.Join(parts, " ")
+	if toolTokenPath != "" {
+		// Read at run time from the file, so the value never appears in the
+		// command string the provider stores — only the path does.
+		command = "export " + toolTokenEnvVar + "=\"$(cat " + shellQuote(toolTokenPath) + ")\"; " + command
+	}
+	return command
 }
 
 func buildPrompt(task string) string {
