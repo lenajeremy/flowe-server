@@ -592,8 +592,18 @@ func runNodeInner(ctx context.Context, node WorkflowASTNode, outputs map[string]
 		// additive so a user cannot accidentally make authentication or cloning
 		// fail while granting an extra package/documentation host.
 		allowedDomains := []string{
+			// The runtime's own control plane. Without these the agent cannot
+			// start, so they are never the caller's to omit.
 			"openai.com", "*.openai.com", "chatgpt.com", "*.chatgpt.com",
+			// Package managers and toolchains an agent reaches for unprompted.
+			// A restricted agent that cannot fetch a dependency fails at the
+			// task rather than reporting a network problem, so the common ones
+			// are here rather than left for each workflow to rediscover.
 			"registry.npmjs.org",
+			"golang.org", "*.golang.org", "go.dev",
+			"pypi.org", "files.pythonhosted.org",
+			"brew.sh", "*.brew.sh",
+			"archive.ubuntu.com", "security.ubuntu.com",
 		}
 		if repositoryProvider == codingagent.RepositoryGitLab {
 			allowedDomains = append(allowedDomains, "gitlab.com", "*.gitlab.com")
