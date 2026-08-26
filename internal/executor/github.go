@@ -129,6 +129,118 @@ func runGithub(ctx context.Context, token string, d FlowNodeData, outputs map[st
 		}
 		return githubIssueResult(raw), nil
 
+	case "create_branch":
+		branch := strings.TrimPrefix(sub(d.GithubBranch), "refs/heads/")
+		if branch == "" {
+			return "", fmt.Errorf("create_branch needs a branch name")
+		}
+		base := firstNonEmpty(sub(d.GithubBase), "main")
+		baseSHA, err := githubRefSHA(ctx, token, repo, base)
+		if err != nil {
+			return "", fmt.Errorf("create_branch could not read base %q: %w", base, err)
+		}
+		if _, err := githubCall(ctx, token, http.MethodPost, "/repos/"+repo+"/git/refs", map[string]any{
+			"ref": "refs/heads/" + branch,
+			"sha": baseSHA,
+		}); err != nil {
+			// An agent that retries a step must not wedge on a branch it
+			// created on the previous attempt. If the ref exists now, the
+			// caller's intent is satisfied whatever the POST objected to, so
+			// report the branch rather than the error.
+			if existing, refErr := githubRefSHA(ctx, token, repo, branch); refErr == nil {
+				return fmt.Sprintf(`{"branch":%q,"sha":%q,"base":%q,"created":false}`, branch, existing, base), nil
+			}
+			return "", err
+		}
+		return fmt.Sprintf(`{"branch":%q,"sha":%q,"base":%q,"created":true}`, branch, baseSHA, base), nil
+
+	case "commit_files":
+		branch := strings.TrimPrefix(sub(d.GithubBranch), "refs/heads/")
+		if branch == "" {
+			return "", fmt.Errorf("commit_files needs a branch — create it first with create_branch")
+		}
+		files, err := parseGithubFiles(sub(d.GithubFiles))
+		if err != nil {
+			return "", err
+		}
+
+		// One commit for the whole change set, via the Git Data API. Repeating
+		// create_or_update_file per file would cost two calls each AND leave a
+		// separate commit per file, which reads as a commit spray rather than
+		// a change.
+		headSHA, err := githubRefSHA(ctx, token, repo, branch)
+		if err != nil {
+			return "", fmt.Errorf("commit_files could not read branch %q: %w", branch, err)
+		}
+		headRaw, err := githubCall(ctx, token, http.MethodGet, "/repos/"+repo+"/git/commits/"+headSHA, nil)
+		if err != nil {
+			return "", err
+		}
+		var head struct {
+			Tree struct {
+				SHA string `json:"sha"`
+			} `json:"tree"`
+		}
+		if json.Unmarshal([]byte(headRaw), &head) != nil || head.Tree.SHA == "" {
+			return "", fmt.Errorf("commit_files could not read the tree of %s", headSHA)
+		}
+
+		entries := make([]map[string]any, 0, len(files))
+		for _, f := range files {
+			mode := "100644"
+			if f.Executable {
+				mode = "100755"
+			}
+			entry := map[string]any{"path": f.Path, "mode": mode, "type": "blob"}
+			if f.Deleted {
+				// A null sha is how the tree API spells "remove this path".
+				entry["sha"] = nil
+			} else {
+				entry["content"] = f.Content
+			}
+			entries = append(entries, entry)
+		}
+
+		treeRaw, err := githubCall(ctx, token, http.MethodPost, "/repos/"+repo+"/git/trees", map[string]any{
+			"base_tree": head.Tree.SHA,
+			"tree":      entries,
+		})
+		if err != nil {
+			return "", err
+		}
+		var tree struct {
+			SHA string `json:"sha"`
+		}
+		if json.Unmarshal([]byte(treeRaw), &tree) != nil || tree.SHA == "" {
+			return "", fmt.Errorf("commit_files could not build a tree")
+		}
+
+		commitRaw, err := githubCall(ctx, token, http.MethodPost, "/repos/"+repo+"/git/commits", map[string]any{
+			"message": firstNonEmpty(sub(d.GithubCommitMsg), fmt.Sprintf("Update %d file(s)", len(files))),
+			"tree":    tree.SHA,
+			"parents": []string{headSHA},
+		})
+		if err != nil {
+			return "", err
+		}
+		var commit struct {
+			SHA string `json:"sha"`
+			URL string `json:"html_url"`
+		}
+		if json.Unmarshal([]byte(commitRaw), &commit) != nil || commit.SHA == "" {
+			return "", fmt.Errorf("commit_files could not create a commit")
+		}
+
+		// Only now does the branch move. Everything above is unreferenced
+		// object creation, so a failure partway leaves the branch untouched
+		// rather than half-updated.
+		if _, err := githubCall(ctx, token, http.MethodPatch,
+			"/repos/"+repo+"/git/refs/heads/"+branch, map[string]any{"sha": commit.SHA}); err != nil {
+			return "", fmt.Errorf("commit_files built commit %s but could not move %q: %w", commit.SHA, branch, err)
+		}
+		return fmt.Sprintf(`{"branch":%q,"commit":%q,"files":%d,"url":%q}`,
+			branch, commit.SHA, len(files), commit.URL), nil
+
 	case "create_pull_request":
 		raw, err := githubCall(ctx, token, http.MethodPost, "/repos/"+repo+"/pulls", map[string]any{
 			"title": sub(d.GithubTitle),
@@ -688,4 +800,77 @@ func intOr(v, fallback int) int {
 		return v
 	}
 	return fallback
+}
+
+// githubRefSHA resolves a branch to the commit it points at.
+//
+// The ref is used unescaped: GitHub addresses nested branches as
+// git/ref/heads/feature/foo, so percent-encoding the separator would turn a
+// valid branch name into a 404.
+func githubRefSHA(ctx context.Context, token, repo, ref string) (string, error) {
+	ref = strings.TrimPrefix(strings.TrimSpace(ref), "refs/heads/")
+	if ref == "" {
+		return "", fmt.Errorf("no branch given")
+	}
+	raw, err := githubCall(ctx, token, http.MethodGet, "/repos/"+repo+"/git/ref/heads/"+ref, nil)
+	if err != nil {
+		return "", err
+	}
+	var out struct {
+		Object struct {
+			SHA string `json:"sha"`
+		} `json:"object"`
+	}
+	if json.Unmarshal([]byte(raw), &out) != nil || out.Object.SHA == "" {
+		return "", fmt.Errorf("branch %q not found in %s", ref, repo)
+	}
+	return out.Object.SHA, nil
+}
+
+// githubFileEntry is one path in a commit_files change set. A deleted entry
+// carries no content; everything else is written as a UTF-8 text blob.
+type githubFileEntry struct {
+	Path       string `json:"path"`
+	Content    string `json:"content"`
+	Deleted    bool   `json:"deleted"`
+	Executable bool   `json:"executable"`
+}
+
+// Bounds on one change set. The tree call inlines every file's content into a
+// single request, so an unbounded set fails as an opaque 4xx from GitHub. These
+// turn that into a sentence naming what was too big.
+const (
+	githubMaxCommitFiles = 200
+	githubMaxCommitBytes = 5 << 20
+)
+
+func parseGithubFiles(raw string) ([]githubFileEntry, error) {
+	raw = strings.TrimSpace(stripCodeFences(raw))
+	if raw == "" {
+		return nil, fmt.Errorf("commit_files needs githubFiles: a JSON array of {path, content}")
+	}
+	var files []githubFileEntry
+	if err := json.Unmarshal([]byte(raw), &files); err != nil {
+		return nil, fmt.Errorf("githubFiles must be a JSON array of {path, content}: %w", err)
+	}
+	if len(files) == 0 {
+		return nil, fmt.Errorf("githubFiles is empty — nothing to commit")
+	}
+	if len(files) > githubMaxCommitFiles {
+		return nil, fmt.Errorf("commit_files takes at most %d files, got %d", githubMaxCommitFiles, len(files))
+	}
+	total := 0
+	for i, f := range files {
+		if strings.TrimSpace(f.Path) == "" {
+			return nil, fmt.Errorf("githubFiles[%d] has no path", i)
+		}
+		if strings.HasPrefix(f.Path, "/") {
+			return nil, fmt.Errorf("githubFiles[%d] path %q must be relative to the repository root", i, f.Path)
+		}
+		total += len(f.Content)
+	}
+	if total > githubMaxCommitBytes {
+		return nil, fmt.Errorf("commit_files content is %d bytes, over the %d byte limit", total, githubMaxCommitBytes)
+	}
+	return files, nil
 }

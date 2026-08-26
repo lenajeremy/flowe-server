@@ -182,13 +182,17 @@ type FlowNodeData struct {
 	GithubMergeMethod string `json:"githubMergeMethod,omitempty"` // merge | squash | rebase
 	GithubPath        string `json:"githubPath,omitempty"`        // file path, or optional list_repo_tree prefix
 	GithubContent     string `json:"githubContent,omitempty"`     // file content
-	GithubCommitMsg   string `json:"githubCommitMessage,omitempty"`
-	GithubRef         string `json:"githubRef,omitempty"`        // branch/tag/sha for reads
-	GithubTag         string `json:"githubTag,omitempty"`        // create_release tag
-	GithubWorkflowId  string `json:"githubWorkflowId,omitempty"` // workflow file name or id
-	GithubQuery       string `json:"githubQuery,omitempty"`      // search_issues
-	GithubSince       string `json:"githubSince,omitempty"`      // ISO 8601 time filter: commits since / issues updated after / runs created from
-	GithubUntil       string `json:"githubUntil,omitempty"`      // ISO 8601 time filter: commits until / runs created to
+	// GithubFiles is commit_files' payload: a JSON array of
+	// {path, content, deleted, executable}. A whole change set goes in one
+	// commit, which is why it is a field rather than one node per file.
+	GithubFiles      string `json:"githubFiles,omitempty"`
+	GithubCommitMsg  string `json:"githubCommitMessage,omitempty"`
+	GithubRef        string `json:"githubRef,omitempty"`        // branch/tag/sha for reads
+	GithubTag        string `json:"githubTag,omitempty"`        // create_release tag
+	GithubWorkflowId string `json:"githubWorkflowId,omitempty"` // workflow file name or id
+	GithubQuery      string `json:"githubQuery,omitempty"`      // search_issues
+	GithubSince      string `json:"githubSince,omitempty"`      // ISO 8601 time filter: commits since / issues updated after / runs created from
+	GithubUntil      string `json:"githubUntil,omitempty"`      // ISO 8601 time filter: commits until / runs created to
 
 	// gitlab
 	GitlabProjectId    string `json:"gitlabProjectId,omitempty"`
