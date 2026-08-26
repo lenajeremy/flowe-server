@@ -495,10 +495,27 @@ func (s *Service) processJob(workerCtx context.Context, workerID string, job *mo
 
 	runtime := s.runtimes[job.Runtime]
 	go s.heartbeat(jobCtx, cancel, job.ID.String(), workerID, cancelRequested)
+	// The callback token lives exactly as long as the run. It is minted here
+	// rather than at submit so a job queued for hours never has a usable
+	// credential sitting in the database ahead of time, and revoked in the
+	// defer so a sandbox that outlives its job cannot keep acting.
+	toolEndpoint, toolToken := "", ""
+	if grants := s.toolGrantCount(job); grants > 0 {
+		endpoint, token, mintErr := s.mintToolToken(jobCtx, job)
+		if mintErr != nil {
+			slog.WarnContext(jobCtx, "coding agent tools unavailable for this job",
+				"job_id", job.ID.String(), "error", mintErr)
+		} else {
+			toolEndpoint, toolToken = endpoint, token
+			defer s.revokeToolToken(job)
+		}
+	}
+
 	result, runErr := runtime.Run(jobCtx, sandbox, RuntimeRequest{
 		JobID: job.ID.String(), SessionID: session.ID.String(), Task: job.Task, Model: policy.Model, WorkingDirectory: "/workspace/repo",
 		AuthBundle: []byte(credential.AuthBundle), ExternalThreadID: session.ExternalThreadID,
 		AllowWrite: policy.AllowWorkspaceWrite, Timeout: time.Duration(policy.MaxDurationSeconds) * time.Second,
+		ToolEndpoint: toolEndpoint, ToolToken: toolToken,
 	}, s.jobEventSink(job, workerID))
 	cancel()
 	if len(result.RefreshedAuthBundle) > 0 {

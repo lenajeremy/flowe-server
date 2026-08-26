@@ -620,6 +620,7 @@ func runNodeInner(ctx context.Context, node WorkflowASTNode, outputs map[string]
 			OrganizationID: OrgFromContext(ctx), UserID: ownerID,
 			WorkflowID: workflowIDFromContext(ctx), WorkflowRunID: runID, NodeID: node.ID,
 			ConversationKey: conversationKey, Runtime: runtime, Task: task,
+			ToolNodeIDs: d.CodingAgentToolNodes,
 			// The rendered task contains the upstream values it references. Do not
 			// duplicate every upstream output into the durable job record, where it
 			// would unnecessarily retain unrelated secrets.

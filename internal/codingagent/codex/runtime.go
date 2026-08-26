@@ -101,6 +101,15 @@ func (r *Runtime) Run(ctx context.Context, sandbox codingagent.Sandbox, req codi
 
 	prompt := buildPrompt(req.Task)
 	config := []byte("cli_auth_credentials_store = \"file\"\n")
+	// Point Codex at this workflow's own nodes when the job was granted any.
+	// The token travels in the process environment rather than the config file
+	// or the command line: config.toml is uploaded to the workspace, and argv
+	// is readable by anything else running in the sandbox.
+	commandEnvironment := map[string]string{"CODEX_HOME": secretDir}
+	if toolServer, ok := mcpServerConfig(req.ToolEndpoint); ok && req.ToolToken != "" {
+		config = append(config, toolServer...)
+		commandEnvironment[toolTokenEnvVar] = req.ToolToken
+	}
 	for path, file := range map[string]struct {
 		content []byte
 		mode    uint32
@@ -122,12 +131,10 @@ func (r *Runtime) Run(ctx context.Context, sandbox codingagent.Sandbox, req codi
 	}
 	jsonStream := &jsonLineStream{}
 	execution, err := sandbox.Run(ctx, codingagent.CommandSpec{
-		Command:    command,
-		WorkingDir: req.WorkingDirectory,
-		Environment: map[string]string{
-			"CODEX_HOME": secretDir,
-		},
-		Timeout: taskTimeout,
+		Command:     command,
+		WorkingDir:  req.WorkingDirectory,
+		Environment: commandEnvironment,
+		Timeout:     taskTimeout,
 	}, func(event codingagent.StreamEvent) {
 		if event.Type == "stdout" {
 			for _, parsed := range jsonStream.Feed(event.Message, false) {
@@ -564,3 +571,19 @@ const resultSchema = `{
     "notes": {"type": "array", "items": {"type": "string"}}
   }
 }`
+
+// toolTokenEnvVar is the name Codex is told to read the bearer token from.
+const toolTokenEnvVar = "FERNARY_MCP_TOKEN"
+
+// mcpServerConfig renders the streamable-HTTP server block Codex expects.
+//
+// The endpoint is refused unless it is a plain https URL: it is interpolated
+// into TOML, so a value carrying a quote or a newline could close the string
+// and inject configuration of its own choosing into the agent's runtime.
+func mcpServerConfig(endpoint string) ([]byte, bool) {
+	endpoint = strings.TrimSpace(endpoint)
+	if !strings.HasPrefix(endpoint, "https://") || strings.ContainsAny(endpoint, "\"'\n\r\\") {
+		return nil, false
+	}
+	return []byte("\n[mcp_servers.fernary]\nurl = \"" + endpoint + "\"\nbearer_token_env_var = \"" + toolTokenEnvVar + "\"\n"), true
+}

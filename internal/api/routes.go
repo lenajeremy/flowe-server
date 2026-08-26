@@ -74,6 +74,10 @@ func InitServer(port int, db *database.DBClient, rdb *redis.Client) {
 
 		public.POST("/trigger/:workflowId", wh.TriggerWorkflow)
 
+		// Reached by a running coding-agent sandbox, which authenticates with
+		// its per-job bearer token rather than a session cookie.
+		public.POST("/mcp/coding-agent", wh.CodingAgentMCP)
+
 		public.GET("/webhooks/:token", wh.WebhookInfo)
 		public.POST("/webhooks/:token", wh.ReceiveWebhook)
 

@@ -214,6 +214,15 @@ type CodingAgentJob struct {
 	Summary             string               `json:"summary" gorm:"type:text"`
 	LastError           string               `json:"last_error,omitempty" gorm:"type:text"`
 	NextEventSequence   int                  `json:"-" gorm:"not null;default:1"`
+	// ToolTokenHash authenticates the sandbox when it calls back to use the
+	// workflow's nodes as tools. Only the SHA-256 is stored: the plaintext
+	// exists in the sandbox and nowhere else, so a database read cannot be
+	// turned into the authority to act as this job. Cleared when the job
+	// reaches a terminal state, which is what bounds the token's life — it is
+	// the job, not a clock, that decides when the sandbox stops being trusted.
+	ToolTokenHash string `json:"-" gorm:"type:varchar(64);index"`
+	// ToolNodeIDs is the JSON array of canvas node ids this job may call.
+	ToolNodeIDs JSONB `json:"tool_node_ids" gorm:"type:jsonb;not null;default:'[]'"`
 }
 
 // CodingAgentEvent is an append-only audit and progress stream. Event payloads

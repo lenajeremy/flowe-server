@@ -96,6 +96,12 @@ type FlowNodeData struct {
 	// allowed domain implies "allowlist" without having to say so twice.
 	CodingAgentNetworkAccess string `json:"codingAgentNetworkAccess,omitempty"`
 	CodingAgentAllowWrite    bool   `json:"codingAgentAllowWrite,omitempty"`
+	// CodingAgentToolNodes lists the ids of other nodes on this canvas that
+	// the agent may call while it works — how it opens a pull request without
+	// ever holding a credential itself. Deny-by-default: an empty list is an
+	// agent with no tools, which is the right default for something running
+	// attacker-influenceable text next to a shell.
+	CodingAgentToolNodes []string `json:"codingAgentToolNodes,omitempty"`
 
 	// integrationTrigger — what this node is subscribed to. The authoritative
 	// copy lives in the integration_triggers row (that is what the provider was

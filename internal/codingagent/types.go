@@ -61,6 +61,11 @@ type SubmitRequest struct {
 	Task            string
 	Input           map[string]any
 	Policy          ExecutionPolicy
+	// ToolNodeIDs are the canvas nodes this job may call back to use. The
+	// grant is resolved against the workflow at call time rather than frozen
+	// here: a node's operations are derived from the catalog, so a copy taken
+	// at submit would drift from it.
+	ToolNodeIDs []string
 }
 
 type SandboxSpec struct {
@@ -122,6 +127,12 @@ type RuntimeRequest struct {
 	ExternalThreadID string
 	AllowWrite       bool
 	Timeout          time.Duration
+	// ToolEndpoint and ToolToken let the runtime point the agent at this
+	// workflow's nodes. Both empty means the job was granted no tools, and the
+	// runtime must then configure none — an agent that can see a tool server it
+	// has no grant for would spend turns discovering it can do nothing.
+	ToolEndpoint string
+	ToolToken    string
 }
 
 type RuntimeResult struct {

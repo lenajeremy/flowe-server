@@ -65,6 +65,7 @@ func (s *Store) Submit(ctx context.Context, req SubmitRequest) (*models.CodingAg
 		MaxAttempts:       3,
 		AvailableAt:       now,
 		Result:            models.JSONB("{}"),
+		ToolNodeIDs:       models.JSONB(toolNodeIDsJSON(req.ToolNodeIDs)),
 		NextEventSequence: 1,
 	}
 
@@ -551,4 +552,18 @@ func DecodePolicy(job *models.CodingAgentJob) (ExecutionPolicy, error) {
 		return policy, fmt.Errorf("decode coding agent execution policy: %w", err)
 	}
 	return policy, nil
+}
+
+// toolNodeIDsJSON renders the grant for storage, always as an array. A null
+// here would read as "no grant recorded" rather than "granted nothing", and
+// those must not be confusable for a deny-by-default check.
+func toolNodeIDsJSON(ids []string) []byte {
+	if len(ids) == 0 {
+		return []byte("[]")
+	}
+	raw, err := json.Marshal(ids)
+	if err != nil {
+		return []byte("[]")
+	}
+	return raw
 }
