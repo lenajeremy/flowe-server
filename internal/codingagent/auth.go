@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"regexp"
 	"strings"
 	"time"
@@ -21,6 +22,8 @@ var (
 	deviceURLPattern   = regexp.MustCompile(`https://[^\s<>]+`)
 	deviceCodePattern  = regexp.MustCompile(`\b[A-Z0-9]{4,8}-[A-Z0-9]{4,8}\b`)
 	toolVersionPattern = regexp.MustCompile(`^[A-Za-z0-9._-]{1,80}$`)
+	ansiCSIPattern     = regexp.MustCompile("\\x1b\\[[0-?]*[ -/]*[@-~]")
+	ansiOSCPattern     = regexp.MustCompile("\\x1b\\][^\\x07\\x1b]*(?:\\x07|\\x1b\\\\)")
 )
 
 func (s *Service) StartCodexConnection(ctx context.Context, organizationID, userID string) (*models.CodingAgentAuthAttempt, bool, error) {
@@ -99,6 +102,14 @@ func (s *Service) GetAuthAttempt(ctx context.Context, organizationID, userID, at
 		}
 		return nil, err
 	}
+	cleanedURL := sanitizeVerificationURL(attempt.VerificationURL)
+	if cleanedURL != attempt.VerificationURL {
+		attempt.VerificationURL = cleanedURL
+		if cleanedURL != "" {
+			_ = s.db.WithContext(ctx).Model(&models.CodingAgentAuthAttempt{}).
+				Where("id = ?", attempt.ID).Update("verification_url", cleanedURL).Error
+		}
+	}
 	return &attempt, nil
 }
 
@@ -107,7 +118,11 @@ func (s *Service) CancelAuthAttempt(ctx context.Context, organizationID, userID,
 	result := s.db.WithContext(ctx).Model(&models.CodingAgentAuthAttempt{}).
 		Where("id = ? AND organization_id = ? AND user_id = ? AND status IN ?", attemptID, organizationID, userID,
 			[]models.CodingAgentAuthStatus{models.CodingAgentAuthProvisioning, models.CodingAgentAuthWaiting}).
-		Update("cancel_requested_at", now)
+		Updates(map[string]any{
+			"active_key": nil, "status": models.CodingAgentAuthCancelled,
+			"cancel_requested_at": now, "completed_at": now,
+			"last_error": "authentication cancelled", "claimed_by": "", "heartbeat_at": now,
+		})
 	if result.Error != nil {
 		return result.Error
 	}
@@ -471,18 +486,56 @@ type deviceLoginParser struct {
 
 func (p *deviceLoginParser) Feed(chunk string) (string, string) {
 	p.buffer += chunk
+	p.buffer = stripTerminalEscapes(p.buffer)
 	if len(p.buffer) > 64<<10 {
 		p.buffer = p.buffer[len(p.buffer)-(64<<10):]
 	}
 	verificationURL := ""
 	for _, candidate := range deviceURLPattern.FindAllString(p.buffer, -1) {
-		candidate = strings.TrimRight(candidate, ".,);]}")
-		lower := strings.ToLower(candidate)
-		if (strings.Contains(lower, "openai.com") || strings.Contains(lower, "chatgpt.com")) &&
-			(strings.Contains(lower, "device") || strings.Contains(lower, "activate")) {
-			verificationURL = candidate
+		if candidate = sanitizeVerificationURL(candidate); candidate != "" {
+			lower := strings.ToLower(candidate)
+			if strings.Contains(lower, "device") || strings.Contains(lower, "activate") {
+				verificationURL = candidate
+			}
 		}
 	}
-	userCode := deviceCodePattern.FindString(strings.ToUpper(p.buffer))
+	userCode := ""
+	upperBuffer := strings.ToUpper(p.buffer)
+	// The Daytona execution stream can include the command itself, including
+	// /tmp/fernary-codex-auth. That path happens to match the broad CODE-CODE
+	// shape, so only inspect text after Codex's explicit device-code prompt.
+	if promptIndex := strings.LastIndex(upperBuffer, "ONE-TIME CODE"); promptIndex >= 0 {
+		matches := deviceCodePattern.FindAllString(upperBuffer[promptIndex+len("ONE-TIME CODE"):], -1)
+		if len(matches) > 0 {
+			userCode = matches[len(matches)-1]
+		}
+	}
 	return verificationURL, userCode
+}
+
+func stripTerminalEscapes(value string) string {
+	value = ansiOSCPattern.ReplaceAllString(value, "")
+	return ansiCSIPattern.ReplaceAllString(value, "")
+}
+
+func sanitizeVerificationURL(value string) string {
+	value = strings.TrimRight(strings.TrimSpace(stripTerminalEscapes(value)), ".,);]}")
+	if index := strings.IndexFunc(value, func(r rune) bool { return r < 0x20 || r == 0x7f }); index >= 0 {
+		value = value[:index]
+	}
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.Scheme != "https" || parsed.User != nil || !trustedCodexAuthHost(parsed.Hostname()) {
+		return ""
+	}
+	return parsed.String()
+}
+
+func trustedCodexAuthHost(host string) bool {
+	host = strings.ToLower(strings.TrimSuffix(host, "."))
+	for _, domain := range []string{"openai.com", "chatgpt.com"} {
+		if host == domain || strings.HasSuffix(host, "."+domain) {
+			return true
+		}
+	}
+	return false
 }

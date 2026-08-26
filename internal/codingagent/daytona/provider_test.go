@@ -12,6 +12,14 @@ func TestEnvironmentPrefixQuotesValuesAndRejectsNames(t *testing.T) {
 	}
 }
 
+func TestCommandCompositionChangesDirectoryBeforeApplyingEnvironment(t *testing.T) {
+	command := composeCommand("/tmp/work", map[string]string{"CODEX_HOME": "/tmp/codex"}, "codex login --device-auth")
+	want := "cd -- '/tmp/work' && env CODEX_HOME='/tmp/codex' codex login --device-auth"
+	if command != want {
+		t.Fatalf("composed command = %q, want %q", command, want)
+	}
+}
+
 func TestSafeRemotePathRejectsTraversal(t *testing.T) {
 	for _, value := range []string{"relative/file", "/tmp/../secret", "/tmp/\x00secret"} {
 		if safeRemotePath(value) {

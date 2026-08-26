@@ -58,6 +58,38 @@ func TestCompleteCodexConnectionCannotReviveCancelledAuthority(t *testing.T) {
 	}
 }
 
+func TestCancelAuthAttemptIsImmediatelyTerminalAndReleasesActiveKey(t *testing.T) {
+	db := serviceTestDB(t)
+	service := &Service{db: db, store: NewStore(db), authCancels: make(map[string]context.CancelFunc)}
+	orgID, userID := uuid.NewString(), uuid.NewString()
+	activeKey := orgID + ":" + userID + ":" + RuntimeCodex
+	attempt := &models.CodingAgentAuthAttempt{
+		ActiveKey: &activeKey, OrganizationID: orgID, UserID: userID, Runtime: RuntimeCodex,
+		Provider: ProviderDaytona, Status: models.CodingAgentAuthWaiting, ExpiresAt: time.Now().UTC().Add(time.Minute),
+	}
+	if err := db.Create(attempt).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := service.CancelAuthAttempt(context.Background(), orgID, userID, attempt.ID.String()); err != nil {
+		t.Fatal(err)
+	}
+	var stored models.CodingAgentAuthAttempt
+	if err := db.First(&stored, "id = ?", attempt.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if stored.Status != models.CodingAgentAuthCancelled || stored.ActiveKey != nil || stored.CompletedAt == nil || stored.CancelRequestedAt == nil {
+		t.Fatalf("attempt was not cancelled atomically: %#v", stored)
+	}
+	replacement := *attempt
+	replacement.ID = uuid.Nil
+	replacement.Status = models.CodingAgentAuthProvisioning
+	replacement.CompletedAt = nil
+	replacement.CancelRequestedAt = nil
+	if err := db.Create(&replacement).Error; err != nil {
+		t.Fatalf("cancelled attempt still blocked a replacement: %v", err)
+	}
+}
+
 func TestCompleteCodexConnectionCommitsCredentialAndAttemptTogether(t *testing.T) {
 	db := serviceTestDB(t)
 	service := &Service{db: db, store: NewStore(db)}
@@ -220,5 +252,36 @@ func TestAuthAttemptActiveKeyAllowsOneLiveAttemptAndManyTerminalRows(t *testing.
 		if err := db.Create(&terminal).Error; err != nil {
 			t.Fatalf("terminal attempt %d rejected: %v", index, err)
 		}
+	}
+}
+
+func TestDeviceLoginParserStripsTerminalFormattingFromVerificationURL(t *testing.T) {
+	parser := &deviceLoginParser{}
+	verificationURL, userCode := parser.Feed("Open https://auth.openai.com/codex/device\x1b[0m\r\nEnter this one-time code\r\nABCD-EFGH\x1b[0m")
+	if verificationURL != "https://auth.openai.com/codex/device" {
+		t.Fatalf("verification URL = %q", verificationURL)
+	}
+	if userCode != "ABCD-EFGH" {
+		t.Fatalf("user code = %q", userCode)
+	}
+}
+
+func TestDeviceLoginParserDoesNotMistakeCommandPathForUserCode(t *testing.T) {
+	parser := &deviceLoginParser{}
+	_, userCode := parser.Feed("env CODEX_HOME=/tmp/fernary-codex-auth codex login --device-auth")
+	if userCode != "" {
+		t.Fatalf("command path was accepted as user code %q", userCode)
+	}
+	_, userCode = parser.Feed("\r\nEnter this one-time code (expires in 15 minutes)\r\nDLIX-DU2NG\r\n")
+	if userCode != "DLIX-DU2NG" {
+		t.Fatalf("real device code = %q", userCode)
+	}
+}
+
+func TestDeviceLoginParserRejectsLookalikeAuthHost(t *testing.T) {
+	parser := &deviceLoginParser{}
+	verificationURL, _ := parser.Feed("Open https://auth.openai.com.attacker.example/codex/device")
+	if verificationURL != "" {
+		t.Fatalf("accepted untrusted verification URL %q", verificationURL)
 	}
 }

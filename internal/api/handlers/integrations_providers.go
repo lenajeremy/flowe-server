@@ -250,22 +250,31 @@ func gitlabUsername(token string) string {
 }
 
 func gitlabResources(token string) ([]integrationResource, error) {
-	req, _ := http.NewRequest(http.MethodGet, gitlabAPIBase+"/projects?membership=true&per_page=100&order_by=last_activity_at", nil)
-	req.Header.Set("Authorization", "Bearer "+token)
-	raw, err := doOAuthRequest(req)
-	if err != nil {
-		return nil, err
-	}
-	var projects []struct {
-		ID                int64  `json:"id"`
-		PathWithNamespace string `json:"path_with_namespace"`
-	}
-	if err := json.Unmarshal(raw, &projects); err != nil {
-		return nil, fmt.Errorf("parse gitlab projects: %w", err)
-	}
-	out := make([]integrationResource, 0, len(projects))
-	for _, p := range projects {
-		out = append(out, integrationResource{ID: strconv.FormatInt(p.ID, 10), Name: p.PathWithNamespace, Type: "project"})
+	out := []integrationResource{}
+	const perPage = 100
+	for page := 1; ; page++ {
+		req, _ := http.NewRequest(http.MethodGet, gitlabAPIBase+"/projects?membership=true&per_page="+
+			strconv.Itoa(perPage)+"&order_by=last_activity_at&page="+strconv.Itoa(page), nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		raw, err := doOAuthRequest(req)
+		if err != nil {
+			return nil, err
+		}
+		var projects []struct {
+			ID                int64  `json:"id"`
+			PathWithNamespace string `json:"path_with_namespace"`
+		}
+		if err := json.Unmarshal(raw, &projects); err != nil {
+			return nil, fmt.Errorf("parse gitlab projects page %d: %w", page, err)
+		}
+		for _, project := range projects {
+			out = append(out, integrationResource{
+				ID: strconv.FormatInt(project.ID, 10), Name: project.PathWithNamespace, Type: "project",
+			})
+		}
+		if len(projects) < perPage {
+			break
+		}
 	}
 	return out, nil
 }

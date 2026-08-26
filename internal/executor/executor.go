@@ -571,12 +571,21 @@ func runNodeInner(ctx context.Context, node WorkflowASTNode, outputs map[string]
 		if autoDelete == 0 {
 			autoDelete = 7 * 24 * 60
 		}
+		repositoryProvider := strings.ToLower(strings.TrimSpace(d.CodingAgentRepositoryProvider))
+		if repositoryProvider == "" {
+			repositoryProvider = codingagent.RepositoryGitHub
+		}
 		// Runtime and repository domains are mandatory. Canvas configuration is
 		// additive so a user cannot accidentally make authentication or cloning
 		// fail while granting an extra package/documentation host.
 		allowedDomains := []string{
 			"openai.com", "*.openai.com", "chatgpt.com", "*.chatgpt.com",
-			"github.com", "*.github.com", "*.githubusercontent.com", "registry.npmjs.org",
+			"registry.npmjs.org",
+		}
+		if repositoryProvider == codingagent.RepositoryGitLab {
+			allowedDomains = append(allowedDomains, "gitlab.com", "*.gitlab.com")
+		} else {
+			allowedDomains = append(allowedDomains, "github.com", "*.github.com", "*.githubusercontent.com")
 		}
 		allowedDomains = append(allowedDomains, d.CodingAgentAllowedDomains...)
 		task := substituteTemplates(d.CodingAgentTask, outputs)
@@ -590,7 +599,8 @@ func runNodeInner(ctx context.Context, node WorkflowASTNode, outputs map[string]
 			// would unnecessarily retain unrelated secrets.
 			Input: nil,
 			Policy: codingagent.ExecutionPolicy{
-				WorkspaceMode: workspaceMode, Repository: strings.TrimSpace(d.CodingAgentRepository),
+				WorkspaceMode: workspaceMode, RepositoryProvider: repositoryProvider,
+				RepositoryID: strings.TrimSpace(d.CodingAgentRepositoryID), Repository: strings.TrimSpace(d.CodingAgentRepository),
 				Branch: strings.TrimSpace(d.CodingAgentBranch), Model: strings.TrimSpace(d.CodingAgentModel),
 				MaxDurationSeconds: maxDuration, AutoStopMinutes: autoStop, AutoDeleteMinutes: autoDelete,
 				NetworkBlockAll: true, AllowedDomains: allowedDomains,

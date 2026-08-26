@@ -112,25 +112,27 @@ const (
 // never accepted from a workflow node or browser request.
 type CodingAgentEnvironment struct {
 	BaseModel
-	OrganizationID    string                       `json:"organization_id" gorm:"type:uuid;not null;index"`
-	UserID            string                       `json:"user_id" gorm:"type:uuid;not null;index"`
-	WorkflowID        string                       `json:"workflow_id" gorm:"type:uuid;index"`
-	NodeID            string                       `json:"node_id" gorm:"index"`
-	WorkspaceKey      string                       `json:"workspace_key" gorm:"not null;uniqueIndex"`
-	Provider          string                       `json:"provider" gorm:"type:varchar(32);not null;index;uniqueIndex:idx_coding_agent_external_sandbox,priority:1,where:external_sandbox_id <> ''"`
-	ExternalSandboxID string                       `json:"-" gorm:"uniqueIndex:idx_coding_agent_external_sandbox,priority:2,where:external_sandbox_id <> ''"`
-	Snapshot          string                       `json:"snapshot"`
-	Region            string                       `json:"region"`
-	Status            CodingAgentEnvironmentStatus `json:"status" gorm:"type:varchar(24);not null;default:'provisioning';index"`
-	Repository        string                       `json:"repository"`
-	Branch            string                       `json:"branch"`
-	CurrentJobID      string                       `json:"current_job_id,omitempty" gorm:"type:varchar(36);index"`
-	LastActivityAt    *time.Time                   `json:"last_activity_at,omitempty" gorm:"index"`
-	AutoStopMinutes   int                          `json:"auto_stop_minutes" gorm:"not null;default:15"`
-	AutoDeleteMinutes int                          `json:"auto_delete_minutes" gorm:"not null;default:10080"`
-	Configuration     JSONB                        `json:"configuration" gorm:"type:jsonb;not null;default:'{}'"`
-	LastError         string                       `json:"last_error,omitempty"`
-	LifecycleVersion  int                          `json:"lifecycle_version" gorm:"not null;default:1"`
+	OrganizationID     string                       `json:"organization_id" gorm:"type:uuid;not null;index"`
+	UserID             string                       `json:"user_id" gorm:"type:uuid;not null;index"`
+	WorkflowID         string                       `json:"workflow_id" gorm:"type:uuid;index"`
+	NodeID             string                       `json:"node_id" gorm:"index"`
+	WorkspaceKey       string                       `json:"workspace_key" gorm:"not null;uniqueIndex"`
+	Provider           string                       `json:"provider" gorm:"type:varchar(32);not null;index;uniqueIndex:idx_coding_agent_external_sandbox,priority:1,where:external_sandbox_id <> ''"`
+	ExternalSandboxID  string                       `json:"-" gorm:"uniqueIndex:idx_coding_agent_external_sandbox,priority:2,where:external_sandbox_id <> ''"`
+	Snapshot           string                       `json:"snapshot"`
+	Region             string                       `json:"region"`
+	Status             CodingAgentEnvironmentStatus `json:"status" gorm:"type:varchar(24);not null;default:'provisioning';index"`
+	RepositoryProvider string                       `json:"repository_provider" gorm:"type:varchar(16);not null;default:'github'"`
+	RepositoryID       string                       `json:"repository_id,omitempty"`
+	Repository         string                       `json:"repository"`
+	Branch             string                       `json:"branch"`
+	CurrentJobID       string                       `json:"current_job_id,omitempty" gorm:"type:varchar(36);index"`
+	LastActivityAt     *time.Time                   `json:"last_activity_at,omitempty" gorm:"index"`
+	AutoStopMinutes    int                          `json:"auto_stop_minutes" gorm:"not null;default:15"`
+	AutoDeleteMinutes  int                          `json:"auto_delete_minutes" gorm:"not null;default:10080"`
+	Configuration      JSONB                        `json:"configuration" gorm:"type:jsonb;not null;default:'{}'"`
+	LastError          string                       `json:"last_error,omitempty"`
+	LifecycleVersion   int                          `json:"lifecycle_version" gorm:"not null;default:1"`
 }
 
 type CodingAgentSessionStatus string

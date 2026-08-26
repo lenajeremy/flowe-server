@@ -206,11 +206,7 @@ func (s *sandbox) Run(ctx context.Context, spec codingagent.CommandSpec, emit fu
 	}
 	defer func() { _ = deleteSession() }()
 
-	command := environmentPrefix(spec.Environment)
-	if spec.WorkingDir != "" {
-		command += "cd -- " + shellQuote(spec.WorkingDir) + " && "
-	}
-	command += spec.Command
+	command := composeCommand(spec.WorkingDir, spec.Environment, spec.Command)
 	started, err := s.sandbox.Process.ExecuteSessionCommand(runCtx, sessionID, command, true, true)
 	if err != nil {
 		return codingagent.CommandResult{}, fmt.Errorf("start Daytona command: %w", err)
@@ -367,6 +363,14 @@ func environmentPrefix(environment map[string]string) string {
 	}
 	result.WriteByte(' ')
 	return result.String()
+}
+
+func composeCommand(workingDirectory string, environment map[string]string, command string) string {
+	result := ""
+	if workingDirectory != "" {
+		result = "cd -- " + shellQuote(workingDirectory) + " && "
+	}
+	return result + environmentPrefix(environment) + command
 }
 
 func validEnvironmentName(value string) bool {

@@ -28,9 +28,9 @@ var (
 )
 
 var (
-	repositoryPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}$`)
-	branchPattern     = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$`)
-	domainPattern     = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$`)
+	repositorySegmentPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,100}$`)
+	branchPattern            = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$`)
+	domainPattern            = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$`)
 )
 
 type ServiceConfig struct {
@@ -149,8 +149,9 @@ func (s *Service) reconcileLoop(ctx context.Context) {
 			if err := s.recoverCompletedJobs(ctx, now.Add(-s.config.StaleAfter)); err != nil && !errors.Is(err, context.Canceled) {
 				slog.Error("failed to recover completed coding agent jobs", "error", err)
 			}
-			graceBefore := now.Add(-s.config.RecoveryGrace)
-			if err := s.store.ReconcileStale(ctx, graceBefore, graceBefore); err != nil && !errors.Is(err, context.Canceled) {
+			claimedBefore := now.Add(-s.config.StaleAfter)
+			runningBefore := now.Add(-s.config.RecoveryGrace)
+			if err := s.store.ReconcileStale(ctx, claimedBefore, runningBefore); err != nil && !errors.Is(err, context.Canceled) {
 				slog.Error("failed to reconcile stale coding agent jobs", "error", err)
 			}
 		}
@@ -396,7 +397,7 @@ func (s *Service) processJob(workerCtx context.Context, workerID string, job *mo
 		s.failClaimed(workerCtx, workerID, job, err)
 		return
 	}
-	if err := validateRepository(policy.Repository, policy.Branch); err != nil {
+	if err := validateRepository(policy.RepositoryProvider, policy.RepositoryID, policy.Repository, policy.Branch); err != nil {
 		s.failClaimed(workerCtx, workerID, job, err)
 		return
 	}
@@ -821,14 +822,47 @@ func (s *Service) removeRecoveryMarker(sandbox Sandbox, jobID string) {
 	}, nil)
 }
 
-func validateRepository(repository, branch string) error {
-	if !repositoryPattern.MatchString(strings.TrimSpace(repository)) || strings.HasSuffix(repository, ".") || strings.Contains(repository, "..") {
-		return errors.New("coding agent repository must be a GitHub owner/repository name")
+func validateRepository(provider, repositoryID, repository, branch string) error {
+	provider = normalizedRepositoryProvider(provider)
+	repository = strings.TrimSpace(repository)
+	repositoryID = strings.TrimSpace(repositoryID)
+	parts := strings.Split(repository, "/")
+	minimumParts, maximumParts := 2, 2
+	if provider == RepositoryGitLab {
+		maximumParts = 20
+	} else if provider != RepositoryGitHub {
+		return fmt.Errorf("unsupported coding agent repository provider %q", provider)
+	}
+	if len(repository) > 500 || len(parts) < minimumParts || len(parts) > maximumParts || strings.Contains(repository, "..") || strings.Contains(repository, "//") {
+		return fmt.Errorf("coding agent repository is not a valid %s project path", providerDisplayName(provider))
+	}
+	for _, part := range parts {
+		if !repositorySegmentPattern.MatchString(part) || strings.HasSuffix(part, ".") {
+			return fmt.Errorf("coding agent repository is not a valid %s project path", providerDisplayName(provider))
+		}
+	}
+	if provider == RepositoryGitHub {
+		if repositoryID != "" && repositoryID != repository {
+			return errors.New("coding agent GitHub repository ID does not match its repository path")
+		}
+	} else {
+		projectID, err := strconv.ParseInt(repositoryID, 10, 64)
+		if err != nil || projectID < 1 {
+			return errors.New("coding agent GitLab repository must include its numeric project ID")
+		}
 	}
 	if branch != "" && (!branchPattern.MatchString(branch) || strings.Contains(branch, "..") || strings.Contains(branch, "//") || strings.HasSuffix(branch, "/")) {
 		return errors.New("coding agent branch is invalid")
 	}
 	return nil
+}
+
+func normalizedRepositoryProvider(provider string) string {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	if provider == "" {
+		return RepositoryGitHub
+	}
+	return provider
 }
 
 // ValidateAllowedDomains applies Daytona's domain-allow-list shape and limit.
@@ -858,7 +892,8 @@ func workspaceKey(job *models.CodingAgentJob, policy ExecutionPolicy, snapshot s
 	sort.Strings(domains)
 	parts := []string{
 		job.OrganizationID, job.UserID, job.WorkflowID, job.NodeID, job.Runtime,
-		policy.Repository, policy.Branch, strings.TrimSpace(snapshot), strings.Join(domains, ","),
+		normalizedRepositoryProvider(policy.RepositoryProvider), policy.RepositoryID, policy.Repository, policy.Branch,
+		strings.TrimSpace(snapshot), strings.Join(domains, ","),
 		strconv.FormatBool(policy.NetworkBlockAll), strconv.Itoa(policy.AutoStopMinutes), strconv.Itoa(policy.AutoDeleteMinutes),
 	}
 	if policy.WorkspaceMode == WorkspaceEphemeral {

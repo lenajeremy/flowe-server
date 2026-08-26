@@ -77,18 +77,20 @@ type FlowNodeData struct {
 
 	// codingAgent — executes a durable coding task inside an isolated sandbox.
 	// Credentials and provider sandbox IDs never live on the canvas.
-	CodingAgentRuntime           string   `json:"codingAgentRuntime,omitempty"`
-	CodingAgentTask              string   `json:"codingAgentTask,omitempty"`
-	CodingAgentRepository        string   `json:"codingAgentRepository,omitempty"`
-	CodingAgentBranch            string   `json:"codingAgentBranch,omitempty"`
-	CodingAgentWorkspaceMode     string   `json:"codingAgentWorkspaceMode,omitempty"`
-	CodingAgentConversationKey   string   `json:"codingAgentConversationKey,omitempty"`
-	CodingAgentModel             string   `json:"codingAgentModel,omitempty"`
-	CodingAgentMaxDuration       int      `json:"codingAgentMaxDuration,omitempty"`
-	CodingAgentAutoStopMinutes   int      `json:"codingAgentAutoStopMinutes,omitempty"`
-	CodingAgentAutoDeleteMinutes int      `json:"codingAgentAutoDeleteMinutes,omitempty"`
-	CodingAgentAllowedDomains    []string `json:"codingAgentAllowedDomains,omitempty"`
-	CodingAgentAllowWrite        bool     `json:"codingAgentAllowWrite,omitempty"`
+	CodingAgentRuntime            string   `json:"codingAgentRuntime,omitempty"`
+	CodingAgentTask               string   `json:"codingAgentTask,omitempty"`
+	CodingAgentRepositoryProvider string   `json:"codingAgentRepositoryProvider,omitempty"`
+	CodingAgentRepositoryID       string   `json:"codingAgentRepositoryId,omitempty"`
+	CodingAgentRepository         string   `json:"codingAgentRepository,omitempty"`
+	CodingAgentBranch             string   `json:"codingAgentBranch,omitempty"`
+	CodingAgentWorkspaceMode      string   `json:"codingAgentWorkspaceMode,omitempty"`
+	CodingAgentConversationKey    string   `json:"codingAgentConversationKey,omitempty"`
+	CodingAgentModel              string   `json:"codingAgentModel,omitempty"`
+	CodingAgentMaxDuration        int      `json:"codingAgentMaxDuration,omitempty"`
+	CodingAgentAutoStopMinutes    int      `json:"codingAgentAutoStopMinutes,omitempty"`
+	CodingAgentAutoDeleteMinutes  int      `json:"codingAgentAutoDeleteMinutes,omitempty"`
+	CodingAgentAllowedDomains     []string `json:"codingAgentAllowedDomains,omitempty"`
+	CodingAgentAllowWrite         bool     `json:"codingAgentAllowWrite,omitempty"`
 
 	// integrationTrigger — what this node is subscribed to. The authoritative
 	// copy lives in the integration_triggers row (that is what the provider was

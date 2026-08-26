@@ -25,7 +25,8 @@ func (s *Service) acquireEnvironment(ctx context.Context, job *models.CodingAgen
 			environment = models.CodingAgentEnvironment{
 				OrganizationID: job.OrganizationID, UserID: job.UserID, WorkflowID: job.WorkflowID,
 				NodeID: job.NodeID, WorkspaceKey: key, Provider: s.provider.Name(), Snapshot: s.config.SandboxSnapshot,
-				Status: models.CodingAgentEnvironmentProvisioning, Repository: policy.Repository, Branch: policy.Branch,
+				Status: models.CodingAgentEnvironmentProvisioning, RepositoryProvider: normalizedRepositoryProvider(policy.RepositoryProvider),
+				RepositoryID: policy.RepositoryID, Repository: policy.Repository, Branch: policy.Branch,
 				CurrentJobID: job.ID.String(), AutoStopMinutes: policy.AutoStopMinutes,
 				AutoDeleteMinutes: policy.AutoDeleteMinutes, Configuration: models.JSONB(encodedPolicy),
 			}
@@ -239,17 +240,23 @@ func (s *Service) finishSuccessfulEnvironmentLifecycle(ctx context.Context, envi
 }
 
 func (s *Service) prepareRepository(ctx context.Context, sandbox Sandbox, job *models.CodingAgentJob, policy ExecutionPolicy) error {
-	repositoryURL := "https://github.com/" + policy.Repository + ".git"
+	provider, repositoryURL, gitUsername, err := repositoryCloneSettings(policy)
+	if err != nil {
+		return err
+	}
 	token := ""
-	if s.config.RepositoryToken != nil {
-		var err error
-		token, err = s.config.RepositoryToken(ctx, job.OrganizationID, job.UserID, "github")
-		if err != nil {
-			return fmt.Errorf("load GitHub credential: %w", err)
-		}
+	if s.config.RepositoryToken == nil {
+		return errors.New("repository credential lookup is not configured")
+	}
+	token, err = s.config.RepositoryToken(ctx, job.OrganizationID, job.UserID, provider)
+	if err != nil {
+		return fmt.Errorf("load %s credential: %w", providerDisplayName(provider), err)
+	}
+	if token == "" {
+		return fmt.Errorf("connect %s before running this coding agent", providerDisplayName(provider))
 	}
 
-	authPrefix, cleanup, err := prepareGitAuthentication(ctx, sandbox, token)
+	authPrefix, cleanup, err := prepareGitAuthentication(ctx, sandbox, token, gitUsername)
 	if err != nil {
 		return err
 	}
@@ -293,7 +300,7 @@ func (s *Service) prepareRepository(ctx context.Context, sandbox Sandbox, job *m
 	return nil
 }
 
-func prepareGitAuthentication(ctx context.Context, sandbox Sandbox, token string) (string, func(), error) {
+func prepareGitAuthentication(ctx context.Context, sandbox Sandbox, token, username string) (string, func(), error) {
 	if token == "" {
 		return "GIT_TERMINAL_PROMPT=0 ", func() {}, nil
 	}
@@ -314,13 +321,32 @@ func prepareGitAuthentication(ctx context.Context, sandbox Sandbox, token string
 		cleanup()
 		return "", func() {}, fmt.Errorf("upload temporary Git credential: %w", err)
 	}
-	script := "#!/bin/sh\ncase \"$1\" in\n*Username*) printf '%s\\n' 'x-access-token' ;;\n*Password*) cat -- " + quoteShell(tokenPath) + " ;;\n*) exit 1 ;;\nesac\n"
+	script := "#!/bin/sh\ncase \"$1\" in\n*Username*) printf '%s\\n' " + quoteShell(username) + " ;;\n*Password*) cat -- " + quoteShell(tokenPath) + " ;;\n*) exit 1 ;;\nesac\n"
 	if err := sandbox.Upload(ctx, askpassPath, []byte(script), 0o700); err != nil {
 		cleanup()
 		return "", func() {}, fmt.Errorf("upload Git credential helper: %w", err)
 	}
 	prefix := "GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=" + quoteShell(askpassPath) + " "
 	return prefix, cleanup, nil
+}
+
+func repositoryCloneSettings(policy ExecutionPolicy) (provider, repositoryURL, username string, err error) {
+	provider = normalizedRepositoryProvider(policy.RepositoryProvider)
+	switch provider {
+	case RepositoryGitHub:
+		return provider, "https://github.com/" + policy.Repository + ".git", "x-access-token", nil
+	case RepositoryGitLab:
+		return provider, "https://gitlab.com/" + policy.Repository + ".git", "oauth2", nil
+	default:
+		return "", "", "", fmt.Errorf("unsupported coding agent repository provider %q", provider)
+	}
+}
+
+func providerDisplayName(provider string) string {
+	if provider == RepositoryGitLab {
+		return "GitLab"
+	}
+	return "GitHub"
 }
 
 func commandFailure(result CommandResult, err error) string {

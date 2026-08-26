@@ -62,6 +62,8 @@ func validRequest() SubmitRequest {
 		Input:          map[string]any{"issue": 42},
 		Policy: ExecutionPolicy{
 			WorkspaceMode:       WorkspacePersistent,
+			RepositoryProvider:  RepositoryGitHub,
+			RepositoryID:        "acme/widgets",
 			Repository:          "acme/widgets",
 			MaxDurationSeconds:  900,
 			AutoStopMinutes:     15,
@@ -87,6 +89,7 @@ func TestSubmitIsIdempotentAndPinsPolicy(t *testing.T) {
 
 	mutated := validRequest()
 	mutated.Task = "A different task must not replace the queued job."
+	mutated.Policy.RepositoryID = "attacker/other"
 	mutated.Policy.Repository = "attacker/other"
 	second, created, err := store.Submit(context.Background(), mutated)
 	if err != nil {
@@ -256,6 +259,59 @@ func TestValidateAllowedDomainsMatchesDaytonaLimits(t *testing.T) {
 	}
 	if err := validateSubmitRequest(request); err == nil {
 		t.Fatal("more than Daytona's 20-domain limit was accepted")
+	}
+}
+
+func TestValidateRepositorySupportsConnectedGitHubAndGitLabProjects(t *testing.T) {
+	request := validRequest()
+	if err := validateSubmitRequest(request); err != nil {
+		t.Fatalf("valid GitHub repository rejected: %v", err)
+	}
+
+	request.Policy.RepositoryProvider = RepositoryGitLab
+	request.Policy.RepositoryID = "48291"
+	request.Policy.Repository = "acme/platform/widgets"
+	request.Policy.AllowedDomains = []string{"api.openai.com", "gitlab.com"}
+	if err := validateSubmitRequest(request); err != nil {
+		t.Fatalf("valid GitLab repository rejected: %v", err)
+	}
+
+	request.Policy.RepositoryID = "acme/platform/widgets"
+	if err := validateSubmitRequest(request); err == nil || !strings.Contains(err.Error(), "numeric project ID") {
+		t.Fatalf("non-numeric GitLab project ID error = %v", err)
+	}
+
+	request.Policy.RepositoryProvider = "unknown"
+	if err := validateSubmitRequest(request); err == nil || !strings.Contains(err.Error(), "unsupported") {
+		t.Fatalf("unsupported provider error = %v", err)
+	}
+}
+
+func TestRepositoryCloneSettingsUseProviderSpecificHostsAndUsernames(t *testing.T) {
+	tests := []struct {
+		policy   ExecutionPolicy
+		provider string
+		url      string
+		username string
+	}{
+		{
+			policy:   ExecutionPolicy{RepositoryProvider: RepositoryGitHub, Repository: "acme/widgets"},
+			provider: RepositoryGitHub, url: "https://github.com/acme/widgets.git", username: "x-access-token",
+		},
+		{
+			policy:   ExecutionPolicy{RepositoryProvider: RepositoryGitLab, Repository: "acme/platform/widgets"},
+			provider: RepositoryGitLab, url: "https://gitlab.com/acme/platform/widgets.git", username: "oauth2",
+		},
+	}
+	for _, test := range tests {
+		provider, url, username, err := repositoryCloneSettings(test.policy)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if provider != test.provider || url != test.url || username != test.username {
+			t.Fatalf("clone settings = (%q, %q, %q), want (%q, %q, %q)",
+				provider, url, username, test.provider, test.url, test.username)
+		}
 	}
 }
 

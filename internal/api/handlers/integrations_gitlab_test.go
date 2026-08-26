@@ -1,6 +1,8 @@
 package handlers
 
 import (
+	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -54,5 +56,34 @@ func TestGitLabChildResourcesRejectNonNumericProjectIDs(t *testing.T) {
 	}
 	if _, err := gitlabMemberResources("token", "0"); err == nil {
 		t.Fatal("project id zero was accepted")
+	}
+}
+
+func TestGitLabRepositoryResourcesIncludeEveryPage(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/projects" {
+			http.NotFound(w, r)
+			return
+		}
+		if r.URL.Query().Get("page") == "1" {
+			projects := make([]map[string]any, 100)
+			for index := range projects {
+				projects[index] = map[string]any{"id": index + 1, "path_with_namespace": fmt.Sprintf("acme/project-%d", index+1)}
+			}
+			_ = json.NewEncoder(w).Encode(projects)
+			return
+		}
+		_ = json.NewEncoder(w).Encode([]map[string]any{{"id": 101, "path_with_namespace": "acme/project-101"}})
+	}))
+	defer srv.Close()
+	restore := redirectGitLabAPITo(srv.URL)
+	defer restore()
+
+	repositories, err := gitlabResources("oauth-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(repositories) != 101 || repositories[100].ID != "101" || repositories[100].Name != "acme/project-101" {
+		t.Fatalf("paginated repositories = %#v", repositories)
 	}
 }

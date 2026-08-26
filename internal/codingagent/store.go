@@ -169,7 +169,7 @@ func validateSubmitRequest(req SubmitRequest) error {
 	if req.Policy.MaxDurationSeconds < 30 || req.Policy.MaxDurationSeconds > 7200 {
 		return errors.New("coding agent duration must be between 30 seconds and 2 hours")
 	}
-	if err := validateRepository(req.Policy.Repository, req.Policy.Branch); err != nil {
+	if err := validateRepository(req.Policy.RepositoryProvider, req.Policy.RepositoryID, req.Policy.Repository, req.Policy.Branch); err != nil {
 		return err
 	}
 	if req.Policy.AutoStopMinutes < 1 || req.Policy.AutoStopMinutes > 24*60 {
@@ -228,11 +228,14 @@ func (s *Store) ClaimNext(ctx context.Context, workerID string) (*models.CodingA
 	var claimed models.CodingAgentJob
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var job models.CodingAgentJob
-		err := tx.Clauses(clause.Locking{Strength: "UPDATE", Options: "SKIP LOCKED"}).
+		result := tx.Clauses(clause.Locking{Strength: "UPDATE", Options: "SKIP LOCKED"}).
 			Where("status = ? AND available_at <= ? AND attempt_count < max_attempts", models.CodingAgentJobPending, s.now()).
-			Order("available_at ASC, created_at ASC").First(&job).Error
-		if err != nil {
-			return err
+			Order("available_at ASC, created_at ASC").Limit(1).Find(&job)
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected == 0 {
+			return gorm.ErrRecordNotFound
 		}
 		now := s.now()
 		res := tx.Model(&models.CodingAgentJob{}).

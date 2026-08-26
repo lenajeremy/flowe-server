@@ -22,6 +22,8 @@ const (
 	RuntimeCodex           = "codex"
 	ProviderDaytona        = "daytona"
 	DefaultCodexCLIVersion = "0.149.1"
+	RepositoryGitHub       = "github"
+	RepositoryGitLab       = "gitlab"
 )
 
 type WorkspaceMode string
@@ -35,6 +37,8 @@ const (
 // runtime may narrow this policy, but must never broaden it.
 type ExecutionPolicy struct {
 	WorkspaceMode       WorkspaceMode `json:"workspaceMode"`
+	RepositoryProvider  string        `json:"repositoryProvider"`
+	RepositoryID        string        `json:"repositoryId,omitempty"`
 	Repository          string        `json:"repository"`
 	Branch              string        `json:"branch,omitempty"`
 	Model               string        `json:"model,omitempty"`
