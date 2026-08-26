@@ -530,6 +530,7 @@ func nodeCatalog() []map[string]any {
 				"codingAgentAutoDeleteMinutes":  "number – retention minutes, at least auto-stop and at most 43200 (default 10080)",
 				"codingAgentAllowedDomains":     "string[] – restrict egress to these domains (runtime, npm, and the repository provider are added automatically). Naming any domain switches the node to allowlist mode; leave empty for open internet access",
 				"codingAgentNetworkAccess":      "'open'|'allowlist' – default open. Use allowlist only when the task must not reach the wider internet",
+				"codingAgentToolNodes":          "string[] – ids of other nodes on this canvas the agent may call while it works, e.g. a GitHub node so it can open its own pull request. Empty means no tools. The agent never holds credentials itself; the server runs the node on its behalf",
 				"codingAgentAllowWrite":         "boolean – allow repository file changes; false makes the agent read-only",
 			},
 			"handles": map[string]any{"inputs": []string{"target (left)"}, "outputs": []string{"source (right)"}},
