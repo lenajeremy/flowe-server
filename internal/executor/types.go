@@ -1027,6 +1027,10 @@ const (
 	EventWorkflowCompleted ExecutionEventType = "workflow_completed"
 	EventWorkflowError     ExecutionEventType = "workflow_error"
 	EventNodeWaiting       ExecutionEventType = "node_waiting"
+	// EventNodeProgress reports non-terminal activity inside a long-running
+	// node. Unlike EventNodeWaiting, it never pauses the workflow or creates a
+	// human-approval decision.
+	EventNodeProgress ExecutionEventType = "node_progress"
 )
 
 type ExecutionEvent struct {
@@ -1037,6 +1041,7 @@ type ExecutionEvent struct {
 	NodeType  *NodeType          `json:"nodeType,omitempty"`
 	Message   string             `json:"message"`
 	Output    *string            `json:"output,omitempty"`
+	Payload   map[string]any     `json:"payload,omitempty"`
 	Timestamp int64              `json:"timestamp"`
 	RunID     string             `json:"runId,omitempty"`
 }

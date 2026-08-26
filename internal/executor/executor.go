@@ -94,6 +94,19 @@ func workflowNameFromContext(ctx context.Context) string {
 	return s
 }
 
+// Workflow progress event timestamps use the same run-relative clock as the
+// executor's ordinary node events. Long-running nodes emit from callbacks far
+// below RunWorkflow, so the start time travels in context instead of exposing
+// wall-clock milliseconds in an otherwise elapsed-time field.
+type workflowStartedAtCtxKey struct{}
+
+func workflowElapsedMillis(ctx context.Context) int64 {
+	if startedAt, ok := ctx.Value(workflowStartedAtCtxKey{}).(time.Time); ok {
+		return time.Since(startedAt).Milliseconds()
+	}
+	return 0
+}
+
 // IntegrationCredsLookup resolves the workflow owner's stored OAuth
 // credentials for a provider. workspace is the tenant identifier where the
 // API needs one (e.g. the Shopify shop domain); empty otherwise. Set by
@@ -607,13 +620,10 @@ func runNodeInner(ctx context.Context, node WorkflowASTNode, outputs map[string]
 				AllowWorkspaceWrite: d.CodingAgentAllowWrite,
 			},
 		}, func(progress codingagent.StreamEvent) {
-			if progress.Message == "" {
-				return
+			event, ok := codingAgentProgressExecutionEvent(ctx, node, runID, progress)
+			if ok {
+				emit(event)
 			}
-			emit(ExecutionEvent{
-				ID: newUUID(), Type: EventNodeWaiting, NodeID: strPtr(node.ID), NodeLabel: strPtr(d.Label),
-				NodeType: ntPtr(d.NodeType), Message: progress.Message, Timestamp: time.Now().UnixMilli(), RunID: runID,
-			})
 		})
 		if err != nil {
 			return "", err
@@ -1541,6 +1551,22 @@ func runNodeInner(ctx context.Context, node WorkflowASTNode, outputs map[string]
 	return "", fmt.Errorf("unknown node type: %s", d.NodeType)
 }
 
+func codingAgentProgressExecutionEvent(ctx context.Context, node WorkflowASTNode, runID string, progress codingagent.StreamEvent) (ExecutionEvent, bool) {
+	if strings.TrimSpace(progress.Message) == "" && len(progress.Payload) == 0 {
+		return ExecutionEvent{}, false
+	}
+	payload := make(map[string]any, len(progress.Payload)+1)
+	for key, value := range progress.Payload {
+		payload[key] = value
+	}
+	payload["activityType"] = progress.Type
+	return ExecutionEvent{
+		ID: newUUID(), Type: EventNodeProgress, NodeID: strPtr(node.ID), NodeLabel: strPtr(node.Data.Label),
+		NodeType: ntPtr(node.Data.NodeType), Message: progress.Message, Payload: payload,
+		Timestamp: workflowElapsedMillis(ctx), RunID: runID,
+	}, true
+}
+
 // ── Loop helpers ───────────────────────────────────────────────
 
 // reachableFrom returns all node IDs reachable via edges from startID (not including startID).
@@ -1635,6 +1661,7 @@ func extractLoopItems(input, field string) []string {
 // ID, used to resolve their integration connections (OAuth tokens).
 func RunWorkflow(ctx context.Context, workflow WorkflowAST, keys APIKeys, runID, ownerID, orgID string, emit EmitFn, runOptions ...RunOptions) {
 	start := time.Now()
+	ctx = context.WithValue(ctx, workflowStartedAtCtxKey{}, start)
 	var options RunOptions
 	if len(runOptions) > 0 {
 		options = runOptions[0]

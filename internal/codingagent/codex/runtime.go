@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"workflow-ai/server/internal/codingagent"
@@ -20,6 +21,8 @@ import (
 const (
 	maxAuthBundleSize = 2 << 20
 	maxArtifactSize   = 2 << 20
+	maxCommandLogSize = 4 << 10
+	maxOutputLogSize  = 8 << 10
 )
 
 var safeIdentifier = regexp.MustCompile(`^[A-Za-z0-9._-]{1,160}$`)
@@ -197,7 +200,7 @@ func ensureCodexCommand(version string) string {
 
 func buildCommand(req codingagent.RuntimeRequest, secretDir, promptPath, schemaPath, resultPath string) string {
 	parts := []string{
-		"codex", "--ask-for-approval", "never", "exec", "--json", "--color", "never", "--ignore-user-config",
+		"codex", "--ask-for-approval", "never", "--search", "exec", "--json", "--color", "never", "--ignore-user-config",
 		"--sandbox", map[bool]string{true: "workspace-write", false: "read-only"}[req.AllowWrite],
 		"--output-schema", shellQuote(schemaPath), "--output-last-message", shellQuote(resultPath),
 		"--cd", shellQuote(req.WorkingDirectory),
@@ -218,6 +221,7 @@ func buildPrompt(task string) string {
 Fernary execution requirements:
 - Work only inside the current repository workspace.
 - Never read, print, copy, or expose authentication files, tokens, environment secrets, or files outside the repository.
+- Use live web search when recent or authoritative information would improve the result. Never include repository contents, customer data, credentials, or private identifiers in a search query.
 - Make the requested changes and run the most relevant verification available.
 - Do not push, publish, deploy, open a pull request, or contact external people.
 - Return the final result using the provided JSON schema.`
@@ -259,18 +263,105 @@ func applyCodexEvent(result *codingagent.RuntimeResult, event map[string]any, em
 			result.ExternalThreadID = threadID
 		}
 	}
-	message := ""
 	if item, ok := event["item"].(map[string]any); ok {
-		switch item["type"] {
-		case "command_execution":
-			message = "Codex completed a command"
-		case "agent_message":
-			message = "Codex produced an update"
+		if itemType, _ := item["type"].(string); itemType == "command_execution" {
+			if commandEvent, ok := codexCommandEvent(eventType, item); ok && emit != nil {
+				emit(commandEvent)
+			}
+			return
 		}
 	}
 	if emit != nil {
+		message := ""
+		if item, ok := event["item"].(map[string]any); ok && item["type"] == "agent_message" {
+			message = "Codex produced an update"
+		}
 		emit(codingagent.StreamEvent{Type: "codex_event", Message: message, Payload: scrubCodexEvent(event)})
 	}
+}
+
+func codexCommandEvent(eventType string, item map[string]any) (codingagent.StreamEvent, bool) {
+	phase := ""
+	switch eventType {
+	case "item.started":
+		phase = "started"
+	case "item.completed":
+		phase = "completed"
+	default:
+		return codingagent.StreamEvent{}, false
+	}
+	payload := map[string]any{"kind": "command", "phase": phase}
+	if value, ok := item["id"].(string); ok && value != "" {
+		payload["itemId"] = safeLogText(value, 256)
+	}
+	if value, ok := item["command"].(string); ok && value != "" {
+		payload["command"] = safeLogText(value, maxCommandLogSize)
+	}
+	if value, ok := item["status"].(string); ok && value != "" {
+		payload["status"] = safeLogText(value, 64)
+	}
+	if value, exists := item["exit_code"]; exists {
+		payload["exitCode"] = value
+	}
+	if phase == "completed" {
+		if value, ok := item["aggregated_output"].(string); ok && value != "" {
+			command, _ := item["command"].(string)
+			if commandMayExposeSecrets(command) {
+				payload["result"] = "Result hidden because this command may expose credentials or environment secrets."
+				payload["resultRedacted"] = true
+			} else {
+				payload["result"] = safeLogText(value, maxOutputLogSize)
+			}
+		}
+		message := "Codex completed a command"
+		if exitCode, ok := numericInt(item["exit_code"]); ok && exitCode != 0 {
+			message = "Codex command exited with an error"
+		}
+		return codingagent.StreamEvent{Type: "command_completed", Message: message, Payload: payload}, true
+	}
+	return codingagent.StreamEvent{Type: "command_started", Message: "Codex started a command", Payload: payload}, true
+}
+
+var secretReadingCommand = regexp.MustCompile(`(?i)(?:^|[\s/'"])(?:printenv|env|set|export|declare\s+-x)(?:\s|$)|(?:process\.env|os\.environ|auth\.json|\.env(?:\.|\s|$)|\.npmrc|\.pypirc|\.netrc|git-credentials|credentials?[/.'"]|secrets?[/.'"])`)
+
+func commandMayExposeSecrets(command string) bool {
+	return secretReadingCommand.MatchString(command)
+}
+
+func numericInt(value any) (int, bool) {
+	switch number := value.(type) {
+	case float64:
+		return int(number), true
+	case int:
+		return number, true
+	case json.Number:
+		parsed, err := strconv.Atoi(number.String())
+		return parsed, err == nil
+	default:
+		return 0, false
+	}
+}
+
+func safeLogText(value string, limit int) string {
+	value = strings.ToValidUTF8(value, "�")
+	value = strings.Map(func(r rune) rune {
+		if r == '\n' || r == '\t' {
+			return r
+		}
+		if unicode.IsControl(r) {
+			return -1
+		}
+		return r
+	}, value)
+	value = redactDiagnostic(value)
+	if len(value) <= limit {
+		return value
+	}
+	value = value[:limit]
+	for !utf8.ValidString(value) {
+		value = value[:len(value)-1]
+	}
+	return value + "\n… output truncated by Fernary"
 }
 
 func scrubCodexEvent(event map[string]any) map[string]any {
@@ -384,8 +475,10 @@ func conciseError(values ...string) string {
 }
 
 var diagnosticSecrets = []*regexp.Regexp{
-	regexp.MustCompile(`(?i)(authorization|api[_-]?key|password|secret|token)\s*[:=]\s*[^\s]+`),
+	regexp.MustCompile(`(?i)["']?(authorization|api[_-]?key|password|secret|token)["']?\s*[:=]\s*(?:bearer\s+)?[^\s]+`),
 	regexp.MustCompile(`\bsk-[A-Za-z0-9_-]{10,}\b`),
+	regexp.MustCompile(`\b(?:gh[pousr]_[A-Za-z0-9]{20,}|glpat-[A-Za-z0-9_-]{20,})\b`),
+	regexp.MustCompile(`(?i)([?&](?:access_token|token|api_key|signature)=)[^&\s]+`),
 }
 
 func redactDiagnostic(value string) string {

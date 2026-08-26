@@ -103,6 +103,20 @@ func TestBuilderCatalogIncludesCodingAgentSafetyBoundary(t *testing.T) {
 	}
 }
 
+func TestWorkflowBuilderPromptExplainsWhenAndHowToAddCodingAgents(t *testing.T) {
+	t.Parallel()
+	for _, want := range []string{
+		"Use codingAgent when the user wants Codex",
+		"Call list_integration_resources for github or gitlab",
+		"codingAgentAllowWrite to true only when the user explicitly asks",
+		"cannot push, deploy, open a pull request",
+	} {
+		if !strings.Contains(workflowSystemPrompt, want) {
+			t.Errorf("workflow builder prompt is missing %q", want)
+		}
+	}
+}
+
 func TestBuilderCatalogIncludesLiveGitHubAndGitLabAppTriggers(t *testing.T) {
 	t.Parallel()
 
