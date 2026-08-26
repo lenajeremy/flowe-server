@@ -23,6 +23,13 @@ type WorkflowRun struct {
 	ErrorMessage   string    `json:"error_message,omitempty"`
 	Events         JSONB     `json:"events"         gorm:"type:jsonb"`
 	Input          JSONB     `json:"input"          gorm:"type:jsonb"`
+	// Graph is the {nodes, edges} this run actually executed, captured at
+	// admission. Replaying a run's path against the workflow's *current*
+	// definition silently lies once the workflow has been edited — deleted
+	// nodes vanish from the picture and nodes added since read as skipped.
+	// Manual runs need it for a second reason: they execute the AST posted by
+	// the browser, which is whatever is on the canvas at the time, saved or not.
+	Graph JSONB `json:"graph,omitempty" gorm:"type:jsonb"`
 }
 
 // Workflow persists the full workflow definition (nodes + edges as JSONB).

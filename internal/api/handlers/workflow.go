@@ -141,6 +141,9 @@ func (h *WorkflowHandler) run(c *gin.Context, nodeOnly bool) {
 		WorkflowID:     req.WorkflowID,
 		WorkflowName:   req.Workflow.Name,
 		Status:         models.RunStatusRunning,
+		// The posted AST, not the saved workflow — a manual run executes what
+		// is on the canvas, which may never have been saved at all.
+		Graph: runGraph(req.Workflow.Nodes, req.Workflow.Edges),
 	}
 	if err := h.db.DB.Create(run).Error; err != nil {
 		slog.Error("failed to persist workflow run", "error", err)

@@ -77,6 +77,7 @@ func (h *WorkflowHandler) admitRun(ctx context.Context, workflowID, trigger stri
 		WorkflowID:     workflowID,
 		WorkflowName:   workflow.Name,
 		Status:         models.RunStatusRunning,
+		Graph:          runGraph(nodes, edges),
 	}
 	if admitErr != nil {
 		run.Status = models.RunStatusError
@@ -172,4 +173,18 @@ func injectInto(nodeType executor.NodeType, nodeID, payload string) func([]execu
 		}
 		return entry
 	}
+}
+
+// runGraph captures the nodes and edges a run is about to execute, so its path
+// can be drawn later against the shape that actually ran rather than whatever
+// the workflow has since been edited into. Taken after any trigger injection,
+// which is the point: the payload a trigger wrote into a node is part of what
+// ran. Marshalling cannot fail for values that were just unmarshalled, and a
+// snapshot is not worth failing a run over, so an error yields no snapshot.
+func runGraph(nodes []executor.WorkflowASTNode, edges []executor.WorkflowASTEdge) models.JSONB {
+	raw, err := json.Marshal(map[string]any{"nodes": nodes, "edges": edges})
+	if err != nil {
+		return nil
+	}
+	return models.JSONB(raw)
 }
