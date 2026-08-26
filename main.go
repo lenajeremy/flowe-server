@@ -4,6 +4,9 @@ import (
 	"context"
 	"log"
 	"log/slog"
+	"os"
+	"strconv"
+	"strings"
 	"time"
 
 	"workflow-ai/server/config"
@@ -108,7 +111,16 @@ func main() {
 	go sweepHolds(dbClient.DB)
 	go pruneRunHistory(gate)
 
-	const port = 8080
+	// PORT lets a second instance run beside the first — reviewing a branch
+	// without stopping whatever is already serving 8080.
+	port := 8080
+	if value := strings.TrimSpace(os.Getenv("PORT")); value != "" {
+		parsed, err := strconv.Atoi(value)
+		if err != nil || parsed < 1 || parsed > 65535 {
+			log.Fatalf("PORT must be a number between 1 and 65535, got %q", value)
+		}
+		port = parsed
+	}
 	api.InitServer(port, dbClient, redisClient)
 }
 
