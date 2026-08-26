@@ -114,34 +114,42 @@ func TestBuilderCatalogIncludesCodingAgentSafetyBoundary(t *testing.T) {
 	}
 }
 
-func TestWorkflowBuilderPromptExplainsWhenAndHowToAddCodingAgents(t *testing.T) {
+// The static prompt is cached byte-for-byte across turns, so it can only hold
+// things that do not change: how to behave. What a node can DO belongs in the
+// catalog, which is generated from the code and fetched per turn.
+//
+// This was not a style preference. The prompt claimed the coding agent "cannot
+// push, deploy, open a pull request" long after the tool grant made it able to,
+// because the same fact was written in two places and only one was updated.
+func TestWorkflowBuilderPromptKeepsBehaviourNotCapabilities(t *testing.T) {
 	t.Parallel()
+
 	for _, want := range []string{
 		"Use codingAgent when the user wants Codex",
 		"Call list_integration_resources for github or gitlab",
-		"codingAgentAllowWrite to true only when the user explicitly asks",
-		// The agent reaches the outside world only through granted nodes, and
-		// the prompt has to say so both ways round: what it cannot do alone,
-		// and how it opens a pull request when it is granted the means.
-		"cannot push, deploy, or contact anyone",
-		"codingAgentToolNodes",
-		"create_branch, commit_files and create_pull_request",
-		"deny-by-default",
+		"Never tell the user what a node can or cannot do from memory",
+		"Default to the least authority the task needs",
 	} {
 		if !strings.Contains(workflowSystemPrompt, want) {
-			t.Errorf("workflow builder prompt is missing %q", want)
+			t.Errorf("workflow builder prompt is missing the behaviour rule %q", want)
 		}
 	}
 
-	// The prompt used to state flatly that the node could not open a pull
-	// request. It can now, through a granted node, and a builder repeating the
-	// old line would talk users out of the workflow they asked for.
-	for _, stale := range []string{
-		"cannot push, deploy, open a pull request",
-		"it cannot push, deploy, open pull requests",
+	// Every one of these is a fact about what a node can do, which the catalog
+	// already carries. Restating it here is how the prompt goes stale.
+	for _, capability := range []string{
+		"cannot push",
+		"create_branch",
+		"commit_files",
+		"create_pull_request",
+		"codingAgentToolNodes",
+		"codingAgentAllowWrite",
+		"codingAgentNetworkAccess",
+		"codingAgentAllowedDomains",
+		"deny-by-default",
 	} {
-		if strings.Contains(workflowSystemPrompt, stale) {
-			t.Errorf("workflow builder prompt still claims %q", stale)
+		if strings.Contains(workflowSystemPrompt, capability) {
+			t.Errorf("workflow builder prompt states the capability %q — that belongs in nodeCatalog, which cannot go stale", capability)
 		}
 	}
 }
