@@ -895,8 +895,12 @@ func ValidateAllowedDomains(domains []string) error {
 		}
 		seen[domain] = struct{}{}
 	}
-	if len(seen) == 0 || len(seen) > 20 {
-		return errors.New("coding agent requires between 1 and 20 unique allowed network domains")
+	// Zero domains means unrestricted, which is the default. This used to
+	// reject it, from back when the node always sent a list and "no domains"
+	// could only be a mistake. The cap still applies: a list is a deny-by-default
+	// policy and one long enough to be unreadable is not a policy.
+	if len(seen) > 20 {
+		return errors.New("coding agent allows at most 20 unique network domains")
 	}
 	return nil
 }
