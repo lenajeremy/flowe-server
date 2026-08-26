@@ -1761,9 +1761,13 @@ func RunWorkflow(ctx context.Context, workflow WorkflowAST, keys APIKeys, runID,
 	for _, e := range edges {
 		inDeg[e.Target]++
 	}
+	// Only the chosen graph supplies roots. Without this every node with no
+	// inbound edge starts a run, including ones parked on the canvas to be
+	// called as an agent's tools rather than to fire on their own.
+	runnable := runnableNodes(nodes, edges, options.EntryNodeID)
 	enabled := make(map[string]bool, len(nodes))
 	for _, n := range nodes {
-		if inDeg[n.ID] == 0 {
+		if inDeg[n.ID] == 0 && runnable[n.ID] {
 			enabled[n.ID] = true
 		}
 	}

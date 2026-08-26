@@ -37,6 +37,7 @@ type pendingRun struct {
 	ast      executor.WorkflowAST
 	res      *billing.Reservation
 	trigger  string
+	entry    string
 }
 
 // RunID is the id assigned before execution, so a caller can hand it back to
@@ -49,7 +50,7 @@ func (p *pendingRun) RunID() string { return p.run.ID.String() }
 // that stops because the allowance ran out has to be visibly stopped, not
 // indistinguishable from one that was never triggered.
 func (h *WorkflowHandler) admitRun(ctx context.Context, workflowID, trigger string,
-	inject func(nodes []executor.WorkflowASTNode)) (*pendingRun, error) {
+	inject func(nodes []executor.WorkflowASTNode) string) (*pendingRun, error) {
 
 	var workflow models.Workflow
 	if err := h.db.DB.First(&workflow, "id = ?", workflowID).Error; err != nil {
@@ -58,10 +59,13 @@ func (h *WorkflowHandler) admitRun(ctx context.Context, workflowID, trigger stri
 
 	var nodes []executor.WorkflowASTNode
 	var edges []executor.WorkflowASTEdge
+	// Which trigger woke this run, so its own graph executes rather than
+	// whichever graph on the canvas happens to be largest.
+	entryNodeID := ""
 	json.Unmarshal(workflow.Nodes, &nodes)
 	json.Unmarshal(workflow.Edges, &edges)
 	if inject != nil {
-		inject(nodes)
+		entryNodeID = inject(nodes)
 	}
 
 	runID := uuid.New()
@@ -90,6 +94,7 @@ func (h *WorkflowHandler) admitRun(ctx context.Context, workflowID, trigger stri
 		ast:      executor.WorkflowAST{Version: "1.0", Name: workflow.Name, Nodes: nodes, Edges: edges},
 		res:      res,
 		trigger:  trigger,
+		entry:    entryNodeID,
 	}, nil
 }
 
@@ -122,7 +127,7 @@ func (h *WorkflowHandler) executeRun(ctx context.Context, p *pendingRun) models.
 			if ev.Type == executor.EventWorkflowError {
 				finalStatus = models.RunStatusError
 			}
-		})
+		}, executor.RunOptions{EntryNodeID: p.entry})
 
 	eventsJSON, _ := json.Marshal(events)
 	h.db.DB.Model(&p.run).Updates(map[string]interface{}{
@@ -138,8 +143,9 @@ func (h *WorkflowHandler) executeRun(ctx context.Context, p *pendingRun) models.
 // injectInto returns an inject function that hands a payload to trigger nodes of
 // one type. Matching on node id when there is one keeps a canvas with several
 // triggers from waking all of them with the same event.
-func injectInto(nodeType executor.NodeType, nodeID, payload string) func([]executor.WorkflowASTNode) {
-	return func(nodes []executor.WorkflowASTNode) {
+func injectInto(nodeType executor.NodeType, nodeID, payload string) func([]executor.WorkflowASTNode) string {
+	return func(nodes []executor.WorkflowASTNode) string {
+		entry := ""
 		for i := range nodes {
 			// Both fields carry the node type and the two existing trigger paths
 			// disagree about which one they read, so match on either — a mismatch
@@ -152,5 +158,18 @@ func injectInto(nodeType executor.NodeType, nodeID, payload string) func([]execu
 			}
 			nodes[i].Data.DefaultValue = &payload
 		}
+		if entry == "" {
+			// The first matching trigger is the one whose graph runs. A canvas
+			// with several triggers of one type is ambiguous by construction;
+			// picking the first keeps it deterministic rather than arbitrary.
+			for i := range nodes {
+				if (nodes[i].Data.NodeType == nodeType || nodes[i].Type == nodeType) &&
+					(nodeID == "" || nodes[i].ID == nodeID) {
+					entry = nodes[i].ID
+					break
+				}
+			}
+		}
+		return entry
 	}
 }

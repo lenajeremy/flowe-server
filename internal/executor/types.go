@@ -1027,7 +1027,10 @@ type RunRequest struct {
 // execution path. OnlyNodeID executes exactly one node; InitialOutputs supplies
 // cached values from its upstream ancestors for template/input resolution.
 type RunOptions struct {
-	OnlyNodeID     string
+	OnlyNodeID string
+	// EntryNodeID names where the run begins. A trigger sets it so its own
+	// graph runs, rather than whichever graph happens to be largest.
+	EntryNodeID    string
 	InitialOutputs map[string]string
 }
 
