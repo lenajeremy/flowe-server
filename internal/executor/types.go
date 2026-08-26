@@ -90,7 +90,12 @@ type FlowNodeData struct {
 	CodingAgentAutoStopMinutes    int      `json:"codingAgentAutoStopMinutes,omitempty"`
 	CodingAgentAutoDeleteMinutes  int      `json:"codingAgentAutoDeleteMinutes,omitempty"`
 	CodingAgentAllowedDomains     []string `json:"codingAgentAllowedDomains,omitempty"`
-	CodingAgentAllowWrite         bool     `json:"codingAgentAllowWrite,omitempty"`
+	// CodingAgentNetworkAccess is "open" (default) or "allowlist". Real work
+	// needs the internet — dependencies, package registries, documentation — so
+	// an agent that cannot reach it fails at tasks it should manage. Naming any
+	// allowed domain implies "allowlist" without having to say so twice.
+	CodingAgentNetworkAccess string `json:"codingAgentNetworkAccess,omitempty"`
+	CodingAgentAllowWrite    bool   `json:"codingAgentAllowWrite,omitempty"`
 
 	// integrationTrigger — what this node is subscribed to. The authoritative
 	// copy lives in the integration_triggers row (that is what the provider was

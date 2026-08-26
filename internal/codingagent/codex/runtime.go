@@ -415,28 +415,77 @@ func collectGitArtifacts(ctx context.Context, sandbox codingagent.Sandbox, worki
 		return artifacts, errors.New("Codex finished, but untracked files could not be collected")
 	}
 	remaining := maxArtifactSize - len(diff.Stdout)
+
+	// Tracked files the agent changed. The patch above describes them as a diff,
+	// which is right for a human reading the run but useless to a caller that
+	// has to write the result somewhere: committing through an API needs the
+	// file's full post-change content, not the delta. Deletions are carried as
+	// an empty-content artifact of their own kind, since "no content" and
+	// "removed" are different instructions to whatever applies this.
+	tracked, trackedErr := sandbox.Run(ctx, codingagent.CommandSpec{
+		Command: "git diff --name-status -z --no-renames HEAD --", WorkingDir: workingDirectory, Timeout: time.Minute,
+	}, nil)
+	if trackedErr != nil || tracked.ExitCode != 0 {
+		return artifacts, errors.New("Codex finished, but its changed files could not be collected")
+	}
+	// -z emits status and path as separate NUL-terminated fields.
+	fields := strings.Split(tracked.Stdout, "\x00")
+	for index := 0; index+1 < len(fields); index += 2 {
+		status, path := strings.TrimSpace(fields[index]), fields[index+1]
+		if status == "" || !safeRepositoryPath(path) {
+			continue
+		}
+		if strings.HasPrefix(status, "D") {
+			artifacts = append(artifacts, inlineArtifact("file_deleted", path, "text/plain", ""))
+			continue
+		}
+		if remaining <= 0 {
+			break
+		}
+		content, downloadErr := readRepositoryFile(ctx, sandbox, workingDirectory, path, remaining)
+		if downloadErr != nil {
+			continue
+		}
+		artifacts = append(artifacts, inlineArtifact("file", path, "text/plain", content))
+		remaining -= len(content)
+	}
+
 	for index, path := range strings.Split(untracked.Stdout, "\x00") {
 		if index >= 50 || remaining <= 0 || !safeRepositoryPath(path) {
 			break
 		}
-		sized, sizeErr := sandbox.Run(ctx, codingagent.CommandSpec{
-			Command: "wc -c < " + shellQuote(path), WorkingDir: workingDirectory, Timeout: time.Minute,
-		}, nil)
-		if sizeErr != nil || sized.ExitCode != 0 {
+		content, downloadErr := readRepositoryFile(ctx, sandbox, workingDirectory, path, remaining)
+		if downloadErr != nil {
 			continue
 		}
-		size, parseErr := strconv.ParseInt(strings.TrimSpace(sized.Stdout), 10, 64)
-		if parseErr != nil || size < 0 || size > int64(remaining) {
-			continue
-		}
-		content, downloadErr := sandbox.Download(ctx, strings.TrimSuffix(workingDirectory, "/")+"/"+path)
-		if downloadErr != nil || int64(len(content)) != size || !utf8.Valid(content) {
-			continue
-		}
-		artifacts = append(artifacts, inlineArtifact("file", path, "text/plain", string(content)))
+		artifacts = append(artifacts, inlineArtifact("file", path, "text/plain", content))
 		remaining -= len(content)
 	}
 	return artifacts, nil
+}
+
+// readRepositoryFile downloads one file from the workspace, refusing anything
+// over the remaining budget or that is not valid UTF-8. Size is checked in the
+// sandbox first so an oversized file is never transferred at all, and the
+// downloaded length is compared against it: a mismatch means the file changed
+// under us, and a truncated read written back to a repository is worse than a
+// skipped one.
+func readRepositoryFile(ctx context.Context, sandbox codingagent.Sandbox, workingDirectory, path string, remaining int) (string, error) {
+	sized, err := sandbox.Run(ctx, codingagent.CommandSpec{
+		Command: "wc -c < " + shellQuote(path), WorkingDir: workingDirectory, Timeout: time.Minute,
+	}, nil)
+	if err != nil || sized.ExitCode != 0 {
+		return "", errors.New("could not size " + path)
+	}
+	size, parseErr := strconv.ParseInt(strings.TrimSpace(sized.Stdout), 10, 64)
+	if parseErr != nil || size < 0 || size > int64(remaining) {
+		return "", errors.New("file does not fit the artifact budget")
+	}
+	content, downloadErr := sandbox.Download(ctx, strings.TrimSuffix(workingDirectory, "/")+"/"+path)
+	if downloadErr != nil || int64(len(content)) != size || !utf8.Valid(content) {
+		return "", errors.New("could not read " + path)
+	}
+	return string(content), nil
 }
 
 func safeRepositoryPath(path string) bool {

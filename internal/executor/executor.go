@@ -601,6 +601,19 @@ func runNodeInner(ctx context.Context, node WorkflowASTNode, outputs map[string]
 			allowedDomains = append(allowedDomains, "github.com", "*.github.com", "*.githubusercontent.com")
 		}
 		allowedDomains = append(allowedDomains, d.CodingAgentAllowedDomains...)
+
+		// Open egress is the default because a coding agent that cannot reach a
+		// package registry or a documentation site fails at the work it exists
+		// to do. Restriction is opt-in, and naming domains opts in by itself.
+		//
+		// Note the provider treats a domain list as deny-by-default and refuses
+		// it alongside networkBlockAll, so "restricted" is expressed purely as a
+		// non-empty list. Sending both would be rejected outright.
+		networkOpen := !strings.EqualFold(strings.TrimSpace(d.CodingAgentNetworkAccess), "allowlist") &&
+			len(d.CodingAgentAllowedDomains) == 0
+		if networkOpen {
+			allowedDomains = nil
+		}
 		task := substituteTemplates(d.CodingAgentTask, outputs)
 		conversationKey := substituteTemplates(d.CodingAgentConversationKey, outputs)
 		jobID, status, result, summary, lastError, err := CodingAgentRun(ctx, codingagent.SubmitRequest{
@@ -616,7 +629,7 @@ func runNodeInner(ctx context.Context, node WorkflowASTNode, outputs map[string]
 				RepositoryID: strings.TrimSpace(d.CodingAgentRepositoryID), Repository: strings.TrimSpace(d.CodingAgentRepository),
 				Branch: strings.TrimSpace(d.CodingAgentBranch), Model: strings.TrimSpace(d.CodingAgentModel),
 				MaxDurationSeconds: maxDuration, AutoStopMinutes: autoStop, AutoDeleteMinutes: autoDelete,
-				NetworkBlockAll: true, AllowedDomains: allowedDomains,
+				NetworkBlockAll: !networkOpen && len(allowedDomains) == 0, AllowedDomains: allowedDomains,
 				AllowWorkspaceWrite: d.CodingAgentAllowWrite,
 			},
 		}, func(progress codingagent.StreamEvent) {
