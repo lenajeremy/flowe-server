@@ -179,9 +179,13 @@ func validateSubmitRequest(req SubmitRequest) error {
 	if req.Policy.AutoDeleteMinutes < req.Policy.AutoStopMinutes || req.Policy.AutoDeleteMinutes > 30*24*60 {
 		return errors.New("coding agent auto-delete must be after auto-stop and no more than 30 days")
 	}
-	if !req.Policy.NetworkBlockAll {
-		return errors.New("coding agent network isolation must be enabled")
-	}
+	// No check that egress is blocked. This used to require it, but the flag was
+	// never load-bearing: the node always sent a domain list too, and the
+	// provider returns early on a non-empty list, so the effective policy was
+	// always the allowlist and the flag was a rubber stamp. Open access is now a
+	// deliberate default — a coding agent that cannot reach a package registry
+	// fails at the work it exists for — so requiring the flag only rejected the
+	// policy the caller meant.
 	if err := ValidateAllowedDomains(req.Policy.AllowedDomains); err != nil {
 		return err
 	}
