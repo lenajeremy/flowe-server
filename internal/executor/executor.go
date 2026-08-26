@@ -1619,6 +1619,13 @@ func stripCodeFences(s string) string {
 	return strings.TrimSpace(s)
 }
 
+// itemPreview renders a loop item compactly enough to identify a pass in a log
+// line. Whitespace is collapsed because items are often pretty-printed JSON,
+// and a preview that wraps over six lines defeats the point of a preview.
+func itemPreview(item string) string {
+	return truncateStr(strings.Join(strings.Fields(item), " "), 80)
+}
+
 // extractLoopItems parses input JSON and extracts the array at the given dot-path field.
 // If field is empty, input itself must be an array. Falls back to line-splitting for plain text.
 func extractLoopItems(input, field string) []string {
@@ -1715,6 +1722,10 @@ func RunWorkflow(ctx context.Context, workflow WorkflowAST, keys APIKeys, runID,
 	// event also lands on the run span as a span event: the trace alone
 	// replays the run's timeline.
 	userEmit := emit
+	// Event counters for the log ceilings. Execution is sequential, so these
+	// need no lock — every emit in a run happens on this goroutine.
+	eventCount := 0
+	truncationAnnounced := false
 	emit = func(ev ExecutionEvent) {
 		telemetry.RecordRunEvent(ctx, string(ev.Type))
 		evAttrs := []attribute.KeyValue{}
@@ -1736,6 +1747,33 @@ func RunWorkflow(ctx context.Context, workflow WorkflowAST, keys APIKeys, runID,
 			slog.InfoContext(ctx, "node waiting for approval",
 				"run_id", runID, "message", truncateStr(ev.Message, 200))
 		}
+
+		// The ceilings live here because this is the one point every event
+		// passes through, however deep in the graph it was raised.
+		if ev.Output != nil && len(*ev.Output) > maxEventOutput {
+			clipped := truncateStr(*ev.Output, maxEventOutput)
+			ev.Output = &clipped
+			ev.OutputTruncated = true
+		}
+		eventCount++
+		if eventCount > maxRunEvents {
+			// A run still has to report how it ended, so the terminal pair is
+			// never dropped — otherwise a truncated log would look like a run
+			// that hung.
+			if ev.Type != EventWorkflowCompleted && ev.Type != EventWorkflowError {
+				if !truncationAnnounced {
+					truncationAnnounced = true
+					userEmit(ExecutionEvent{
+						ID:        newUUID(),
+						Type:      EventLogTruncated,
+						Timestamp: time.Since(start).Milliseconds(),
+						Message: fmt.Sprintf("Log truncated after %d events — later steps are omitted. The run itself is unaffected.",
+							maxRunEvents),
+					})
+				}
+				return
+			}
+		}
 		userEmit(ev)
 	}
 
@@ -1747,6 +1785,14 @@ func RunWorkflow(ctx context.Context, workflow WorkflowAST, keys APIKeys, runID,
 			nt := node.Data.NodeType
 			ev.NodeType = ntPtr(nt)
 		}
+		return ev
+	}
+
+	// mkIter is mk for events raised inside a loop body: the same event,
+	// stamped with which pass produced it.
+	mkIter := func(t ExecutionEventType, node *WorkflowASTNode, output *string, msg string, ref *IterationRef) ExecutionEvent {
+		ev := mk(t, node, output, msg)
+		ev.Iteration = ref
 		return ev
 	}
 
@@ -1820,6 +1866,45 @@ func RunWorkflow(ctx context.Context, workflow WorkflowAST, keys APIKeys, runID,
 
 	loopHandled := make(map[string]bool) // nodes fully handled inside a loop iteration
 
+	// Path bookkeeping. Which way a run went through a branching graph is
+	// otherwise unrecoverable after the fact: the executor just skips nodes it
+	// never enabled, so an untaken path and a path that errored out before its
+	// turn leave exactly the same trace — none.
+	executed := make(map[string]bool) // nodes that actually ran
+	rejected := make(map[string]bool) // targets of an edge a decision declined
+
+	emitEdgeTaken := func(from WorkflowASTNode, e WorkflowASTEdge, handle string) {
+		label := e.Target
+		if target, ok := nodeMap[e.Target]; ok && target.Data.Label != "" {
+			label = target.Data.Label
+		}
+		ev := mk(EventEdgeTaken, &from, nil, from.Data.Label+" → "+label)
+		ev.EdgeID = e.ID
+		ev.SourceHandle = handle
+		emit(ev)
+	}
+
+	// emitSkips names every node that never ran, and why. A node the log simply
+	// omits is ambiguous — the reader cannot tell a path that was not chosen
+	// from one the run never got to — and only the executor knows which it was.
+	// A node whose incoming edge a branch explicitly declined is named as such;
+	// everything further downstream is reported as not reached, which is what
+	// it literally was.
+	emitSkips := func() {
+		for _, n := range nodes {
+			if executed[n.ID] {
+				continue
+			}
+			reason, msg := SkipNotReached, n.Data.Label+" was not reached"
+			if rejected[n.ID] {
+				reason, msg = SkipBranchNotTaken, n.Data.Label+" was not on the path taken"
+			}
+			ev := mk(EventNodeSkipped, &n, nil, msg)
+			ev.SkipReason = reason
+			emit(ev)
+		}
+	}
+
 	for _, id := range order {
 		if loopHandled[id] {
 			continue
@@ -1831,6 +1916,7 @@ func RunWorkflow(ctx context.Context, workflow WorkflowAST, keys APIKeys, runID,
 		select {
 		case <-ctx.Done():
 			emit(mk(EventWorkflowError, nil, nil, "Workflow cancelled"))
+			emitSkips()
 			return
 		default:
 		}
@@ -1879,6 +1965,27 @@ func RunWorkflow(ctx context.Context, workflow WorkflowAST, keys APIKeys, runID,
 			// Execute loop body for each item
 			var iterResults []string
 			for i, item := range items {
+				// The pass is identified structurally rather than by prefixing
+				// "[3/10] " onto each message, which is what the log used to do
+				// — grouping a pass then meant parsing that text back out.
+				ref := &IterationRef{
+					LoopNodeID:  id,
+					Index:       i,
+					Total:       len(items),
+					ItemPreview: itemPreview(item),
+				}
+				emit(mkIter(EventIterationStarted, &node, nil,
+					fmt.Sprintf("Item %d of %d", i+1, len(items)), ref))
+
+				// Nodes emit events of their own from inside executeNode — an
+				// approval waiting, for one — and those belong to this pass too.
+				iterEmit := func(ev ExecutionEvent) {
+					if ev.Iteration == nil {
+						ev.Iteration = ref
+					}
+					emit(ev)
+				}
+
 				iterOutputs := make(map[string]string, len(outputs)+len(bodyNodes)+1)
 				for k, v := range outputs {
 					iterOutputs[k] = v
@@ -1886,6 +1993,7 @@ func RunWorkflow(ctx context.Context, workflow WorkflowAST, keys APIKeys, runID,
 				iterOutputs[id] = item // current item is loop node's output for this iteration
 
 				var lastOut string
+				iterStatus := "ok"
 				for _, bodyID := range bodyOrder {
 					if !bodySet[bodyID] {
 						continue
@@ -1897,28 +2005,39 @@ func RunWorkflow(ctx context.Context, workflow WorkflowAST, keys APIKeys, runID,
 					select {
 					case <-ctx.Done():
 						emit(mk(EventWorkflowError, nil, nil, "Workflow cancelled"))
+						emitSkips()
 						return
 					default:
 					}
-					iterLabel := fmt.Sprintf("[%d/%d] %s", i+1, len(items), bodyNode.Data.Label)
-					emit(mk(EventNodeStarted, &bodyNode, nil, iterLabel))
-					out, err := executeNode(ctx, bodyNode, iterOutputs, edges, keys, runID, ownerID, emit)
+					emit(mkIter(EventNodeStarted, &bodyNode, nil, bodyNode.Data.Label, ref))
+					out, err := executeNode(ctx, bodyNode, iterOutputs, edges, keys, runID, ownerID, iterEmit)
 					if err != nil {
-						emit(mk(EventNodeError, &bodyNode, nil, "Error: "+err.Error()))
+						emit(mkIter(EventNodeError, &bodyNode, nil, "Error: "+err.Error(), ref))
 						lastOut = fmt.Sprintf(`{"error":%q}`, err.Error())
+						iterStatus = "error"
 						break
 					}
 					iterOutputs[bodyID] = out
-					emit(mk(EventNodeOutput, &bodyNode, strPtr(out), iterLabel))
-					emit(mk(EventNodeCompleted, &bodyNode, nil, iterLabel+" completed"))
+					emit(mkIter(EventNodeOutput, &bodyNode, strPtr(out), bodyNode.Data.Label, ref))
+					emit(mkIter(EventNodeCompleted, &bodyNode, nil, bodyNode.Data.Label+" completed", ref))
 					lastOut = out
 				}
+
+				doneMsg := fmt.Sprintf("Item %d of %d completed", i+1, len(items))
+				if iterStatus == "error" {
+					doneMsg = fmt.Sprintf("Item %d of %d failed", i+1, len(items))
+				}
+				doneEv := mkIter(EventIterationCompleted, &node, strPtr(lastOut), doneMsg, ref)
+				doneEv.Status = iterStatus
+				emit(doneEv)
+
 				iterResults = append(iterResults, lastOut)
 			}
 
 			// Mark all body nodes as handled (skip in outer loop)
 			for bodyID := range bodySet {
 				loopHandled[bodyID] = true
+				executed[bodyID] = true
 				outputs[bodyID] = "[loop iteration]"
 			}
 
@@ -1933,6 +2052,7 @@ func RunWorkflow(ctx context.Context, workflow WorkflowAST, keys APIKeys, runID,
 
 			resultJSON, _ := json.Marshal(iterResults)
 			outputs[id] = string(resultJSON)
+			executed[id] = true
 			emit(mk(EventNodeOutput, &node, strPtr(string(resultJSON)), node.Data.Label))
 			emit(mk(EventNodeCompleted, &node, nil, node.Data.Label+" completed"))
 			continue
@@ -1945,9 +2065,11 @@ func RunWorkflow(ctx context.Context, workflow WorkflowAST, keys APIKeys, runID,
 		if err != nil {
 			emit(mk(EventNodeError, &node, nil, "Error: "+err.Error()))
 			emit(mk(EventWorkflowError, nil, nil, fmt.Sprintf("Workflow failed at %q", node.Data.Label)))
+			emitSkips()
 			return
 		}
 
+		executed[id] = true
 		outputs[id] = out
 		emit(mk(EventNodeOutput, &node, strPtr(out), node.Data.Label))
 		emit(mk(EventNodeCompleted, &node, nil, node.Data.Label+" completed"))
@@ -1959,12 +2081,19 @@ func RunWorkflow(ctx context.Context, workflow WorkflowAST, keys APIKeys, runID,
 			if node.Data.NodeType == NodeTypeBranch || node.Data.NodeType == NodeTypeHumanApproval {
 				if e.SourceHandle != nil && *e.SourceHandle == out {
 					enabled[e.Target] = true
+					emitEdgeTaken(node, e, out)
+				} else {
+					// Recorded so the skip sweep can say "not on the path
+					// taken" here, and plain "not reached" further downstream.
+					rejected[e.Target] = true
 				}
 			} else {
 				enabled[e.Target] = true
+				emitEdgeTaken(node, e, "")
 			}
 		}
 	}
+	emitSkips()
 	emit(mk(EventWorkflowCompleted, nil, nil, "Workflow completed successfully"))
 }
 

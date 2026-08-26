@@ -34,6 +34,27 @@ func clampMaxTokens(ctx context.Context, requested int) int {
 	return ceiling
 }
 
+// Event-log ceilings.
+//
+// A run's events are streamed to the browser AND serialised whole into one
+// JSONB column on the run row. Neither had a bound: a 200-item loop over a node
+// returning 10KB writes ~2MB into a single column and pushes all of it down the
+// wire. That was survivable while nobody could see per-iteration detail; it
+// stops being survivable the moment the log invites you to look.
+//
+// Both caps apply only to the event's copy of a value. The executor's outputs
+// map still carries the full text to downstream nodes, so clipping the log can
+// never change what a workflow computes.
+const (
+	// maxEventOutput bounds one event's payload. Large enough that ordinary
+	// node output is never touched; small enough that a runaway loop cannot
+	// write an unbounded row.
+	maxEventOutput = 32 * 1024
+	// maxRunEvents bounds how many events a single run may record. Past it the
+	// log says so and stops, rather than growing until the write fails.
+	maxRunEvents = 10000
+)
+
 // tokenBilledNode reports whether a node type is already charged on its token
 // usage, and so must not also be charged the flat per-operation fee.
 //

@@ -1049,7 +1049,55 @@ const (
 	// node. Unlike EventNodeWaiting, it never pauses the workflow or creates a
 	// human-approval decision.
 	EventNodeProgress ExecutionEventType = "node_progress"
+	// EventIterationStarted and EventIterationCompleted bracket one pass of a
+	// loop body. They are the group headers the log collapses under, so the UI
+	// never has to infer where a pass began from the body events themselves.
+	EventIterationStarted   ExecutionEventType = "iteration_started"
+	EventIterationCompleted ExecutionEventType = "iteration_completed"
+	// EventEdgeTaken records that an edge enabled its target. Which path a run
+	// took through a branching graph is otherwise unrecoverable: the executor
+	// simply skips nodes it never enabled, leaving no trace of the choice.
+	EventEdgeTaken ExecutionEventType = "edge_taken"
+	// EventNodeSkipped names a node that never ran, and why.
+	EventNodeSkipped ExecutionEventType = "node_skipped"
+	// EventLogTruncated is emitted once, when a run produces more events than
+	// the ceiling allows.
+	EventLogTruncated ExecutionEventType = "log_truncated"
 )
+
+// SkipReason distinguishes the two ways a node can fail to run. They look
+// identical in the event stream — the node is simply absent — but they mean
+// opposite things to someone reading the log, so only the executor can tell
+// them apart and it has to say which.
+type SkipReason string
+
+const (
+	// SkipBranchNotTaken: an upstream branch or approval chose another edge.
+	// The workflow behaved correctly; this path was not the one.
+	SkipBranchNotTaken SkipReason = "branch_not_taken"
+	// SkipNotReached: the run ended before this node's turn came up, because
+	// an earlier node errored or the run was cancelled.
+	SkipNotReached SkipReason = "not_reached"
+)
+
+// IterationRef identifies which pass of a loop an event belongs to.
+//
+// Iterations used to be marked by prefixing the message with "[3/10] ", so the
+// only way to group a pass was to parse that text back out. This carries the
+// same information structurally.
+//
+// There is deliberately no nesting. A loop node sitting inside a loop body is
+// not iterated — executeNode returns its upstream output verbatim — so a single
+// frame always describes an event's position.
+type IterationRef struct {
+	LoopNodeID string `json:"loopNodeId"`
+	// Index is 0-based; Total is the item count at the time the loop started.
+	Index int `json:"index"`
+	Total int `json:"total"`
+	// ItemPreview is a short rendering of the item this pass ran on, so a
+	// failed pass can be identified without expanding it.
+	ItemPreview string `json:"itemPreview,omitempty"`
+}
 
 type ExecutionEvent struct {
 	ID        string             `json:"id"`
@@ -1062,6 +1110,21 @@ type ExecutionEvent struct {
 	Payload   map[string]any     `json:"payload,omitempty"`
 	Timestamp int64              `json:"timestamp"`
 	RunID     string             `json:"runId,omitempty"`
+
+	// Iteration is set on every event emitted inside a loop body, and on the
+	// iteration_started/completed pair that brackets it.
+	Iteration *IterationRef `json:"iteration,omitempty"`
+	// Status is "ok" or "error" on iteration_completed.
+	Status string `json:"status,omitempty"`
+	// EdgeID and SourceHandle are set on edge_taken. SourceHandle is the branch
+	// output that selected the edge, and is empty for unconditional edges.
+	EdgeID       string `json:"edgeId,omitempty"`
+	SourceHandle string `json:"sourceHandle,omitempty"`
+	// SkipReason is set on node_skipped.
+	SkipReason SkipReason `json:"skipReason,omitempty"`
+	// OutputTruncated marks an Output cut down to the per-event cap. Without
+	// it a clipped payload reads as though the node genuinely returned less.
+	OutputTruncated bool `json:"outputTruncated,omitempty"`
 }
 
 type EmitFn func(ExecutionEvent)
