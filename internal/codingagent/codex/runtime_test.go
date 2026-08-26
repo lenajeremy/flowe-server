@@ -13,10 +13,13 @@ func TestBuildCommandReadsPromptFromFileAndResumes(t *testing.T) {
 		Model:            "gpt-5.6-codex",
 		ExternalThreadID: "019c-thread-123",
 		AllowWrite:       true,
-	}, "/tmp/auth", "/tmp/auth/prompt.txt", "/tmp/auth/schema.json", "/tmp/auth/result.json")
+	}, "/tmp/auth", "/tmp/auth/prompt.txt", "/tmp/auth/schema.json", "/tmp/auth/result.json", "/tmp/auth/mcp-token")
 	for _, expected := range []string{
 		"--ask-for-approval never", "--search", "--sandbox workspace-write", "--ignore-user-config",
 		"--model 'gpt-5.6-codex'", "resume '019c-thread-123'", "- < '/tmp/auth/prompt.txt'",
+		// Read from the file at run time: the provider stores the rendered
+		// command, so the token itself must never appear in it.
+		`export FERNARY_MCP_TOKEN="$(cat '/tmp/auth/mcp-token')"`,
 	} {
 		if !strings.Contains(command, expected) {
 			t.Fatalf("command %q does not contain %q", command, expected)
