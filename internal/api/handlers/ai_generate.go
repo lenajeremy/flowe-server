@@ -534,7 +534,7 @@ func nodeCatalog() []map[string]any {
 				"codingAgentAllowWrite":         "boolean – allow repository file changes; false makes the agent read-only",
 			},
 			"handles": map[string]any{"inputs": []string{"target (left)"}, "outputs": []string{"source (right)"}},
-			"notes":   "Never put tokens in node data or prompts. The node cannot push, deploy, open pull requests, or contact people. It returns a durable job result plus retained Git status/patch artifacts.",
+			"notes":   "Never put tokens in node data or prompts. The sandbox holds no credentials, so the agent cannot push or deploy by itself — it acts on the outside world only through the nodes named in codingAgentToolNodes, which the server runs on its behalf. Returns a durable job result plus retained Git status, patch and changed-file artifacts.",
 		},
 		{
 			"type": "branch", "label": "Branch", "category": "Logic",
@@ -999,7 +999,10 @@ Coding agents (codingAgent):
 - Call list_integration_resources for github or gitlab and set the REAL repository provider, id, path and optional branch. Never invent a repository. If the provider is disconnected or the user has not identified a repository, add the node with repository fields empty and tell them to connect/select it in the node settings.
 - Write a concrete codingAgentTask that states the goal and verification, using {{nodeId.output}} templates only for intentional upstream inputs. Never put credentials or tokens in the task.
 - Set codingAgentAllowWrite to true only when the user explicitly asks Codex to change repository files; keep it false for explanation, investigation, review, or planning. Use persistent workspace mode for iterative follow-up work and ephemeral mode for isolated one-off tasks.
-- Codex credentials are connected by the user in the node settings. The agent may edit the isolated workspace when allowed, but it cannot push, deploy, open a pull request, or contact people. Explain those boundaries after adding the node.
+- Codex credentials are connected by the user in the node settings. The agent works in a sandbox holding no credentials of its own, so by itself it cannot push, deploy, or contact anyone.
+- It CAN use other nodes on the same canvas. List their ids in codingAgentToolNodes and the server runs those nodes on the agent's behalf with the user's connected accounts. So to have the agent open its own pull request, put a github (or gitlab) node on the canvas and grant it: the agent then calls create_branch, commit_files and create_pull_request itself, choosing the branch name, commit message and PR text. Say this when the user asks for a workflow that fixes something and raises a PR — it does not need a human step in between.
+- The grant is deny-by-default: an agent whose codingAgentToolNodes is empty has no tools at all. Grant only what the task needs. A coding agent reads whatever text its trigger handed it — an issue body, an inbox — so every node granted is one that text can reach.
+- codingAgentNetworkAccess defaults to 'open', which most real work needs for package registries and documentation. Only set 'allowlist' (with codingAgentAllowedDomains) when the user asks for the task to be confined.
 
 Persistence (Data stores):
 - Trigger outputs carry NO memory — a scheduled run knows nothing about previous runs. For anything that must survive across runs (counters like "email #3 of 10", dedup like "skip orders already handled", cursors, accumulating digests), use a data node backed by a Data store. Do not fake state with LLM prompts.

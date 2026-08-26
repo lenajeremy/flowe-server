@@ -92,7 +92,13 @@ func TestBuilderCatalogIncludesCodingAgentSafetyBoundary(t *testing.T) {
 	if !ok {
 		t.Fatalf("codingAgent dataFields has type %T", entry["dataFields"])
 	}
-	for _, field := range []string{"codingAgentTask", "codingAgentRepository", "codingAgentWorkspaceMode", "codingAgentAllowedDomains", "codingAgentAllowWrite"} {
+	for _, field := range []string{
+		"codingAgentTask", "codingAgentRepository", "codingAgentWorkspaceMode",
+		"codingAgentAllowedDomains", "codingAgentAllowWrite",
+		// The agent capability layer reads its operations from this catalog, so
+		// a field missing here is a capability no generated workflow can use.
+		"codingAgentToolNodes", "codingAgentNetworkAccess",
+	} {
 		if _, exists := fields[field]; !exists {
 			t.Errorf("codingAgent catalog omitted %s", field)
 		}
@@ -100,6 +106,11 @@ func TestBuilderCatalogIncludesCodingAgentSafetyBoundary(t *testing.T) {
 	notes, _ := entry["notes"].(string)
 	if !strings.Contains(notes, "Never put tokens") || !strings.Contains(notes, "cannot push") {
 		t.Fatalf("codingAgent catalog omitted safety guidance: %q", notes)
+	}
+	// The boundary is not "it can do nothing" but "it acts only through granted
+	// nodes". Stating only the first half reads as a node that cannot ship work.
+	if !strings.Contains(notes, "codingAgentToolNodes") {
+		t.Errorf("codingAgent notes describe the limit without the route through it: %q", notes)
 	}
 }
 
@@ -109,10 +120,28 @@ func TestWorkflowBuilderPromptExplainsWhenAndHowToAddCodingAgents(t *testing.T) 
 		"Use codingAgent when the user wants Codex",
 		"Call list_integration_resources for github or gitlab",
 		"codingAgentAllowWrite to true only when the user explicitly asks",
-		"cannot push, deploy, open a pull request",
+		// The agent reaches the outside world only through granted nodes, and
+		// the prompt has to say so both ways round: what it cannot do alone,
+		// and how it opens a pull request when it is granted the means.
+		"cannot push, deploy, or contact anyone",
+		"codingAgentToolNodes",
+		"create_branch, commit_files and create_pull_request",
+		"deny-by-default",
 	} {
 		if !strings.Contains(workflowSystemPrompt, want) {
 			t.Errorf("workflow builder prompt is missing %q", want)
+		}
+	}
+
+	// The prompt used to state flatly that the node could not open a pull
+	// request. It can now, through a granted node, and a builder repeating the
+	// old line would talk users out of the workflow they asked for.
+	for _, stale := range []string{
+		"cannot push, deploy, open a pull request",
+		"it cannot push, deploy, open pull requests",
+	} {
+		if strings.Contains(workflowSystemPrompt, stale) {
+			t.Errorf("workflow builder prompt still claims %q", stale)
 		}
 	}
 }
