@@ -11,6 +11,7 @@ import (
 	"workflow-ai/server/config"
 	"workflow-ai/server/internal/auth"
 	"workflow-ai/server/internal/billing"
+	"workflow-ai/server/internal/codingagent"
 	"workflow-ai/server/internal/database"
 	"workflow-ai/server/internal/database/models"
 	"workflow-ai/server/internal/executor"
@@ -29,7 +30,12 @@ type WorkflowHandler struct {
 	// bill admits runs, checks balances and posts spend. Always non-nil, so no
 	// handler needs a "is billing on?" branch — a deployment without billing is
 	// expressed by generous plan limits, not by a missing gate.
-	bill *billing.Gate
+	bill         *billing.Gate
+	codingAgents *codingagent.Service
+}
+
+func (h *WorkflowHandler) SetCodingAgentService(service *codingagent.Service) {
+	h.codingAgents = service
 }
 
 func NewWorkflowHandler(db *database.DBClient, rdb *redis.Client) *WorkflowHandler {

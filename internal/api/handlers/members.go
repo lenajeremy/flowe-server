@@ -13,6 +13,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/resend/resend-go/v2"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 
 	"workflow-ai/server/internal/auth"
 	"workflow-ai/server/internal/billing"
@@ -296,6 +297,7 @@ func (h *WorkflowHandler) RemoveMember(c *gin.Context) {
 
 func removeMemberAndRevokeAgentAuthority(db *gorm.DB, orgID, target string) error {
 	return db.Transaction(func(tx *gorm.DB) error {
+		now := time.Now().UTC()
 		deploymentIDs := tx.Model(&models.AgentDeployment{}).Select("id").
 			Where("organization_id = ? AND deployed_by_user_id = ?", orgID, target)
 		if err := tx.Model(&models.AgentDeployment{}).
@@ -307,6 +309,63 @@ func removeMemberAndRevokeAgentAuthority(db *gorm.DB, orgID, target string) erro
 		if err := tx.Model(&models.AgentDeploymentTarget{}).
 			Where("deployment_id IN (?)", deploymentIDs).
 			Update("enabled", false).Error; err != nil {
+			return err
+		}
+		// Coding-agent subscriptions are also delegated authority. Revoke the
+		// encrypted cache and all not-yet-finished work in the same transaction as
+		// membership deletion. A running job holding the shared advisory lock
+		// finishes before this transaction can begin.
+		if err := tx.Model(&models.CodingAgentCredential{}).
+			Where("organization_id = ? AND user_id = ?", orgID, target).
+			Updates(map[string]any{
+				"status": models.CodingAgentCredentialRevoked, "auth_bundle": "",
+				"last_verified_at": now, "last_error": "organization membership was removed",
+			}).Error; err != nil {
+			return err
+		}
+		if err := tx.Model(&models.CodingAgentAuthAttempt{}).
+			Where("organization_id = ? AND user_id = ? AND status IN ?", orgID, target, []models.CodingAgentAuthStatus{
+				models.CodingAgentAuthProvisioning, models.CodingAgentAuthWaiting,
+			}).Updates(map[string]any{
+			"active_key": nil, "status": models.CodingAgentAuthCancelled,
+			"cancel_requested_at": now, "completed_at": now, "claimed_by": "", "heartbeat_at": now,
+			"last_error": "organization membership was removed",
+		}).Error; err != nil {
+			return err
+		}
+		var pendingCodingJobs []models.CodingAgentJob
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where(
+			"organization_id = ? AND user_id = ? AND status = ?", orgID, target, models.CodingAgentJobPending,
+		).Find(&pendingCodingJobs).Error; err != nil {
+			return err
+		}
+		for index := range pendingCodingJobs {
+			if err := tx.Model(&pendingCodingJobs[index]).Updates(map[string]any{
+				"status": models.CodingAgentJobCancelled, "cancel_requested_at": now,
+				"completed_at": now, "last_error": "organization membership was removed",
+			}).Error; err != nil {
+				return err
+			}
+			pendingCodingJobs[index].Status = models.CodingAgentJobCancelled
+			sequence := pendingCodingJobs[index].NextEventSequence
+			if sequence < 1 {
+				sequence = 1
+			}
+			event := models.CodingAgentEvent{
+				OrganizationID: orgID, JobID: pendingCodingJobs[index].ID.String(), Sequence: sequence,
+				Type: "cancelled", Message: "Task cancelled because organization membership was removed", Payload: models.JSONB(`{}`),
+			}
+			if err := tx.Create(&event).Error; err != nil {
+				return err
+			}
+			if err := tx.Model(&pendingCodingJobs[index]).Update("next_event_sequence", sequence+1).Error; err != nil {
+				return err
+			}
+		}
+		if err := tx.Model(&models.CodingAgentJob{}).
+			Where("organization_id = ? AND user_id = ? AND status IN ?", orgID, target, []models.CodingAgentJobStatus{
+				models.CodingAgentJobClaimed, models.CodingAgentJobRunning,
+			}).Update("cancel_requested_at", now).Error; err != nil {
 			return err
 		}
 		return tenancy.RemoveMemberWithinTransaction(tx, orgID, target)

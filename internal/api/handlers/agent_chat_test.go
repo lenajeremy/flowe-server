@@ -70,6 +70,7 @@ func TestAgentSkipNodeExcludesTriggerNodes(t *testing.T) {
 		executor.NodeTypeWebhookTrigger,
 		executor.NodeTypeScheduledTrigger,
 		executor.NodeTypeIntegrationTrigger,
+		executor.NodeTypeCodingAgent,
 	} {
 		if !agentSkipNode(nodeType) {
 			t.Errorf("agentSkipNode(%q) = false, want true", nodeType)
@@ -78,6 +79,27 @@ func TestAgentSkipNodeExcludesTriggerNodes(t *testing.T) {
 
 	if agentSkipNode(executor.NodeTypeGithub) {
 		t.Error("agentSkipNode(github) = true, want false for an executable integration node")
+	}
+}
+
+func TestBuilderCatalogIncludesCodingAgentSafetyBoundary(t *testing.T) {
+	t.Parallel()
+	entry := catalogEntry(string(executor.NodeTypeCodingAgent))
+	if entry == nil {
+		t.Fatal("AI builder catalog does not include codingAgent")
+	}
+	fields, ok := entry["dataFields"].(map[string]any)
+	if !ok {
+		t.Fatalf("codingAgent dataFields has type %T", entry["dataFields"])
+	}
+	for _, field := range []string{"codingAgentTask", "codingAgentRepository", "codingAgentWorkspaceMode", "codingAgentAllowedDomains", "codingAgentAllowWrite"} {
+		if _, exists := fields[field]; !exists {
+			t.Errorf("codingAgent catalog omitted %s", field)
+		}
+	}
+	notes, _ := entry["notes"].(string)
+	if !strings.Contains(notes, "Never put tokens") || !strings.Contains(notes, "cannot push") {
+		t.Fatalf("codingAgent catalog omitted safety guidance: %q", notes)
 	}
 }
 

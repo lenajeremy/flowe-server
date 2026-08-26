@@ -40,6 +40,10 @@ func hostedAgentSafetyDB(t *testing.T) *gorm.DB {
 		&models.HostedAgentDelivery{},
 		&models.HostedAgentApproval{},
 		&models.ChatSession{},
+		&models.CodingAgentCredential{},
+		&models.CodingAgentAuthAttempt{},
+		&models.CodingAgentJob{},
+		&models.CodingAgentEvent{},
 	); err != nil {
 		t.Fatalf("migrate hosted agent safety models: %v", err)
 	}
@@ -105,6 +109,10 @@ func cleanupHostedAgentSafety(t *testing.T, db *gorm.DB, orgID string) {
 		db.Unscoped().Where("organization_id = ?", orgID).Delete(&models.AgentDeployment{})
 		db.Unscoped().Where("organization_id = ?", orgID).Delete(&models.ChatSession{})
 		db.Unscoped().Where("organization_id = ?", orgID).Delete(&models.AgentHostInstallation{})
+		db.Unscoped().Where("organization_id = ?", orgID).Delete(&models.CodingAgentJob{})
+		db.Unscoped().Where("organization_id = ?", orgID).Delete(&models.CodingAgentEvent{})
+		db.Unscoped().Where("organization_id = ?", orgID).Delete(&models.CodingAgentAuthAttempt{})
+		db.Unscoped().Where("organization_id = ?", orgID).Delete(&models.CodingAgentCredential{})
 		db.Unscoped().Where("organization_id = ?", orgID).Delete(&models.OrgMember{})
 	})
 }

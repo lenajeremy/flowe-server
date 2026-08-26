@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -16,12 +17,15 @@ import (
 	"sync"
 	"time"
 
+	"workflow-ai/server/internal/codingagent"
+	"workflow-ai/server/internal/database/models"
+	"workflow-ai/server/internal/email"
+	"workflow-ai/server/internal/telemetry"
+
 	"github.com/resend/resend-go/v2"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
-	"workflow-ai/server/internal/email"
-	"workflow-ai/server/internal/telemetry"
 )
 
 // ── Trigger source ────────────────────────────────────────────
@@ -110,6 +114,11 @@ var IntegrationUserTokenLookup func(userID, provider string) string
 // IntegrationUserTokenLookupForOrg is the tenant-safe equivalent for a
 // provider's optional human-identity grant.
 var IntegrationUserTokenLookupForOrg func(orgID, userID, provider string) string
+
+// CodingAgentRun is installed by the server when Daytona and at least one
+// coding runtime are configured. Keeping execution behind this hook lets the
+// pure executor tests run without external infrastructure.
+var CodingAgentRun func(context.Context, codingagent.SubmitRequest, func(codingagent.StreamEvent)) (jobID string, status string, result []byte, summary, lastError string, err error)
 
 type integrationWorkspaceCtxKey struct{}
 
@@ -538,6 +547,81 @@ func runNodeInner(ctx context.Context, node WorkflowASTNode, outputs map[string]
 		return derefStr(d.DefaultValue, "(empty text input)"), nil
 	case NodeTypeImageInput:
 		return derefStr(d.ImageURL, "(no image URL)"), nil
+	case NodeTypeCodingAgent:
+		if CodingAgentRun == nil {
+			return "", errors.New("coding agent execution is not configured")
+		}
+		runtime := strings.TrimSpace(d.CodingAgentRuntime)
+		if runtime == "" {
+			runtime = codingagent.RuntimeCodex
+		}
+		workspaceMode := codingagent.WorkspaceMode(strings.TrimSpace(d.CodingAgentWorkspaceMode))
+		if workspaceMode == "" {
+			workspaceMode = codingagent.WorkspacePersistent
+		}
+		maxDuration := d.CodingAgentMaxDuration
+		if maxDuration == 0 {
+			maxDuration = 30 * 60
+		}
+		autoStop := d.CodingAgentAutoStopMinutes
+		if autoStop == 0 {
+			autoStop = 15
+		}
+		autoDelete := d.CodingAgentAutoDeleteMinutes
+		if autoDelete == 0 {
+			autoDelete = 7 * 24 * 60
+		}
+		// Runtime and repository domains are mandatory. Canvas configuration is
+		// additive so a user cannot accidentally make authentication or cloning
+		// fail while granting an extra package/documentation host.
+		allowedDomains := []string{
+			"openai.com", "*.openai.com", "chatgpt.com", "*.chatgpt.com",
+			"github.com", "*.github.com", "*.githubusercontent.com", "registry.npmjs.org",
+		}
+		allowedDomains = append(allowedDomains, d.CodingAgentAllowedDomains...)
+		task := substituteTemplates(d.CodingAgentTask, outputs)
+		conversationKey := substituteTemplates(d.CodingAgentConversationKey, outputs)
+		jobID, status, result, summary, lastError, err := CodingAgentRun(ctx, codingagent.SubmitRequest{
+			OrganizationID: OrgFromContext(ctx), UserID: ownerID,
+			WorkflowID: workflowIDFromContext(ctx), WorkflowRunID: runID, NodeID: node.ID,
+			ConversationKey: conversationKey, Runtime: runtime, Task: task,
+			// The rendered task contains the upstream values it references. Do not
+			// duplicate every upstream output into the durable job record, where it
+			// would unnecessarily retain unrelated secrets.
+			Input: nil,
+			Policy: codingagent.ExecutionPolicy{
+				WorkspaceMode: workspaceMode, Repository: strings.TrimSpace(d.CodingAgentRepository),
+				Branch: strings.TrimSpace(d.CodingAgentBranch), Model: strings.TrimSpace(d.CodingAgentModel),
+				MaxDurationSeconds: maxDuration, AutoStopMinutes: autoStop, AutoDeleteMinutes: autoDelete,
+				NetworkBlockAll: true, AllowedDomains: allowedDomains,
+				AllowWorkspaceWrite: d.CodingAgentAllowWrite,
+			},
+		}, func(progress codingagent.StreamEvent) {
+			if progress.Message == "" {
+				return
+			}
+			emit(ExecutionEvent{
+				ID: newUUID(), Type: EventNodeWaiting, NodeID: strPtr(node.ID), NodeLabel: strPtr(d.Label),
+				NodeType: ntPtr(d.NodeType), Message: progress.Message, Timestamp: time.Now().UnixMilli(), RunID: runID,
+			})
+		})
+		if err != nil {
+			return "", err
+		}
+		if status != string(models.CodingAgentJobSucceeded) {
+			if lastError == "" {
+				lastError = "coding agent task ended with status " + status
+			}
+			return "", fmt.Errorf("coding agent job %s: %s", jobID, lastError)
+		}
+		var output any
+		if len(result) > 0 {
+			_ = json.Unmarshal(result, &output)
+		}
+		response, _ := json.Marshal(map[string]any{
+			"jobId": jobID, "status": status, "summary": summary, "result": output,
+		})
+		return string(response), nil
 	case NodeTypeLLM:
 		model := derefStr(d.Model, "gpt-4o")
 		sys := substituteTemplates(derefStr(d.SystemPrompt, ""), outputs)

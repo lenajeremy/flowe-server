@@ -142,7 +142,7 @@ func agentSkipNode(t executor.NodeType) bool {
 	switch t {
 	case executor.NodeTypeBranch, executor.NodeTypeLoop, executor.NodeTypeTextOutput,
 		executor.NodeTypeWebhookTrigger, executor.NodeTypeScheduledTrigger,
-		executor.NodeTypeIntegrationTrigger:
+		executor.NodeTypeIntegrationTrigger, executor.NodeTypeCodingAgent:
 		return true
 	}
 	return false

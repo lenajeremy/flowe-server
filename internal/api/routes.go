@@ -1,11 +1,20 @@
 package api
 
 import (
+	"context"
+	"log/slog"
 	"net/http"
+	"os"
+	"time"
 
 	"workflow-ai/server/internal/api/handlers"
 	"workflow-ai/server/internal/auth"
+	"workflow-ai/server/internal/codingagent"
+	codexruntime "workflow-ai/server/internal/codingagent/codex"
+	daytonaprovider "workflow-ai/server/internal/codingagent/daytona"
+	"workflow-ai/server/internal/cryptobox"
 	"workflow-ai/server/internal/database"
+	"workflow-ai/server/internal/executor"
 	"workflow-ai/server/internal/telemetry"
 
 	"github.com/gin-gonic/gin"
@@ -36,6 +45,8 @@ func InitServer(port int, db *database.DBClient, rdb *redis.Client) {
 	})
 
 	wh := handlers.NewWorkflowHandler(db, rdb)
+	codingAgents := configureCodingAgents(db)
+	wh.SetCodingAgentService(codingAgents)
 
 	// Auth — public by nature (they establish the session)
 	authGroup := r.Group("/api/auth")
@@ -196,6 +207,19 @@ func InitServer(port int, db *database.DBClient, rdb *redis.Client) {
 		api.PATCH("/agent-deployments/:id", wh.PatchAgentDeployment)
 		api.DELETE("/agent-deployments/:id", wh.DeleteAgentDeployment)
 
+		// Durable coding agents running in isolated Daytona environments.
+		api.GET("/coding-agents/runtimes", wh.CodingAgentRuntimes)
+		api.POST("/coding-agents/codex/connect", wh.StartCodexConnection)
+		api.GET("/coding-agents/auth-attempts/:id", wh.GetCodingAgentAuthAttempt)
+		api.DELETE("/coding-agents/auth-attempts/:id", wh.CancelCodingAgentAuthAttempt)
+		api.DELETE("/coding-agents/credentials/:runtime", wh.DisconnectCodingAgent)
+		api.GET("/coding-agent-jobs", wh.ListCodingAgentJobs)
+		api.GET("/coding-agent-jobs/:id", wh.GetCodingAgentJob)
+		api.GET("/coding-agent-jobs/:id/events", wh.ListCodingAgentJobEvents)
+		api.POST("/coding-agent-jobs/:id/cancel", wh.CancelCodingAgentJob)
+		api.GET("/coding-agent-environments", wh.ListCodingAgentEnvironments)
+		api.DELETE("/coding-agent-environments/:id", wh.ResetCodingAgentEnvironment)
+
 		// Workflow versions
 		api.GET("/workflows/:id/versions", wh.ListVersions)
 		api.POST("/workflows/:id/versions", wh.SaveVersion)
@@ -213,6 +237,52 @@ func InitServer(port int, db *database.DBClient, rdb *redis.Client) {
 	wh.StartHostedAgentWorker()
 	wh.StartScheduler()
 	s.Start(port)
+}
+
+func configureCodingAgents(db *database.DBClient) *codingagent.Service {
+	if !cryptobox.Configured() {
+		slog.Warn("coding agents disabled: TOKEN_ENC_KEY must be a base64-encoded 32-byte key")
+		executor.CodingAgentRun = nil
+		return nil
+	}
+	provider, err := daytonaprovider.NewProvider()
+	if err != nil {
+		slog.Warn("coding agents disabled: Daytona is not configured", "error", err)
+		executor.CodingAgentRun = nil
+		return nil
+	}
+	runtime, err := codexruntime.NewRuntime(os.Getenv("CODEX_CLI_VERSION"))
+	if err != nil {
+		slog.Error("coding agents disabled: Codex runtime is invalid", "error", err)
+		executor.CodingAgentRun = nil
+		return nil
+	}
+	service := codingagent.NewService(db.DB, provider, []codingagent.Runtime{runtime}, codingagent.ServiceConfig{
+		WorkerCount: 2, PollInterval: time.Second, StaleAfter: 2 * time.Minute,
+		SandboxSnapshot: os.Getenv("DAYTONA_CODING_AGENT_SNAPSHOT"),
+		CodexCLIVersion: os.Getenv("CODEX_CLI_VERSION"),
+		RepositoryToken: func(_ context.Context, orgID, userID, provider string) (string, error) {
+			token, _ := handlers.FreshAccessTokenForOrg(db.DB, orgID, userID, provider)
+			return token, nil
+		},
+	})
+	if err := service.Start(context.Background()); err != nil {
+		slog.Error("coding agents disabled: worker could not start", "error", err)
+		executor.CodingAgentRun = nil
+		return nil
+	}
+	executor.CodingAgentRun = func(ctx context.Context, req codingagent.SubmitRequest, emit func(codingagent.StreamEvent)) (string, string, []byte, string, string, error) {
+		job, err := service.SubmitAndWait(ctx, req, emit)
+		if err != nil {
+			if job != nil {
+				return job.ID.String(), string(job.Status), job.Result, job.Summary, job.LastError, err
+			}
+			return "", "", nil, "", "", err
+		}
+		return job.ID.String(), string(job.Status), job.Result, job.Summary, job.LastError, nil
+	}
+	slog.Info("coding agent workers started", "provider", provider.Name(), "runtime", runtime.Name())
+	return service
 }
 
 // registerAgentHostRoutes keeps the provider-specific OAuth entry point static.

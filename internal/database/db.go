@@ -94,6 +94,13 @@ func (c *DBClient) Setup() error {
 		&models.DataStore{},
 		&models.DataKV{},
 		&models.DataRecord{},
+		&models.CodingAgentCredential{},
+		&models.CodingAgentAuthAttempt{},
+		&models.CodingAgentEnvironment{},
+		&models.CodingAgentSession{},
+		&models.CodingAgentJob{},
+		&models.CodingAgentEvent{},
+		&models.CodingAgentArtifact{},
 	); err != nil {
 		return err
 	}

@@ -42,6 +42,11 @@ func active() []byte {
 	return key
 }
 
+// Configured reports whether authenticated encryption is available. Features
+// storing especially high-value portable credentials can fail closed without
+// changing the legacy plaintext compatibility of existing integrations.
+func Configured() bool { return len(active()) == 32 }
+
 // Encrypt returns an authenticated ciphertext string. It is a no-op when no key
 // is configured, the input is empty, or the input is already encrypted.
 func Encrypt(plaintext string) string {
