@@ -104,9 +104,9 @@ type FlowNodeData struct {
 	// agent with no tools, which is the right default for something running
 	// attacker-influenceable text next to a shell.
 	CodingAgentToolNodes []string `json:"codingAgentToolNodes,omitempty"`
-	// CodingAgentToolGrants is the operation- and field-level authority granted
-	// to this node. codingAgentToolNodes is retained only to safely migrate old
-	// workflows to pinned, read-only grants.
+	// CodingAgentToolGrants is the integration-level operation/field authority
+	// with an exact backing-node resource allowlist. codingAgentToolNodes is
+	// retained only to safely migrate old workflows.
 	CodingAgentToolGrants []codingagent.ToolGrant `json:"codingAgentToolGrants,omitempty"`
 
 	// integrationTrigger — what this node is subscribed to. The authoritative

@@ -163,12 +163,12 @@ func buildAgentToolsWithPolicy(ast executor.WorkflowAST, policy *AgentCapability
 			continue
 		}
 		var (
-			grant      AgentNodeGrant
+			grant      AgentIntegrationGrant
 			capability AgentNodeCapability
 		)
 		if policy != nil {
 			var exposed bool
-			grant, exposed = agentPolicyGrant(*policy, node.ID)
+			grant, exposed = agentPolicyGrant(*policy, node)
 			if !exposed {
 				continue
 			}

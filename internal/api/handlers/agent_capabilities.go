@@ -11,7 +11,7 @@ import (
 	"workflow-ai/server/internal/executor"
 )
 
-const agentCapabilityPolicyVersion = 1
+const agentCapabilityPolicyVersion = 2
 
 type AgentEffect string
 
@@ -37,10 +37,47 @@ type AgentNodeCapability struct {
 	OverridableFields []string                   `json:"overridableFields"`
 }
 
+type AgentCapabilityResource struct {
+	NodeID         string `json:"nodeId"`
+	Label          string `json:"label"`
+	PinnedSettings string `json:"pinnedSettings,omitempty"`
+}
+
+type AgentIntegrationCapability struct {
+	NodeType          executor.NodeType          `json:"nodeType"`
+	Label             string                     `json:"label"`
+	OperationField    string                     `json:"operationField,omitempty"`
+	Operations        []AgentOperationCapability `json:"operations"`
+	OverridableFields []string                   `json:"overridableFields"`
+	Resources         []AgentCapabilityResource  `json:"resources"`
+}
+
 type AgentNodeGrant struct {
 	NodeID                string   `json:"nodeId"`
 	AllowedOperations     []string `json:"allowedOperations"`
 	AllowedOverrideFields []string `json:"allowedOverrideFields"`
+}
+
+type AgentIntegrationGrant struct {
+	NodeType              executor.NodeType `json:"nodeType"`
+	NodeIDs               []string          `json:"nodeIds"`
+	AllowedOperations     []string          `json:"allowedOperations"`
+	AllowedOverrideFields []string          `json:"allowedOverrideFields"`
+}
+
+func (grant AgentIntegrationGrant) MarshalJSON() ([]byte, error) {
+	type grantJSON AgentIntegrationGrant
+	encoded := grantJSON(grant)
+	if encoded.NodeIDs == nil {
+		encoded.NodeIDs = []string{}
+	}
+	if encoded.AllowedOperations == nil {
+		encoded.AllowedOperations = []string{}
+	}
+	if encoded.AllowedOverrideFields == nil {
+		encoded.AllowedOverrideFields = []string{}
+	}
+	return json.Marshal(encoded)
 }
 
 // MarshalJSON keeps the public policy contract stable when a least-privilege
@@ -59,19 +96,33 @@ func (grant AgentNodeGrant) MarshalJSON() ([]byte, error) {
 }
 
 type AgentCapabilityPolicy struct {
-	Version int              `json:"version"`
-	Nodes   []AgentNodeGrant `json:"nodes"`
+	Version      int                     `json:"version"`
+	Integrations []AgentIntegrationGrant `json:"integrations,omitempty"`
+	// Nodes is the version-1 format retained for existing deployments and jobs.
+	Nodes []AgentNodeGrant `json:"nodes,omitempty"`
 }
 
 // MarshalJSON applies the same collection guarantee to an entirely closed
 // policy, which has no node grants.
 func (policy AgentCapabilityPolicy) MarshalJSON() ([]byte, error) {
-	type policyJSON AgentCapabilityPolicy
-	encoded := policyJSON(policy)
-	if encoded.Nodes == nil {
-		encoded.Nodes = []AgentNodeGrant{}
+	if policy.Version >= agentCapabilityPolicyVersion {
+		integrations := policy.Integrations
+		if integrations == nil {
+			integrations = []AgentIntegrationGrant{}
+		}
+		return json.Marshal(struct {
+			Version      int                     `json:"version"`
+			Integrations []AgentIntegrationGrant `json:"integrations"`
+		}{policy.Version, integrations})
 	}
-	return json.Marshal(encoded)
+	nodes := policy.Nodes
+	if nodes == nil {
+		nodes = []AgentNodeGrant{}
+	}
+	return json.Marshal(struct {
+		Version int              `json:"version"`
+		Nodes   []AgentNodeGrant `json:"nodes"`
+	}{policy.Version, nodes})
 }
 
 type AgentAuthorizedCall struct {
@@ -91,6 +142,84 @@ func agentWorkflowCapabilities(ast executor.WorkflowAST) []AgentNodeCapability {
 		}
 	}
 	return capabilities
+}
+
+func agentIntegrationCapabilities(ast executor.WorkflowAST) []AgentIntegrationCapability {
+	byType := map[executor.NodeType]*AgentIntegrationCapability{}
+	byNode := map[string]executor.WorkflowASTNode{}
+	for _, node := range ast.Nodes {
+		byNode[node.ID] = node
+	}
+	for _, nodeCapability := range agentWorkflowCapabilities(ast) {
+		group := byType[nodeCapability.NodeType]
+		if group == nil {
+			label := humanizeAgentOperation(string(nodeCapability.NodeType))
+			if entry := catalogEntry(string(nodeCapability.NodeType)); entry != nil {
+				if catalogLabel, ok := entry["label"].(string); ok && strings.TrimSpace(catalogLabel) != "" {
+					label = catalogLabel
+				}
+			}
+			group = &AgentIntegrationCapability{
+				NodeType: nodeCapability.NodeType, Label: label, OperationField: nodeCapability.OperationField,
+				Operations:        append([]AgentOperationCapability{}, nodeCapability.Operations...),
+				OverridableFields: append([]string{}, nodeCapability.OverridableFields...),
+				Resources:         []AgentCapabilityResource{},
+			}
+			byType[nodeCapability.NodeType] = group
+		}
+		node := byNode[nodeCapability.NodeID]
+		group.Resources = append(group.Resources, AgentCapabilityResource{
+			NodeID: nodeCapability.NodeID, Label: nodeCapability.Label,
+			PinnedSettings: agentResourcePinnedSettings(node.Data),
+		})
+	}
+	groups := make([]AgentIntegrationCapability, 0, len(byType))
+	for _, group := range byType {
+		sort.Slice(group.Resources, func(i, j int) bool {
+			if group.Resources[i].Label == group.Resources[j].Label {
+				return group.Resources[i].NodeID < group.Resources[j].NodeID
+			}
+			return group.Resources[i].Label < group.Resources[j].Label
+		})
+		groups = append(groups, *group)
+	}
+	sort.Slice(groups, func(i, j int) bool { return groups[i].Label < groups[j].Label })
+	return groups
+}
+
+func agentResourcePinnedSettings(data executor.FlowNodeData) string {
+	var fields map[string]any
+	if json.Unmarshal([]byte(agentSafeSavedConfig(data)), &fields) != nil {
+		return ""
+	}
+	suffixes := []string{
+		"repo", "repository", "repositoryid", "project", "projectid", "projectref", "projectkey",
+		"channel", "channelid", "channelname", "folder", "folderid", "account", "accountid", "accountslug",
+		"workspace", "workspaceid", "workspacename", "databaseid", "calendarid", "teamid", "teamslug",
+		"siteid", "siteurl", "baseid", "baseslug", "orgid", "orgslug", "organizationid", "datastoreid",
+		"pageid", "issueid", "listid", "boardid", "tableid", "githubbase",
+	}
+	for field, value := range fields {
+		lower, isResource := strings.ToLower(field), false
+		for _, suffix := range suffixes {
+			if strings.HasSuffix(lower, suffix) {
+				isResource = true
+				break
+			}
+		}
+		emptyString, isString := value.(string)
+		if !isResource || value == nil || (isString && strings.TrimSpace(emptyString) == "") {
+			delete(fields, field)
+		}
+	}
+	if len(fields) == 0 {
+		return ""
+	}
+	encoded, err := json.Marshal(fields)
+	if err != nil {
+		return ""
+	}
+	return truncate(string(encoded), 320)
 }
 
 func agentNodeCapability(node executor.WorkflowASTNode) (AgentNodeCapability, bool) {
@@ -272,15 +401,18 @@ func agentFieldContainsSecret(field string) bool {
 // excluded because it often escapes a saved folder/project boundary.
 func defaultSafeAgentPolicy(ast executor.WorkflowAST) AgentCapabilityPolicy {
 	policy := AgentCapabilityPolicy{Version: agentCapabilityPolicyVersion}
-	for _, capability := range agentWorkflowCapabilities(ast) {
-		grant := AgentNodeGrant{NodeID: capability.NodeID}
+	for _, capability := range agentIntegrationCapabilities(ast) {
+		grant := AgentIntegrationGrant{NodeType: capability.NodeType}
+		for _, resource := range capability.Resources {
+			grant.NodeIDs = append(grant.NodeIDs, resource.NodeID)
+		}
 		for _, operation := range capability.Operations {
 			if operation.Effect == AgentEffectRead && !operation.Sensitive && !strings.HasPrefix(strings.ToLower(operation.ID), "search") {
 				grant.AllowedOperations = append(grant.AllowedOperations, operation.ID)
 			}
 		}
 		if len(grant.AllowedOperations) > 0 {
-			policy.Nodes = append(policy.Nodes, grant)
+			policy.Integrations = append(policy.Integrations, grant)
 		}
 	}
 	return policy
@@ -289,76 +421,138 @@ func defaultSafeAgentPolicy(ast executor.WorkflowAST) AgentCapabilityPolicy {
 // normalizeAgentCapabilityPolicy intersects an AI- or owner-proposed policy
 // with the server catalog. Invalid identifiers are removed and reported.
 func normalizeAgentCapabilityPolicy(ast executor.WorkflowAST, proposed AgentCapabilityPolicy) (AgentCapabilityPolicy, []string) {
-	capabilities := map[string]AgentNodeCapability{}
-	for _, capability := range agentWorkflowCapabilities(ast) {
-		capabilities[capability.NodeID] = capability
+	if len(proposed.Integrations) == 0 && len(proposed.Nodes) > 0 {
+		return normalizeLegacyAgentCapabilityPolicy(ast, proposed.Nodes)
 	}
-
+	capabilities := map[executor.NodeType]AgentIntegrationCapability{}
+	for _, capability := range agentIntegrationCapabilities(ast) {
+		capabilities[capability.NodeType] = capability
+	}
 	normalized := AgentCapabilityPolicy{Version: agentCapabilityPolicyVersion}
 	var warnings []string
-	seenNodes := map[string]bool{}
-	for _, grant := range proposed.Nodes {
-		capability, exists := capabilities[grant.NodeID]
-		if !exists || seenNodes[grant.NodeID] {
-			warnings = append(warnings, fmt.Sprintf("ignored unknown or duplicate node %q", grant.NodeID))
+	seenTypes := map[executor.NodeType]bool{}
+	for _, grant := range proposed.Integrations {
+		capability, exists := capabilities[grant.NodeType]
+		if !exists || seenTypes[grant.NodeType] {
+			warnings = append(warnings, fmt.Sprintf("ignored unknown or duplicate integration %q", grant.NodeType))
 			continue
 		}
-		seenNodes[grant.NodeID] = true
-
-		knownOperations := map[string]bool{}
+		seenTypes[grant.NodeType] = true
+		knownNodes, knownOperations, knownFields := map[string]bool{}, map[string]bool{}, map[string]bool{}
+		for _, resource := range capability.Resources {
+			knownNodes[resource.NodeID] = true
+		}
 		for _, operation := range capability.Operations {
 			knownOperations[operation.ID] = true
 		}
-		knownFields := map[string]bool{}
 		for _, field := range capability.OverridableFields {
 			knownFields[field] = true
 		}
-
-		clean := AgentNodeGrant{NodeID: grant.NodeID}
+		clean := AgentIntegrationGrant{NodeType: grant.NodeType}
+		seenNodes := map[string]bool{}
+		for _, nodeID := range grant.NodeIDs {
+			if !knownNodes[nodeID] || seenNodes[nodeID] {
+				warnings = append(warnings, fmt.Sprintf("integration %q: ignored unknown or duplicate resource %q", grant.NodeType, nodeID))
+				continue
+			}
+			seenNodes[nodeID], clean.NodeIDs = true, append(clean.NodeIDs, nodeID)
+		}
 		seenOperations := map[string]bool{}
 		for _, operation := range grant.AllowedOperations {
 			if !knownOperations[operation] || seenOperations[operation] {
-				warnings = append(warnings, fmt.Sprintf("node %q: ignored unknown or duplicate operation %q", grant.NodeID, operation))
+				warnings = append(warnings, fmt.Sprintf("integration %q: ignored unknown or duplicate operation %q", grant.NodeType, operation))
 				continue
 			}
-			seenOperations[operation] = true
-			clean.AllowedOperations = append(clean.AllowedOperations, operation)
+			seenOperations[operation], clean.AllowedOperations = true, append(clean.AllowedOperations, operation)
 		}
 		seenFields := map[string]bool{}
 		for _, field := range grant.AllowedOverrideFields {
 			if !knownFields[field] || seenFields[field] || agentFieldContainsSecret(field) || field == capability.OperationField {
-				warnings = append(warnings, fmt.Sprintf("node %q: ignored unsafe, unknown or duplicate field %q", grant.NodeID, field))
+				warnings = append(warnings, fmt.Sprintf("integration %q: ignored unsafe, unknown or duplicate field %q", grant.NodeType, field))
 				continue
 			}
-			seenFields[field] = true
-			clean.AllowedOverrideFields = append(clean.AllowedOverrideFields, field)
+			seenFields[field], clean.AllowedOverrideFields = true, append(clean.AllowedOverrideFields, field)
 		}
+		sort.Strings(clean.NodeIDs)
 		sort.Strings(clean.AllowedOperations)
 		sort.Strings(clean.AllowedOverrideFields)
-		if len(clean.AllowedOperations) == 0 {
-			warnings = append(warnings, fmt.Sprintf("node %q: omitted because it has no valid operations", grant.NodeID))
+		if len(clean.NodeIDs) == 0 || len(clean.AllowedOperations) == 0 {
+			warnings = append(warnings, fmt.Sprintf("integration %q: omitted because it has no valid resources or operations", grant.NodeType))
 			continue
 		}
-		normalized.Nodes = append(normalized.Nodes, clean)
+		normalized.Integrations = append(normalized.Integrations, clean)
 	}
-	sort.Slice(normalized.Nodes, func(i, j int) bool { return normalized.Nodes[i].NodeID < normalized.Nodes[j].NodeID })
+	sort.Slice(normalized.Integrations, func(i, j int) bool { return normalized.Integrations[i].NodeType < normalized.Integrations[j].NodeType })
 	return normalized, warnings
 }
 
-func agentPolicyGrant(policy AgentCapabilityPolicy, nodeID string) (AgentNodeGrant, bool) {
-	for _, grant := range policy.Nodes {
-		if grant.NodeID == nodeID {
+func normalizeLegacyAgentCapabilityPolicy(ast executor.WorkflowAST, grants []AgentNodeGrant) (AgentCapabilityPolicy, []string) {
+	byNode := map[string]executor.WorkflowASTNode{}
+	for _, node := range ast.Nodes {
+		byNode[node.ID] = node
+	}
+	groups := map[executor.NodeType][]AgentNodeGrant{}
+	var warnings []string
+	for _, grant := range grants {
+		node, exists := byNode[grant.NodeID]
+		if !exists {
+			warnings = append(warnings, fmt.Sprintf("ignored unknown legacy node %q", grant.NodeID))
+			continue
+		}
+		groups[node.Data.NodeType] = append(groups[node.Data.NodeType], grant)
+	}
+	proposed := AgentCapabilityPolicy{Version: agentCapabilityPolicyVersion}
+	for nodeType, grouped := range groups {
+		operations := append([]string{}, grouped[0].AllowedOperations...)
+		fields := append([]string{}, grouped[0].AllowedOverrideFields...)
+		integration := AgentIntegrationGrant{NodeType: nodeType}
+		for _, grant := range grouped {
+			integration.NodeIDs = append(integration.NodeIDs, grant.NodeID)
+			operations, fields = intersectStrings(operations, grant.AllowedOperations), intersectStrings(fields, grant.AllowedOverrideFields)
+		}
+		integration.AllowedOperations, integration.AllowedOverrideFields = operations, fields
+		proposed.Integrations = append(proposed.Integrations, integration)
+		if len(grouped) > 1 {
+			warnings = append(warnings, fmt.Sprintf("migrated %d legacy %s node grants to their common integration permissions", len(grouped), nodeType))
+		}
+	}
+	normalized, nextWarnings := normalizeAgentCapabilityPolicy(ast, proposed)
+	return normalized, append(warnings, nextWarnings...)
+}
+
+func intersectStrings(left, right []string) []string {
+	rightSet := map[string]bool{}
+	for _, value := range right {
+		rightSet[value] = true
+	}
+	result := make([]string, 0, len(left))
+	for _, value := range left {
+		if rightSet[value] {
+			result = append(result, value)
+		}
+	}
+	return result
+}
+
+func agentPolicyGrant(policy AgentCapabilityPolicy, node executor.WorkflowASTNode) (AgentIntegrationGrant, bool) {
+	for _, grant := range policy.Integrations {
+		if grant.NodeType == node.Data.NodeType && stringSliceContains(grant.NodeIDs, node.ID) {
 			return grant, true
 		}
 	}
-	return AgentNodeGrant{}, false
+	for _, grant := range policy.Nodes {
+		if grant.NodeID == node.ID {
+			return AgentIntegrationGrant{NodeType: node.Data.NodeType, NodeIDs: []string{node.ID}, AllowedOperations: grant.AllowedOperations, AllowedOverrideFields: grant.AllowedOverrideFields}, true
+		}
+	}
+	return AgentIntegrationGrant{}, false
 }
 
 // authorizeAgentToolCall is the execution guard. Reduced model schemas improve
 // tool selection, but this check remains authoritative immediately before the
 // executor receives a call.
 func authorizeAgentToolCall(policy AgentCapabilityPolicy, node executor.WorkflowASTNode, rawInput any) (AgentAuthorizedCall, error) {
-	grant, exists := agentPolicyGrant(policy, node.ID)
+	grant, exists := agentPolicyGrant(policy, node)
 	if !exists {
 		return AgentAuthorizedCall{}, fmt.Errorf("node %q is not exposed by this deployment", node.ID)
 	}
