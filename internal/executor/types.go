@@ -1023,7 +1023,11 @@ type APIKeys struct {
 }
 
 type RunRequest struct {
-	Workflow       WorkflowAST       `json:"workflow"`
+	Workflow WorkflowAST `json:"workflow"`
+	// ToolWorkflow is the complete canvas snapshot. Workflow may be a connected
+	// execution subgraph, but coding-agent grants can deliberately reference
+	// disconnected nodes that must be authorized without being executed.
+	ToolWorkflow   *WorkflowAST      `json:"toolWorkflow,omitempty"`
 	WorkflowID     string            `json:"workflowId,omitempty"`
 	OnlyNodeID     string            `json:"onlyNodeId,omitempty"`
 	InitialOutputs map[string]string `json:"initialOutputs,omitempty"`
@@ -1034,6 +1038,9 @@ type RunRequest struct {
 // cached values from its upstream ancestors for template/input resolution.
 type RunOptions struct {
 	OnlyNodeID string
+	// ToolWorkflow is frozen into coding-agent jobs but never changes which
+	// nodes this run executes.
+	ToolWorkflow *WorkflowAST
 	// EntryNodeID names where the run begins. A trigger sets it so its own
 	// graph runs, rather than whichever graph happens to be largest.
 	EntryNodeID    string

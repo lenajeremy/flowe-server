@@ -226,7 +226,7 @@ func (h *WorkflowHandler) run(c *gin.Context, nodeOnly bool) {
 		uid,
 		currentOrgID(c),
 		emit,
-		executor.RunOptions{OnlyNodeID: req.OnlyNodeID, InitialOutputs: req.InitialOutputs},
+		executor.RunOptions{OnlyNodeID: req.OnlyNodeID, InitialOutputs: req.InitialOutputs, ToolWorkflow: req.ToolWorkflow},
 	)
 
 	// Serialize buffered events and update run record

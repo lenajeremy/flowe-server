@@ -13,13 +13,15 @@ import (
 
 // GitLab REST v4. Project ids are URL-encoded numeric ids.
 
+var gitlabAPIURL = "https://gitlab.com/api/v4"
+
 func gitlabCall(ctx context.Context, token, method, path string, body any) (string, error) {
 	var reader io.Reader
 	if body != nil {
 		b, _ := json.Marshal(body)
 		reader = bytes.NewReader(b)
 	}
-	req, err := http.NewRequestWithContext(ctx, method, "https://gitlab.com/api/v4"+path, reader)
+	req, err := http.NewRequestWithContext(ctx, method, gitlabAPIURL+path, reader)
 	if err != nil {
 		return "", err
 	}
@@ -169,6 +171,27 @@ func runGitlab(ctx context.Context, token string, d FlowNodeData, outputs map[st
 		_ = json.Unmarshal([]byte(raw), &res)
 		b, _ := json.Marshal(map[string]any{"status": res.State, "sha": res.SHA})
 		return string(b), nil
+
+	case "create_branch":
+		branch := firstNonEmpty(sub(d.GitlabSourceBranch), sub(d.GitlabRef))
+		if branch == "" {
+			return "", fmt.Errorf("GitLab: create_branch needs a source branch name")
+		}
+		baseRef := firstNonEmpty(sub(d.GitlabTargetBranch), "main")
+		query := url.Values{"branch": {branch}, "ref": {baseRef}}
+		raw, err := gitlabCall(ctx, token, http.MethodPost, base+"/repository/branches?"+query.Encode(), nil)
+		if err != nil {
+			return "", err
+		}
+		var created struct {
+			Name   string `json:"name"`
+			Commit struct {
+				ID string `json:"id"`
+			} `json:"commit"`
+		}
+		_ = json.Unmarshal([]byte(raw), &created)
+		encoded, _ := json.Marshal(map[string]any{"status": "created", "branch": created.Name, "base": baseRef, "sha": created.Commit.ID})
+		return string(encoded), nil
 
 	case "list_branches":
 		raw, err := gitlabCall(ctx, token, http.MethodGet,
