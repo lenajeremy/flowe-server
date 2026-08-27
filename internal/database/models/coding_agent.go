@@ -210,6 +210,8 @@ type CodingAgentJob struct {
 	CompletedAt         *time.Time           `json:"completed_at,omitempty"`
 	ClaimedBy           string               `json:"-" gorm:"index"`
 	ProviderExecutionID string               `json:"-" gorm:"index"`
+	RepositoryBaseSHA   string               `json:"repository_base_sha,omitempty" gorm:"type:varchar(64)"`
+	WorkingDirectory    string               `json:"-" gorm:"type:text"`
 	Result              JSONB                `json:"result" gorm:"type:jsonb;not null;default:'{}'"`
 	Summary             string               `json:"summary" gorm:"type:text"`
 	LastError           string               `json:"last_error,omitempty" gorm:"type:text"`
@@ -221,8 +223,13 @@ type CodingAgentJob struct {
 	// reaches a terminal state, which is what bounds the token's life — it is
 	// the job, not a clock, that decides when the sandbox stops being trusted.
 	ToolTokenHash string `json:"-" gorm:"type:varchar(64);index"`
-	// ToolNodeIDs is the JSON array of canvas node ids this job may call.
-	ToolNodeIDs JSONB `json:"tool_node_ids" gorm:"type:jsonb;not null;default:'[]'"`
+	// ToolWorkflow and ToolPolicy are immutable authorization snapshots. The
+	// callback must never resolve a job against the mutable saved workflow.
+	ToolWorkflow JSONB `json:"-" gorm:"type:jsonb;not null;default:'{}'"`
+	ToolPolicy   JSONB `json:"tool_policy" gorm:"type:jsonb;not null;default:'{\"version\":1,\"nodes\":[]}'"`
+	// ToolNodeIDs remains for backwards compatibility with already-saved
+	// canvases. Newly queued jobs also persist a normalized ToolPolicy.
+	ToolNodeIDs JSONB `json:"tool_node_ids,omitempty" gorm:"type:jsonb;not null;default:'[]'"`
 }
 
 // CodingAgentEvent is an append-only audit and progress stream. Event payloads
@@ -251,4 +258,55 @@ type CodingAgentArtifact struct {
 	SHA256         string `json:"sha256" gorm:"index"`
 	StorageKey     string `json:"-"`
 	InlineContent  string `json:"inline_content,omitempty" gorm:"type:text"`
+}
+
+type CodingAgentToolCallStatus string
+
+const (
+	CodingAgentToolCallPendingApproval CodingAgentToolCallStatus = "pending_approval"
+	CodingAgentToolCallApproved        CodingAgentToolCallStatus = "approved"
+	CodingAgentToolCallExecuting       CodingAgentToolCallStatus = "executing"
+	CodingAgentToolCallSucceeded       CodingAgentToolCallStatus = "succeeded"
+	CodingAgentToolCallFailed          CodingAgentToolCallStatus = "failed"
+	CodingAgentToolCallOutcomeUnknown  CodingAgentToolCallStatus = "outcome_unknown"
+	CodingAgentToolCallRejected        CodingAgentToolCallStatus = "rejected"
+	CodingAgentToolCallCancelled       CodingAgentToolCallStatus = "cancelled"
+)
+
+func (s CodingAgentToolCallStatus) Terminal() bool {
+	switch s {
+	case CodingAgentToolCallSucceeded, CodingAgentToolCallFailed, CodingAgentToolCallOutcomeUnknown,
+		CodingAgentToolCallRejected, CodingAgentToolCallCancelled:
+		return true
+	default:
+		return false
+	}
+}
+
+// CodingAgentToolCall is the durable idempotency and approval boundary for one
+// sandbox callback. An executing or outcome-unknown mutation is never replayed
+// automatically: the external side effect may already have happened.
+type CodingAgentToolCall struct {
+	BaseModel
+	OrganizationID   string                    `json:"organization_id" gorm:"type:uuid;not null;index"`
+	UserID           string                    `json:"user_id" gorm:"type:uuid;not null;index"`
+	JobID            string                    `json:"job_id" gorm:"type:uuid;not null;uniqueIndex:idx_coding_agent_tool_request,priority:1;index"`
+	RequestKey       string                    `json:"-" gorm:"type:varchar(64);not null;uniqueIndex:idx_coding_agent_tool_request,priority:2"`
+	Fingerprint      string                    `json:"-" gorm:"type:varchar(64);not null;index"`
+	NodeID           string                    `json:"node_id" gorm:"not null;index"`
+	NodeLabel        string                    `json:"node_label"`
+	ToolName         string                    `json:"tool_name" gorm:"not null"`
+	Operation        string                    `json:"operation" gorm:"not null"`
+	Effect           string                    `json:"effect" gorm:"type:varchar(16);not null;index"`
+	Reason           string                    `json:"reason" gorm:"type:text"`
+	Arguments        JSONB                     `json:"arguments" gorm:"type:jsonb;not null;default:'{}'"`
+	EffectiveConfig  JSONB                     `json:"effective_config" gorm:"type:jsonb;not null;default:'{}'"`
+	Status           CodingAgentToolCallStatus `json:"status" gorm:"type:varchar(24);not null;index"`
+	Result           JSONB                     `json:"result,omitempty" gorm:"type:jsonb;not null;default:'{}'"`
+	LastError        string                    `json:"last_error,omitempty" gorm:"type:text"`
+	RequestedAt      time.Time                 `json:"requested_at" gorm:"not null;index"`
+	ApprovedAt       *time.Time                `json:"approved_at,omitempty"`
+	ApprovedByUserID string                    `json:"approved_by_user_id,omitempty" gorm:"type:uuid"`
+	StartedAt        *time.Time                `json:"started_at,omitempty"`
+	CompletedAt      *time.Time                `json:"completed_at,omitempty"`
 }

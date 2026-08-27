@@ -239,65 +239,89 @@ func (s *Service) finishSuccessfulEnvironmentLifecycle(ctx context.Context, envi
 		Where("id = ? AND current_job_id = ''", environment.ID).Updates(updates).Error
 }
 
-func (s *Service) prepareRepository(ctx context.Context, sandbox Sandbox, job *models.CodingAgentJob, policy ExecutionPolicy) error {
+func (s *Service) prepareRepository(ctx context.Context, sandbox Sandbox, job *models.CodingAgentJob, policy ExecutionPolicy) (string, string, error) {
 	provider, repositoryURL, gitUsername, err := repositoryCloneSettings(policy)
 	if err != nil {
-		return err
+		return "", "", err
 	}
-	token := ""
 	if s.config.RepositoryToken == nil {
-		return errors.New("repository credential lookup is not configured")
+		return "", "", errors.New("repository credential lookup is not configured")
 	}
-	token, err = s.config.RepositoryToken(ctx, job.OrganizationID, job.UserID, provider)
+	token, err := s.config.RepositoryToken(ctx, job.OrganizationID, job.UserID, provider)
 	if err != nil {
-		return fmt.Errorf("load %s credential: %w", providerDisplayName(provider), err)
+		return "", "", fmt.Errorf("load %s credential: %w", providerDisplayName(provider), err)
 	}
 	if token == "" {
-		return fmt.Errorf("connect %s before running this coding agent", providerDisplayName(provider))
+		return "", "", fmt.Errorf("connect %s before running this coding agent", providerDisplayName(provider))
 	}
 
 	authPrefix, cleanup, err := prepareGitAuthentication(ctx, sandbox, token, gitUsername)
 	if err != nil {
-		return err
+		return "", "", err
 	}
 	defer cleanup()
-	if _, err := sandbox.Run(ctx, CommandSpec{Command: "mkdir -p -- /workspace", WorkingDir: "/", Timeout: time.Minute}, nil); err != nil {
-		return fmt.Errorf("prepare repository workspace: %w", err)
+	workingDirectory := "/workspace/jobs/" + job.ID.String() + "/repo"
+	parent := "/workspace/jobs/" + job.ID.String()
+	if _, err := sandbox.Run(ctx, CommandSpec{Command: "mkdir -p -- " + quoteShell(parent), WorkingDir: "/", Timeout: time.Minute}, nil); err != nil {
+		return "", "", fmt.Errorf("prepare repository workspace: %w", err)
 	}
-	present, err := sandbox.Run(ctx, CommandSpec{Command: "test -d /workspace/repo/.git", WorkingDir: "/", Timeout: time.Minute}, nil)
+	present, err := sandbox.Run(ctx, CommandSpec{Command: "test -d " + quoteShell(workingDirectory+"/.git"), WorkingDir: "/", Timeout: time.Minute}, nil)
 	if err != nil {
-		return fmt.Errorf("inspect repository workspace: %w", err)
+		return "", "", fmt.Errorf("inspect repository workspace: %w", err)
 	}
 	if present.ExitCode == 0 {
-		remote, err := sandbox.Run(ctx, CommandSpec{Command: "git remote get-url origin", WorkingDir: "/workspace/repo", Timeout: time.Minute}, nil)
+		remote, err := sandbox.Run(ctx, CommandSpec{Command: "git remote get-url origin", WorkingDir: workingDirectory, Timeout: time.Minute}, nil)
 		if err != nil || remote.ExitCode != 0 {
-			return errors.New("persistent coding-agent workspace has no readable Git origin")
+			return "", "", errors.New("coding-agent job checkout has no readable Git origin")
 		}
 		got := strings.TrimSuffix(strings.TrimSpace(remote.Stdout), "/")
 		if got != repositoryURL && got != strings.TrimSuffix(repositoryURL, ".git") {
-			return errors.New("persistent coding-agent workspace origin no longer matches its configured repository")
+			return "", "", errors.New("coding-agent job checkout origin does not match its configured repository")
 		}
-		fetch, err := sandbox.Run(ctx, CommandSpec{Command: authPrefix + "git fetch --prune --no-tags origin", WorkingDir: "/workspace/repo", Timeout: 5 * time.Minute}, nil)
-		if err != nil || fetch.ExitCode != 0 {
-			return fmt.Errorf("refresh coding-agent repository: %s", commandFailure(fetch, err))
+		clean, cleanErr := sandbox.Run(ctx, CommandSpec{
+			Command:    "git -c core.hooksPath=/dev/null -c core.fsmonitor=false status --porcelain",
+			WorkingDir: workingDirectory, Timeout: time.Minute,
+		}, nil)
+		if cleanErr != nil || clean.ExitCode != 0 || strings.TrimSpace(clean.Stdout) != "" {
+			return "", "", errors.New("coding-agent job checkout contains unexpected changes; reset the environment before retrying")
 		}
-		return nil
+		sha, shaErr := repositoryBaseline(ctx, sandbox, workingDirectory)
+		return workingDirectory, sha, shaErr
 	}
 	if present.ExitCode != 1 {
-		return fmt.Errorf("inspect repository workspace: unexpected exit code %d", present.ExitCode)
+		return "", "", fmt.Errorf("inspect repository workspace: unexpected exit code %d", present.ExitCode)
 	}
 	branch := ""
 	if policy.Branch != "" {
 		branch = " --branch " + quoteShell(policy.Branch)
 	}
 	clone, err := sandbox.Run(ctx, CommandSpec{
-		Command:    authPrefix + "git clone --no-tags" + branch + " -- " + quoteShell(repositoryURL) + " /workspace/repo",
-		WorkingDir: "/workspace", Timeout: 10 * time.Minute,
+		Command: authPrefix + "git -c core.hooksPath=/dev/null -c core.fsmonitor=false -c credential.helper= clone --no-tags" + branch +
+			" -- " + quoteShell(repositoryURL) + " " + quoteShell(workingDirectory),
+		WorkingDir: parent, Timeout: 10 * time.Minute,
 	}, nil)
 	if err != nil || clone.ExitCode != 0 {
-		return fmt.Errorf("clone coding-agent repository: %s", commandFailure(clone, err))
+		return "", "", fmt.Errorf("clone coding-agent repository: %s", commandFailure(clone, err))
 	}
-	return nil
+	sha, err := repositoryBaseline(ctx, sandbox, workingDirectory)
+	return workingDirectory, sha, err
+}
+
+func repositoryBaseline(ctx context.Context, sandbox Sandbox, workingDirectory string) (string, error) {
+	result, err := sandbox.Run(ctx, CommandSpec{
+		Command:    "git -c core.hooksPath=/dev/null -c core.fsmonitor=false rev-parse HEAD",
+		WorkingDir: workingDirectory, Timeout: time.Minute,
+	}, nil)
+	sha := strings.ToLower(strings.TrimSpace(result.Stdout))
+	if err != nil || result.ExitCode != 0 || len(sha) < 40 || len(sha) > 64 {
+		return "", fmt.Errorf("record coding-agent repository baseline: %s", commandFailure(result, err))
+	}
+	for _, char := range sha {
+		if !strings.ContainsRune("0123456789abcdef", char) {
+			return "", errors.New("record coding-agent repository baseline: Git returned an invalid commit id")
+		}
+	}
+	return sha, nil
 }
 
 func prepareGitAuthentication(ctx context.Context, sandbox Sandbox, token, username string) (string, func(), error) {

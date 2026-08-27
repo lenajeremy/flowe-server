@@ -15,7 +15,7 @@ func TestBuildCommandReadsPromptFromFileAndResumes(t *testing.T) {
 		AllowWrite:       true,
 	}, "/tmp/auth", "/tmp/auth/prompt.txt", "/tmp/auth/schema.json", "/tmp/auth/result.json", "/tmp/auth/mcp-token")
 	for _, expected := range []string{
-		"--ask-for-approval never", "--search", "--sandbox workspace-write", "--ignore-user-config",
+		"--ask-for-approval never", "--search", "--sandbox workspace-write", "--strict-config",
 		"--model 'gpt-5.6-codex'", "resume '019c-thread-123'", "- < '/tmp/auth/prompt.txt'",
 		// Read from the file at run time: the provider stores the rendered
 		// command, so the token itself must never appear in it.
@@ -33,6 +33,18 @@ func TestBuildPromptAddsNonNegotiableBoundariesAfterTask(t *testing.T) {
 		!strings.Contains(prompt, "Never read, print, copy, or expose authentication") ||
 		!strings.Contains(prompt, "Never include repository contents, customer data, credentials, or private identifiers in a search query") {
 		t.Fatalf("unexpected prompt: %s", prompt)
+	}
+}
+
+func TestRuntimeConfigLoadsMCPAndHidesItsTokenFromShellCommands(t *testing.T) {
+	config := string(runtimeConfig("https://fernary.example/api/mcp/coding-agent"))
+	for _, expected := range []string{
+		`[mcp_servers.fernary]`, `bearer_token_env_var = "FERNARY_MCP_TOKEN"`,
+		`[shell_environment_policy]`, `exclude = ["FERNARY_MCP_TOKEN"]`,
+	} {
+		if !strings.Contains(config, expected) {
+			t.Fatalf("runtime config omitted %q:\n%s", expected, config)
+		}
 	}
 }
 

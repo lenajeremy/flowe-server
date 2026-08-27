@@ -213,6 +213,9 @@ func TestParseGithubFilesRejectsBadInput(t *testing.T) {
 		{"no files", `[]`, "nothing to commit"},
 		{"missing path", `[{"content":"x"}]`, "no path"},
 		{"absolute path", `[{"path":"/etc/passwd","content":"x"}]`, "relative"},
+		{"parent traversal", `[{"path":"../secret","content":"x"}]`, "traverse"},
+		{"backslash path", `[{"path":"dir\\secret","content":"x"}]`, "invalid"},
+		{"duplicate path", `[{"path":"a.go","content":"x"},{"path":"a.go","content":"y"}]`, "duplicate"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := parseGithubFiles(tc.input)

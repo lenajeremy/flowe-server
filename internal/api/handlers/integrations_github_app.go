@@ -50,6 +50,8 @@ type githubSetupInstallation struct {
 	Suspended             bool                           `json:"suspended"`
 	PermissionsConfigured bool                           `json:"permissions_configured"`
 	PermissionsMissing    []string                       `json:"permissions_missing"`
+	AgentWritesConfigured bool                           `json:"agent_writes_configured"`
+	AgentWritesMissing    []string                       `json:"agent_writes_missing"`
 	Repositories          []githubInstallationRepository `json:"repositories"`
 }
 
@@ -158,9 +160,11 @@ func (h *WorkflowHandler) GitHubIntegrationSetup(c *gin.Context) {
 			RepositorySelection: installation.RepositorySelection,
 			Suspended:           installation.SuspendedAt != nil,
 			PermissionsMissing:  installation.MissingWebhookRequirements(),
+			AgentWritesMissing:  installation.MissingCodingAgentWriteRequirements(),
 			Repositories:        []githubInstallationRepository{},
 		}
 		item.PermissionsConfigured = len(item.PermissionsMissing) == 0
+		item.AgentWritesConfigured = len(item.AgentWritesMissing) == 0
 		if installation.SuspendedAt == nil {
 			response.Installed = true
 			repositories, listErr := client.ListInstallationRepositories(c.Request.Context(), installation.ID)

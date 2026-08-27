@@ -184,7 +184,7 @@ func (s *Service) DisconnectCredential(ctx context.Context, organizationID, user
 			if jobs[index].Status == models.CodingAgentJobPending {
 				if err := tx.Model(&jobs[index]).Updates(map[string]any{
 					"status": models.CodingAgentJobCancelled, "cancel_requested_at": now,
-					"completed_at": now, "last_error": "Codex connection was disconnected",
+					"completed_at": now, "last_error": "Codex connection was disconnected", "tool_token_hash": "",
 				}).Error; err != nil {
 					return err
 				}
@@ -194,7 +194,12 @@ func (s *Service) DisconnectCredential(ctx context.Context, organizationID, user
 				}
 				continue
 			}
-			if err := tx.Model(&jobs[index]).Update("cancel_requested_at", now).Error; err != nil {
+			if err := tx.Model(&jobs[index]).Updates(map[string]any{
+				"cancel_requested_at": now, "tool_token_hash": "",
+			}).Error; err != nil {
+				return err
+			}
+			if err := cancelOpenToolCallsTx(tx, jobs[index].ID.String(), now, "Codex connection was disconnected"); err != nil {
 				return err
 			}
 			runningJobIDs = append(runningJobIDs, jobs[index].ID.String())

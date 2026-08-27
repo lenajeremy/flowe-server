@@ -5,10 +5,12 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 )
 
@@ -47,7 +49,15 @@ func githubCall(ctx context.Context, token, method, path string, body any) (stri
 }
 
 func runGithub(ctx context.Context, token string, d FlowNodeData, outputs map[string]string) (string, error) {
-	repo := substituteTemplates(d.GithubRepo, outputs)
+	repoValue := strings.TrimSpace(substituteTemplates(d.GithubRepo, outputs))
+	repo := ""
+	if repoValue != "" {
+		var repoErr error
+		repo, repoErr = githubRepositoryAPIPath(repoValue)
+		if repoErr != nil {
+			return "", repoErr
+		}
+	}
 	sub := func(s string) string { return substituteTemplates(s, outputs) }
 
 	switch d.IntegrationOp {
@@ -81,8 +91,12 @@ func runGithub(ctx context.Context, token string, d FlowNodeData, outputs map[st
 		return githubProjectIssues(raw), nil
 
 	case "create_comment":
+		issueNumber, err := githubPositiveNumber(sub(d.GithubIssueNumber), "issue number")
+		if err != nil {
+			return "", err
+		}
 		if _, err := githubCall(ctx, token, http.MethodPost,
-			fmt.Sprintf("/repos/%s/issues/%s/comments", repo, sub(d.GithubIssueNumber)),
+			fmt.Sprintf("/repos/%s/issues/%s/comments", repo, issueNumber),
 			map[string]any{"body": sub(d.GithubBody)}); err != nil {
 			return "", err
 		}
@@ -98,14 +112,26 @@ func runGithub(ctx context.Context, token string, d FlowNodeData, outputs map[st
 		return githubProjectIssues(raw), nil
 
 	case "get_pull_request":
+		prNumber, err := githubPositiveNumber(sub(d.GithubPrNumber), "pull request number")
+		if err != nil {
+			return "", err
+		}
 		return githubCall(ctx, token, http.MethodGet,
-			fmt.Sprintf("/repos/%s/pulls/%s", repo, sub(d.GithubPrNumber)), nil)
+			fmt.Sprintf("/repos/%s/pulls/%s", repo, prNumber), nil)
 
 	case "get_issue":
+		issueNumber, err := githubPositiveNumber(sub(d.GithubIssueNumber), "issue number")
+		if err != nil {
+			return "", err
+		}
 		return githubCall(ctx, token, http.MethodGet,
-			fmt.Sprintf("/repos/%s/issues/%s", repo, sub(d.GithubIssueNumber)), nil)
+			fmt.Sprintf("/repos/%s/issues/%s", repo, issueNumber), nil)
 
 	case "update_issue":
+		issueNumber, err := githubPositiveNumber(sub(d.GithubIssueNumber), "issue number")
+		if err != nil {
+			return "", err
+		}
 		payload := map[string]any{}
 		if v := sub(d.GithubTitle); v != "" {
 			payload["title"] = v
@@ -123,7 +149,7 @@ func runGithub(ctx context.Context, token string, d FlowNodeData, outputs map[st
 			return "", fmt.Errorf("GitHub: nothing to update — set a title, body, state, or labels")
 		}
 		raw, err := githubCall(ctx, token, http.MethodPatch,
-			fmt.Sprintf("/repos/%s/issues/%s", repo, sub(d.GithubIssueNumber)), payload)
+			fmt.Sprintf("/repos/%s/issues/%s", repo, issueNumber), payload)
 		if err != nil {
 			return "", err
 		}
@@ -131,10 +157,13 @@ func runGithub(ctx context.Context, token string, d FlowNodeData, outputs map[st
 
 	case "create_branch":
 		branch := strings.TrimPrefix(sub(d.GithubBranch), "refs/heads/")
-		if branch == "" {
-			return "", fmt.Errorf("create_branch needs a branch name")
+		if _, err := githubRefAPIPath(branch); err != nil {
+			return "", fmt.Errorf("create_branch needs a valid branch name: %w", err)
 		}
 		base := firstNonEmpty(sub(d.GithubBase), "main")
+		if _, err := githubRefAPIPath(base); err != nil {
+			return "", fmt.Errorf("create_branch base is invalid: %w", err)
+		}
 		baseSHA, err := githubRefSHA(ctx, token, repo, base)
 		if err != nil {
 			return "", fmt.Errorf("create_branch could not read base %q: %w", base, err)
@@ -156,8 +185,9 @@ func runGithub(ctx context.Context, token string, d FlowNodeData, outputs map[st
 
 	case "commit_files":
 		branch := strings.TrimPrefix(sub(d.GithubBranch), "refs/heads/")
-		if branch == "" {
-			return "", fmt.Errorf("commit_files needs a branch — create it first with create_branch")
+		branchPath, branchErr := githubRefAPIPath(branch)
+		if branchErr != nil {
+			return "", fmt.Errorf("commit_files needs a valid branch — create it first with create_branch: %w", branchErr)
 		}
 		files, err := parseGithubFiles(sub(d.GithubFiles))
 		if err != nil {
@@ -235,7 +265,7 @@ func runGithub(ctx context.Context, token string, d FlowNodeData, outputs map[st
 		// object creation, so a failure partway leaves the branch untouched
 		// rather than half-updated.
 		if _, err := githubCall(ctx, token, http.MethodPatch,
-			"/repos/"+repo+"/git/refs/heads/"+branch, map[string]any{"sha": commit.SHA}); err != nil {
+			"/repos/"+repo+"/git/refs/heads/"+branchPath, map[string]any{"sha": commit.SHA}); err != nil {
 			return "", fmt.Errorf("commit_files built commit %s but could not move %q: %w", commit.SHA, branch, err)
 		}
 		return fmt.Sprintf(`{"branch":%q,"commit":%q,"files":%d,"url":%q}`,
@@ -254,9 +284,13 @@ func runGithub(ctx context.Context, token string, d FlowNodeData, outputs map[st
 		return githubIssueResult(raw), nil
 
 	case "merge_pull_request":
+		prNumber, err := githubPositiveNumber(sub(d.GithubPrNumber), "pull request number")
+		if err != nil {
+			return "", err
+		}
 		method := firstNonEmpty(d.GithubMergeMethod, "merge")
 		raw, err := githubCall(ctx, token, http.MethodPut,
-			fmt.Sprintf("/repos/%s/pulls/%s/merge", repo, sub(d.GithubPrNumber)),
+			fmt.Sprintf("/repos/%s/pulls/%s/merge", repo, prNumber),
 			map[string]any{"merge_method": method})
 		if err != nil {
 			return "", err
@@ -270,8 +304,12 @@ func runGithub(ctx context.Context, token string, d FlowNodeData, outputs map[st
 		return string(b), nil
 
 	case "list_pr_files":
+		prNumber, err := githubPositiveNumber(sub(d.GithubPrNumber), "pull request number")
+		if err != nil {
+			return "", err
+		}
 		raw, err := githubCall(ctx, token, http.MethodGet,
-			fmt.Sprintf("/repos/%s/pulls/%s/files?per_page=%d", repo, sub(d.GithubPrNumber), intOr(d.GithubLimit, 30)), nil)
+			fmt.Sprintf("/repos/%s/pulls/%s/files?per_page=%d", repo, prNumber, intOr(d.GithubLimit, 30)), nil)
 		if err != nil {
 			return "", err
 		}
@@ -385,12 +423,16 @@ func runGithub(ctx context.Context, token string, d FlowNodeData, outputs map[st
 		return githubRepositoryDetails(details, languages)
 
 	case "get_file":
+		contentPath, err := githubContentAPIPath(sub(d.GithubPath))
+		if err != nil {
+			return "", err
+		}
 		q := url.Values{}
 		if ref := sub(d.GithubRef); ref != "" {
 			q.Set("ref", ref)
 		}
 		raw, err := githubCall(ctx, token, http.MethodGet,
-			"/repos/"+repo+"/contents/"+sub(d.GithubPath)+"?"+q.Encode(), nil)
+			"/repos/"+repo+"/contents/"+contentPath+"?"+q.Encode(), nil)
 		if err != nil {
 			return "", err
 		}
@@ -409,6 +451,10 @@ func runGithub(ctx context.Context, token string, d FlowNodeData, outputs map[st
 
 	case "create_or_update_file":
 		path := sub(d.GithubPath)
+		contentPath, err := githubContentAPIPath(path)
+		if err != nil {
+			return "", err
+		}
 		payload := map[string]any{
 			"message": firstNonEmpty(sub(d.GithubCommitMsg), "Update "+path),
 			"content": base64.StdEncoding.EncodeToString([]byte(sub(d.GithubContent))),
@@ -422,7 +468,7 @@ func runGithub(ctx context.Context, token string, d FlowNodeData, outputs map[st
 			q.Set("ref", branch)
 		}
 		if existing, err := githubCall(ctx, token, http.MethodGet,
-			"/repos/"+repo+"/contents/"+path+"?"+q.Encode(), nil); err == nil {
+			"/repos/"+repo+"/contents/"+contentPath+"?"+q.Encode(), nil); err == nil {
 			var f struct {
 				SHA string `json:"sha"`
 			}
@@ -430,7 +476,7 @@ func runGithub(ctx context.Context, token string, d FlowNodeData, outputs map[st
 				payload["sha"] = f.SHA
 			}
 		}
-		raw, err := githubCall(ctx, token, http.MethodPut, "/repos/"+repo+"/contents/"+path, payload)
+		raw, err := githubCall(ctx, token, http.MethodPut, "/repos/"+repo+"/contents/"+contentPath, payload)
 		if err != nil {
 			return "", err
 		}
@@ -484,6 +530,10 @@ func runGithub(ctx context.Context, token string, d FlowNodeData, outputs map[st
 		return string(b), nil
 
 	case "trigger_workflow":
+		workflowID, err := githubWorkflowAPIID(sub(d.GithubWorkflowId))
+		if err != nil {
+			return "", err
+		}
 		payload := map[string]any{"ref": firstNonEmpty(sub(d.GithubRef), "main")}
 		if inputs := sub(d.GithubBody); inputs != "" {
 			var m map[string]any
@@ -493,10 +543,10 @@ func runGithub(ctx context.Context, token string, d FlowNodeData, outputs map[st
 			payload["inputs"] = m
 		}
 		if _, err := githubCall(ctx, token, http.MethodPost,
-			fmt.Sprintf("/repos/%s/actions/workflows/%s/dispatches", repo, sub(d.GithubWorkflowId)), payload); err != nil {
+			fmt.Sprintf("/repos/%s/actions/workflows/%s/dispatches", repo, workflowID), payload); err != nil {
 			return "", err
 		}
-		b, _ := json.Marshal(map[string]any{"status": "dispatched", "workflow": sub(d.GithubWorkflowId), "ref": payload["ref"]})
+		b, _ := json.Marshal(map[string]any{"status": "dispatched", "workflow": workflowID, "ref": payload["ref"]})
 		return string(b), nil
 
 	case "list_workflow_runs":
@@ -802,6 +852,94 @@ func intOr(v, fallback int) int {
 	return fallback
 }
 
+var (
+	githubRepositorySegment = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,100}$`)
+	githubPositiveNumberRE  = regexp.MustCompile(`^[1-9][0-9]{0,11}$`)
+	githubWorkflowIDRE      = regexp.MustCompile(`^(?:[1-9][0-9]{0,19}|[A-Za-z0-9_.-]{1,200})$`)
+)
+
+func githubRepositoryAPIPath(repository string) (string, error) {
+	parts := strings.Split(strings.TrimSpace(repository), "/")
+	if len(parts) != 2 {
+		return "", errors.New("GitHub repository must be owner/name")
+	}
+	for _, part := range parts {
+		if !githubRepositorySegment.MatchString(part) || part == "." || part == ".." {
+			return "", errors.New("GitHub repository contains an invalid owner or name")
+		}
+	}
+	return url.PathEscape(parts[0]) + "/" + url.PathEscape(parts[1]), nil
+}
+
+func githubPositiveNumber(value, label string) (string, error) {
+	value = strings.TrimSpace(value)
+	if !githubPositiveNumberRE.MatchString(value) {
+		return "", fmt.Errorf("GitHub %s must be a positive integer", label)
+	}
+	return value, nil
+}
+
+func githubRefAPIPath(ref string) (string, error) {
+	ref = strings.TrimPrefix(strings.TrimSpace(ref), "refs/heads/")
+	if ref == "" || len(ref) > 240 || strings.HasPrefix(ref, "/") || strings.HasSuffix(ref, "/") ||
+		strings.Contains(ref, "//") || strings.Contains(ref, "..") || strings.Contains(ref, "@{") {
+		return "", errors.New("GitHub branch or ref is invalid")
+	}
+	parts := strings.Split(ref, "/")
+	for index, part := range parts {
+		if part == "" || part == "." || part == ".." || strings.ContainsAny(part, `~^:?*[\`) {
+			return "", errors.New("GitHub branch or ref contains unsupported characters")
+		}
+		for _, r := range part {
+			if r < 0x20 || r == 0x7f {
+				return "", errors.New("GitHub branch or ref contains control characters")
+			}
+		}
+		parts[index] = url.PathEscape(part)
+	}
+	return strings.Join(parts, "/"), nil
+}
+
+func githubContentAPIPath(path string) (string, error) {
+	parts, err := validateGithubContentPath(path)
+	if err != nil {
+		return "", err
+	}
+	for index, part := range parts {
+		parts[index] = url.PathEscape(part)
+	}
+	return strings.Join(parts, "/"), nil
+}
+
+func validateGithubContentPath(path string) ([]string, error) {
+	if strings.HasPrefix(path, "/") {
+		return nil, errors.New("GitHub file path must be relative to the repository root")
+	}
+	if path == "" || len(path) > 1000 || strings.Contains(path, "\\") || strings.HasSuffix(path, "/") {
+		return nil, errors.New("GitHub file path is invalid")
+	}
+	parts := strings.Split(path, "/")
+	for _, part := range parts {
+		if part == "" || part == "." || part == ".." {
+			return nil, errors.New("GitHub file path cannot traverse directories")
+		}
+		for _, r := range part {
+			if r < 0x20 || r == 0x7f {
+				return nil, errors.New("GitHub file path contains control characters")
+			}
+		}
+	}
+	return parts, nil
+}
+
+func githubWorkflowAPIID(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if !githubWorkflowIDRE.MatchString(value) || value == "." || value == ".." {
+		return "", errors.New("GitHub workflow ID must be a numeric ID or workflow filename")
+	}
+	return url.PathEscape(value), nil
+}
+
 // githubRefSHA resolves a branch to the commit it points at.
 //
 // The ref is used unescaped: GitHub addresses nested branches as
@@ -809,10 +947,11 @@ func intOr(v, fallback int) int {
 // valid branch name into a 404.
 func githubRefSHA(ctx context.Context, token, repo, ref string) (string, error) {
 	ref = strings.TrimPrefix(strings.TrimSpace(ref), "refs/heads/")
-	if ref == "" {
-		return "", fmt.Errorf("no branch given")
+	refPath, err := githubRefAPIPath(ref)
+	if err != nil {
+		return "", err
 	}
-	raw, err := githubCall(ctx, token, http.MethodGet, "/repos/"+repo+"/git/ref/heads/"+ref, nil)
+	raw, err := githubCall(ctx, token, http.MethodGet, "/repos/"+repo+"/git/ref/heads/"+refPath, nil)
 	if err != nil {
 		return "", err
 	}
@@ -860,13 +999,18 @@ func parseGithubFiles(raw string) ([]githubFileEntry, error) {
 		return nil, fmt.Errorf("commit_files takes at most %d files, got %d", githubMaxCommitFiles, len(files))
 	}
 	total := 0
+	seenPaths := make(map[string]bool, len(files))
 	for i, f := range files {
 		if strings.TrimSpace(f.Path) == "" {
 			return nil, fmt.Errorf("githubFiles[%d] has no path", i)
 		}
-		if strings.HasPrefix(f.Path, "/") {
-			return nil, fmt.Errorf("githubFiles[%d] path %q must be relative to the repository root", i, f.Path)
+		if _, err := validateGithubContentPath(f.Path); err != nil {
+			return nil, fmt.Errorf("githubFiles[%d] path %q is invalid: %w", i, f.Path, err)
 		}
+		if seenPaths[f.Path] {
+			return nil, fmt.Errorf("githubFiles contains duplicate path %q", f.Path)
+		}
+		seenPaths[f.Path] = true
 		total += len(f.Content)
 	}
 	if total > githubMaxCommitBytes {

@@ -213,6 +213,7 @@ func InitServer(port int, db *database.DBClient, rdb *redis.Client) {
 
 		// Durable coding agents running in isolated Daytona environments.
 		api.GET("/coding-agents/runtimes", wh.CodingAgentRuntimes)
+		api.POST("/coding-agents/capabilities", wh.CodingAgentCapabilities)
 		api.POST("/coding-agents/codex/connect", wh.StartCodexConnection)
 		api.GET("/coding-agents/auth-attempts/:id", wh.GetCodingAgentAuthAttempt)
 		api.DELETE("/coding-agents/auth-attempts/:id", wh.CancelCodingAgentAuthAttempt)
@@ -221,6 +222,11 @@ func InitServer(port int, db *database.DBClient, rdb *redis.Client) {
 		api.GET("/coding-agent-jobs/:id", wh.GetCodingAgentJob)
 		api.GET("/coding-agent-jobs/:id/events", wh.ListCodingAgentJobEvents)
 		api.POST("/coding-agent-jobs/:id/cancel", wh.CancelCodingAgentJob)
+		api.GET("/coding-agent-tool-calls", wh.ListCodingAgentToolCalls)
+		api.GET("/coding-agent-tool-calls/:id", wh.GetCodingAgentToolCall)
+		api.POST("/coding-agent-tool-calls/:id/approve", wh.ApproveCodingAgentToolCall)
+		api.POST("/coding-agent-tool-calls/:id/reject", wh.RejectCodingAgentToolCall)
+		api.POST("/coding-agent-tool-calls/:id/reconcile", wh.ReconcileCodingAgentToolCall)
 		api.GET("/coding-agent-environments", wh.ListCodingAgentEnvironments)
 		api.DELETE("/coding-agent-environments/:id", wh.ResetCodingAgentEnvironment)
 

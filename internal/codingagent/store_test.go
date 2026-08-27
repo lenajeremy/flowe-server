@@ -25,6 +25,7 @@ func testStore(t *testing.T) (*Store, *gorm.DB) {
 	if err := db.AutoMigrate(
 		&models.CodingAgentCredential{},
 		&models.CodingAgentJob{},
+		&models.CodingAgentToolCall{},
 		&models.CodingAgentEvent{},
 	); err != nil {
 		t.Fatal(err)
@@ -121,6 +122,20 @@ func TestSubmitIsIdempotentAndPinsPolicy(t *testing.T) {
 	}
 }
 
+func TestSubmitRejectsToolGrantWithoutUsableFrozenGraph(t *testing.T) {
+	req := validRequest()
+	req.ToolGrants = []ToolGrant{{NodeID: "github-1", AllowedOperations: []string{"get_issue"}}}
+	req.ToolWorkflow = []byte(`{}`)
+	if err := validateSubmitRequest(req); err == nil || !strings.Contains(err.Error(), "valid graph snapshot") {
+		t.Fatalf("validateSubmitRequest error = %v, want frozen graph rejection", err)
+	}
+
+	req.ToolWorkflow = []byte(`{"nodes":[{"id":"github-1"}],"edges":[]}`)
+	if err := validateSubmitRequest(req); err != nil {
+		t.Fatalf("valid frozen graph rejected: %v", err)
+	}
+}
+
 func TestJobLifecycleProducesOrderedDurableEvents(t *testing.T) {
 	store, db := testStore(t)
 	connectedCredential(t, db)
@@ -168,6 +183,75 @@ func TestJobLifecycleProducesOrderedDurableEvents(t *testing.T) {
 	}
 	if err := store.Complete(context.Background(), job.ID.String(), "worker-1", nil, "again"); !errors.Is(err, ErrJobTerminal) {
 		t.Fatalf("second completion error = %v, want ErrJobTerminal", err)
+	}
+}
+
+func TestBusyWorkspaceRequeueDoesNotConsumeAttempts(t *testing.T) {
+	store, db := testStore(t)
+	connectedCredential(t, db)
+	job, _, err := store.Submit(context.Background(), validRequest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index := 0; index < 5; index++ {
+		claimed, claimErr := store.ClaimNext(context.Background(), "worker-1")
+		if claimErr != nil {
+			t.Fatalf("claim %d: %v", index, claimErr)
+		}
+		if requeueErr := store.RequeueBusy(context.Background(), claimed.ID.String(), "worker-1", time.Second, "workspace busy"); requeueErr != nil {
+			t.Fatalf("busy requeue %d: %v", index, requeueErr)
+		}
+		if err := db.Model(&models.CodingAgentJob{}).Where("id = ?", claimed.ID).Update("available_at", store.now()).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	stored, err := store.GetJob(context.Background(), job.OrganizationID, job.ID.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Status != models.CodingAgentJobPending || stored.AttemptCount != 0 {
+		t.Fatalf("busy workspace consumed retries: status=%s attempts=%d", stored.Status, stored.AttemptCount)
+	}
+}
+
+func TestCancellationRevokesToolTokenAndOpenCallsAtomically(t *testing.T) {
+	store, db := testStore(t)
+	connectedCredential(t, db)
+	job, _, err := store.Submit(context.Background(), validRequest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ClaimNext(context.Background(), "worker-1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.MarkRunning(context.Background(), job.ID.String(), "worker-1", "sandbox"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Model(&models.CodingAgentJob{}).Where("id = ?", job.ID).Update("tool_token_hash", "usable").Error; err != nil {
+		t.Fatal(err)
+	}
+	call := models.CodingAgentToolCall{
+		OrganizationID: job.OrganizationID, UserID: job.UserID, JobID: job.ID.String(),
+		RequestKey: "request", Fingerprint: "fingerprint", NodeID: "github", ToolName: "github",
+		Operation: "create_branch", Effect: "write", Status: models.CodingAgentToolCallPendingApproval,
+		RequestedAt: store.now(), Arguments: models.JSONB(`{}`), EffectiveConfig: models.JSONB(`{}`), Result: models.JSONB(`{}`),
+	}
+	if err := db.Create(&call).Error; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.RequestCancel(context.Background(), job.OrganizationID, job.UserID, job.ID.String()); err != nil {
+		t.Fatal(err)
+	}
+	var storedJob models.CodingAgentJob
+	var storedCall models.CodingAgentToolCall
+	if err := db.First(&storedJob, "id = ?", job.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.First(&storedCall, "id = ?", call.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if storedJob.ToolTokenHash != "" || storedCall.Status != models.CodingAgentToolCallCancelled {
+		t.Fatalf("cancellation left delegated authority: token=%q call=%s", storedJob.ToolTokenHash, storedCall.Status)
 	}
 }
 

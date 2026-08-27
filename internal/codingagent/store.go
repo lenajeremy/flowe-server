@@ -47,6 +47,17 @@ func (s *Store) Submit(ctx context.Context, req SubmitRequest) (*models.CodingAg
 	if err != nil {
 		return nil, false, fmt.Errorf("encode coding agent policy: %w", err)
 	}
+	toolWorkflow := req.ToolWorkflow
+	if len(toolWorkflow) == 0 {
+		toolWorkflow = json.RawMessage(`{}`)
+	}
+	if !json.Valid(toolWorkflow) {
+		return nil, false, fmt.Errorf("%w: coding agent tool workflow is invalid JSON", ErrInvalidRequest)
+	}
+	toolPolicy, err := jsonObject(ToolPolicy{Version: 1, Nodes: req.ToolGrants})
+	if err != nil {
+		return nil, false, fmt.Errorf("encode coding agent tool policy: %w", err)
+	}
 	key := idempotencyKey(req)
 	now := s.now()
 	job := models.CodingAgentJob{
@@ -65,6 +76,8 @@ func (s *Store) Submit(ctx context.Context, req SubmitRequest) (*models.CodingAg
 		MaxAttempts:       3,
 		AvailableAt:       now,
 		Result:            models.JSONB("{}"),
+		ToolWorkflow:      models.JSONB(append([]byte(nil), toolWorkflow...)),
+		ToolPolicy:        models.JSONB(toolPolicy),
 		ToolNodeIDs:       models.JSONB(toolNodeIDsJSON(req.ToolNodeIDs)),
 		NextEventSequence: 1,
 	}
@@ -164,6 +177,33 @@ func validateSubmitRequest(req SubmitRequest) error {
 	if len(req.Task) > 100_000 {
 		return errors.New("coding agent task is too large")
 	}
+	if len(req.ToolWorkflow) > 2<<20 {
+		return errors.New("coding agent tool workflow snapshot is too large")
+	}
+	if len(req.ToolGrants) > 0 || len(req.ToolNodeIDs) > 0 {
+		if len(req.ToolWorkflow) == 0 {
+			return errors.New("coding agent workflow tools require a frozen workflow snapshot")
+		}
+		var snapshot struct {
+			Nodes []json.RawMessage `json:"nodes"`
+			Edges []json.RawMessage `json:"edges"`
+		}
+		if json.Unmarshal(req.ToolWorkflow, &snapshot) != nil || len(snapshot.Nodes) == 0 {
+			return errors.New("coding agent workflow tools require a valid graph snapshot")
+		}
+		if len(snapshot.Nodes) > 500 || len(snapshot.Edges) > 2000 {
+			return errors.New("coding agent workflow tool graph is too large")
+		}
+	}
+	if len(req.ToolGrants) > maxToolGrants || len(req.ToolNodeIDs) > maxToolGrants {
+		return fmt.Errorf("coding agent allows at most %d workflow tool grants", maxToolGrants)
+	}
+	for _, grant := range req.ToolGrants {
+		if strings.TrimSpace(grant.NodeID) == "" || len(grant.NodeID) > 200 ||
+			len(grant.AllowedOperations) > 100 || len(grant.AllowedOverrideFields) > 200 {
+			return errors.New("coding agent tool grant is invalid")
+		}
+	}
 	if req.Policy.WorkspaceMode != WorkspacePersistent && req.Policy.WorkspaceMode != WorkspaceEphemeral {
 		return errors.New("workspace mode must be persistent or ephemeral")
 	}
@@ -191,6 +231,8 @@ func validateSubmitRequest(req SubmitRequest) error {
 	}
 	return nil
 }
+
+const maxToolGrants = 50
 
 func storedConversationKey(req SubmitRequest) string {
 	value := strings.TrimSpace(req.ConversationKey)
@@ -331,6 +373,17 @@ func (s *Store) Heartbeat(ctx context.Context, jobID, workerID string) (bool, er
 // started. It is used for a busy reusable environment and transient sandbox
 // provisioning failures; running jobs are never automatically replayed.
 func (s *Store) Requeue(ctx context.Context, jobID, workerID string, delay time.Duration, reason string) error {
+	return s.requeue(ctx, jobID, workerID, delay, reason, true)
+}
+
+// RequeueBusy delays a job because its persistent workspace is occupied. This
+// is normal queue contention, not an execution attempt, so it must not exhaust
+// startup retries while the earlier job is still working.
+func (s *Store) RequeueBusy(ctx context.Context, jobID, workerID string, delay time.Duration, reason string) error {
+	return s.requeue(ctx, jobID, workerID, delay, reason, false)
+}
+
+func (s *Store) requeue(ctx context.Context, jobID, workerID string, delay time.Duration, reason string, consumeAttempt bool) error {
 	if delay < time.Second {
 		delay = time.Second
 	}
@@ -343,7 +396,7 @@ func (s *Store) Requeue(ctx context.Context, jobID, workerID string, delay time.
 		if job.Status != models.CodingAgentJobClaimed || job.StartedAt != nil {
 			return fmt.Errorf("%w: only an unstarted claimed job can be requeued", ErrInvalidTransition)
 		}
-		if job.AttemptCount >= job.MaxAttempts {
+		if consumeAttempt && job.AttemptCount >= job.MaxAttempts {
 			now := s.now()
 			if err := tx.Model(&job).Updates(map[string]any{
 				"status": models.CodingAgentJobFailed, "completed_at": now,
@@ -355,10 +408,14 @@ func (s *Store) Requeue(ctx context.Context, jobID, workerID string, delay time.
 			return s.appendEventTx(tx, &job, "failed", "Coding agent task exhausted its safe startup retries", nil)
 		}
 		availableAt := s.now().Add(delay)
-		if err := tx.Model(&job).Updates(map[string]any{
+		updates := map[string]any{
 			"status": models.CodingAgentJobPending, "available_at": availableAt,
 			"claimed_at": nil, "heartbeat_at": nil, "claimed_by": "", "last_error": reason,
-		}).Error; err != nil {
+		}
+		if !consumeAttempt {
+			updates["attempt_count"] = gorm.Expr("CASE WHEN attempt_count > 0 THEN attempt_count - 1 ELSE 0 END")
+		}
+		if err := tx.Model(&job).Updates(updates).Error; err != nil {
 			return err
 		}
 		job.Status = models.CodingAgentJobPending
@@ -414,8 +471,11 @@ func (s *Store) ReconcileStale(ctx context.Context, claimedBefore, runningBefore
 			warning := "the worker stopped after execution began; the sandbox may contain partial changes and this task will not be replayed automatically"
 			if err := tx.Model(&job).Updates(map[string]any{
 				"status": models.CodingAgentJobFailed, "completed_at": now,
-				"last_error": warning, "claimed_by": "",
+				"last_error": warning, "claimed_by": "", "tool_token_hash": "",
 			}).Error; err != nil {
+				return err
+			}
+			if err := cancelOpenToolCallsTx(tx, job.ID.String(), now, warning); err != nil {
 				return err
 			}
 			job.Status = models.CodingAgentJobFailed
@@ -453,6 +513,7 @@ func (s *Store) RequestCancel(ctx context.Context, organizationID, userID, jobID
 		if job.Status == models.CodingAgentJobPending {
 			if err := tx.Model(&job).Updates(map[string]any{
 				"status": models.CodingAgentJobCancelled, "cancel_requested_at": now, "completed_at": now,
+				"tool_token_hash": "",
 			}).Error; err != nil {
 				return err
 			}
@@ -462,7 +523,12 @@ func (s *Store) RequestCancel(ctx context.Context, organizationID, userID, jobID
 			return s.appendEventTx(tx, &job, "cancelled", "Coding agent task cancelled before execution", nil)
 		}
 		if job.CancelRequestedAt == nil {
-			if err := tx.Model(&job).Update("cancel_requested_at", now).Error; err != nil {
+			if err := tx.Model(&job).Updates(map[string]any{
+				"cancel_requested_at": now, "tool_token_hash": "",
+			}).Error; err != nil {
+				return err
+			}
+			if err := cancelOpenToolCallsTx(tx, job.ID.String(), now, "coding agent job was cancelled"); err != nil {
 				return err
 			}
 			job.CancelRequestedAt = &now
@@ -501,12 +567,38 @@ func (s *Store) transition(ctx context.Context, jobID, workerID string, target m
 			return fmt.Errorf("%w: %s to %s", ErrInvalidTransition, job.Status, target)
 		}
 		updates["status"] = target
+		if target.Terminal() {
+			updates["tool_token_hash"] = ""
+			if err := cancelOpenToolCallsTx(tx, job.ID.String(), s.now(), "coding agent job finished"); err != nil {
+				return err
+			}
+		}
 		if err := tx.Model(&job).Updates(updates).Error; err != nil {
 			return err
 		}
 		job.Status = target
 		return s.appendEventTx(tx, &job, eventType, message, payload)
 	})
+}
+
+func cancelOpenToolCallsTx(tx *gorm.DB, jobID string, now time.Time, reason string) error {
+	if err := tx.Model(&models.CodingAgentToolCall{}).Where(
+		"job_id = ? AND status IN ?", jobID, []models.CodingAgentToolCallStatus{
+			models.CodingAgentToolCallPendingApproval, models.CodingAgentToolCallApproved,
+		},
+	).Updates(map[string]any{
+		"status": models.CodingAgentToolCallCancelled, "completed_at": now, "last_error": reason,
+	}).Error; err != nil {
+		return err
+	}
+	// An interrupted executing mutation must never be replayed. Its side effect
+	// may have crossed the external boundary even when no response was stored.
+	return tx.Model(&models.CodingAgentToolCall{}).Where(
+		"job_id = ? AND status = ?", jobID, models.CodingAgentToolCallExecuting,
+	).Updates(map[string]any{
+		"status": models.CodingAgentToolCallOutcomeUnknown, "completed_at": now,
+		"last_error": "execution stopped before the external outcome was durably recorded",
+	}).Error
 }
 
 func validTransition(from, to models.CodingAgentJobStatus) bool {

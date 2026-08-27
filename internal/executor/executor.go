@@ -11,6 +11,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"regexp"
 	"strings"
@@ -99,6 +100,16 @@ func workflowNameFromContext(ctx context.Context) string {
 // below RunWorkflow, so the start time travels in context instead of exposing
 // wall-clock milliseconds in an otherwise elapsed-time field.
 type workflowStartedAtCtxKey struct{}
+
+type workflowSnapshotCtxKey struct{}
+
+// workflowSnapshotFromContext returns the exact graph this execution received,
+// including unsaved canvas changes. Coding-agent jobs freeze this value before
+// queueing so their callback authority cannot drift with later edits.
+func workflowSnapshotFromContext(ctx context.Context) (WorkflowAST, bool) {
+	wf, ok := ctx.Value(workflowSnapshotCtxKey{}).(WorkflowAST)
+	return wf, ok
+}
 
 func workflowElapsedMillis(ctx context.Context) int64 {
 	if startedAt, ok := ctx.Value(workflowStartedAtCtxKey{}).(time.Time); ok {
@@ -595,15 +606,10 @@ func runNodeInner(ctx context.Context, node WorkflowASTNode, outputs map[string]
 			// The runtime's own control plane. Without these the agent cannot
 			// start, so they are never the caller's to omit.
 			"openai.com", "*.openai.com", "chatgpt.com", "*.chatgpt.com",
-			// Package managers and toolchains an agent reaches for unprompted.
-			// A restricted agent that cannot fetch a dependency fails at the
-			// task rather than reporting a network problem, so the common ones
-			// are here rather than left for each workflow to rediscover.
+			// npm is the runtime/bootstrap registry. Other ecosystems are not
+			// silently widened in restricted mode; owners add only the registries
+			// their task needs and stay within Daytona's 20-domain ceiling.
 			"registry.npmjs.org",
-			"golang.org", "*.golang.org", "go.dev",
-			"pypi.org", "files.pythonhosted.org",
-			"brew.sh", "*.brew.sh",
-			"archive.ubuntu.com", "security.ubuntu.com",
 		}
 		if repositoryProvider == codingagent.RepositoryGitLab {
 			allowedDomains = append(allowedDomains, "gitlab.com", "*.gitlab.com")
@@ -611,6 +617,21 @@ func runNodeInner(ctx context.Context, node WorkflowASTNode, outputs map[string]
 			allowedDomains = append(allowedDomains, "github.com", "*.github.com", "*.githubusercontent.com")
 		}
 		allowedDomains = append(allowedDomains, d.CodingAgentAllowedDomains...)
+		if len(d.CodingAgentToolGrants) > 0 || len(d.CodingAgentToolNodes) > 0 {
+			if callback, parseErr := url.Parse(codingagent.PublicBaseURL()); parseErr == nil && callback.Hostname() != "" {
+				callbackHost := strings.ToLower(callback.Hostname())
+				found := false
+				for _, domain := range allowedDomains {
+					if strings.EqualFold(domain, callbackHost) {
+						found = true
+						break
+					}
+				}
+				if !found {
+					allowedDomains = append(allowedDomains, callbackHost)
+				}
+			}
+		}
 
 		// Open egress is the default because a coding agent that cannot reach a
 		// package registry or a documentation site fails at the work it exists
@@ -626,10 +647,17 @@ func runNodeInner(ctx context.Context, node WorkflowASTNode, outputs map[string]
 		}
 		task := substituteTemplates(d.CodingAgentTask, outputs)
 		conversationKey := substituteTemplates(d.CodingAgentConversationKey, outputs)
+		var toolWorkflow json.RawMessage
+		if snapshot, ok := workflowSnapshotFromContext(ctx); ok {
+			if raw, marshalErr := json.Marshal(snapshot); marshalErr == nil {
+				toolWorkflow = raw
+			}
+		}
 		jobID, status, result, summary, lastError, err := CodingAgentRun(ctx, codingagent.SubmitRequest{
 			OrganizationID: OrgFromContext(ctx), UserID: ownerID,
 			WorkflowID: workflowIDFromContext(ctx), WorkflowRunID: runID, NodeID: node.ID,
 			ConversationKey: conversationKey, Runtime: runtime, Task: task,
+			ToolWorkflow: toolWorkflow, ToolGrants: d.CodingAgentToolGrants,
 			ToolNodeIDs: d.CodingAgentToolNodes,
 			// The rendered task contains the upstream values it references. Do not
 			// duplicate every upstream output into the durable job record, where it
@@ -1693,6 +1721,7 @@ func extractLoopItems(input, field string) []string {
 func RunWorkflow(ctx context.Context, workflow WorkflowAST, keys APIKeys, runID, ownerID, orgID string, emit EmitFn, runOptions ...RunOptions) {
 	start := time.Now()
 	ctx = context.WithValue(ctx, workflowStartedAtCtxKey{}, start)
+	ctx = context.WithValue(ctx, workflowSnapshotCtxKey{}, workflow)
 	var options RunOptions
 	if len(runOptions) > 0 {
 		options = runOptions[0]

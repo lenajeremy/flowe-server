@@ -101,6 +101,7 @@ func (c *DBClient) Setup() error {
 		&models.CodingAgentJob{},
 		&models.CodingAgentEvent{},
 		&models.CodingAgentArtifact{},
+		&models.CodingAgentToolCall{},
 	); err != nil {
 		return err
 	}

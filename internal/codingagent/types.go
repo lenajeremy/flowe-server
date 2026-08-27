@@ -50,6 +50,21 @@ type ExecutionPolicy struct {
 	AllowWorkspaceWrite bool          `json:"allowWorkspaceWrite"`
 }
 
+// ToolGrant is the exact authority a coding-agent job receives for one
+// workflow node. Both operations and fields are deny-by-default. The grant is
+// frozen into the job together with the graph snapshot, so editing a workflow
+// or expanding the integration catalog cannot broaden an already-running job.
+type ToolGrant struct {
+	NodeID                string   `json:"nodeId"`
+	AllowedOperations     []string `json:"allowedOperations"`
+	AllowedOverrideFields []string `json:"allowedOverrideFields"`
+}
+
+type ToolPolicy struct {
+	Version int         `json:"version"`
+	Nodes   []ToolGrant `json:"nodes"`
+}
+
 type SubmitRequest struct {
 	OrganizationID  string
 	UserID          string
@@ -61,10 +76,13 @@ type SubmitRequest struct {
 	Task            string
 	Input           map[string]any
 	Policy          ExecutionPolicy
-	// ToolNodeIDs are the canvas nodes this job may call back to use. The
-	// grant is resolved against the workflow at call time rather than frozen
-	// here: a node's operations are derived from the catalog, so a copy taken
-	// at submit would drift from it.
+	// ToolWorkflow is the exact graph submitted for this run. ToolGrants is the
+	// exact operation/field policy approved on the canvas. Both are persisted
+	// before queueing and are the only source of authority at callback time.
+	ToolWorkflow json.RawMessage
+	ToolGrants   []ToolGrant
+	// ToolNodeIDs is accepted only for workflows saved by older clients. New
+	// submissions convert it to a pinned, read-only policy against ToolWorkflow.
 	ToolNodeIDs []string
 }
 
@@ -123,6 +141,7 @@ type RuntimeRequest struct {
 	Task             string
 	Model            string
 	WorkingDirectory string
+	BaselineSHA      string
 	AuthBundle       []byte
 	ExternalThreadID string
 	AllowWrite       bool

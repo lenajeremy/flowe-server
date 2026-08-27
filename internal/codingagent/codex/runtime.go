@@ -66,6 +66,12 @@ func (r *Runtime) Run(ctx context.Context, sandbox codingagent.Sandbox, req codi
 	if !strings.HasPrefix(req.WorkingDirectory, "/") || strings.Contains(req.WorkingDirectory, "..") {
 		return result, errors.New("Codex working directory must be an absolute normalized path")
 	}
+	if !regexp.MustCompile(`^[0-9a-fA-F]{40,64}$`).MatchString(req.BaselineSHA) {
+		return result, errors.New("Codex repository baseline is missing or invalid")
+	}
+	if (strings.TrimSpace(req.ToolEndpoint) == "") != (strings.TrimSpace(req.ToolToken) == "") {
+		return result, errors.New("Codex workflow tool endpoint and token must be configured together")
+	}
 
 	// Session state must survive across jobs for `codex exec resume` to work.
 	// Only the short-lived auth/input files are removed; Codex rollouts remain in
@@ -100,7 +106,7 @@ func (r *Runtime) Run(ctx context.Context, sandbox codingagent.Sandbox, req codi
 	}
 
 	prompt := buildPrompt(req.Task)
-	config := []byte("cli_auth_credentials_store = \"file\"\n")
+	config := runtimeConfig(req.ToolEndpoint)
 	// Point Codex at this workflow's own nodes when the job was granted any.
 	// The token travels in the process environment rather than the config file
 	// or the command line: config.toml is uploaded to the workspace, and argv
@@ -111,8 +117,7 @@ func (r *Runtime) Run(ctx context.Context, sandbox codingagent.Sandbox, req codi
 	// a secret placed there is retained by the provider. Only the path travels.
 	commandEnvironment := map[string]string{"CODEX_HOME": secretDir}
 	toolTokenPath := ""
-	if toolServer, ok := mcpServerConfig(req.ToolEndpoint); ok && req.ToolToken != "" {
-		config = append(config, toolServer...)
+	if _, ok := mcpServerConfig(req.ToolEndpoint); ok && req.ToolToken != "" {
 		toolTokenPath = secretDir + "/mcp-token"
 	}
 	for path, file := range map[string]struct {
@@ -189,7 +194,7 @@ func (r *Runtime) Run(ctx context.Context, sandbox codingagent.Sandbox, req codi
 		return result, errors.New("Codex completed without a summary")
 	}
 
-	artifacts, artifactErr := collectGitArtifacts(ctx, sandbox, req.WorkingDirectory)
+	artifacts, artifactErr := collectGitArtifacts(ctx, sandbox, req.WorkingDirectory, req.BaselineSHA)
 	if artifactErr != nil {
 		if emit != nil {
 			emit(codingagent.StreamEvent{Type: "warning", Message: artifactErr.Error()})
@@ -207,6 +212,19 @@ func (r *Runtime) Run(ctx context.Context, sandbox codingagent.Sandbox, req codi
 	return result, nil
 }
 
+func runtimeConfig(toolEndpoint string) []byte {
+	config := []byte(`cli_auth_credentials_store = "file"
+
+[shell_environment_policy]
+inherit = "core"
+exclude = ["FERNARY_MCP_TOKEN"]
+`)
+	if toolServer, ok := mcpServerConfig(toolEndpoint); ok {
+		config = append(config, toolServer...)
+	}
+	return config
+}
+
 func ensureCodexCommand(version string) string {
 	packageName := shellQuote("@openai/codex@" + version)
 	if version == "latest" {
@@ -218,7 +236,7 @@ func ensureCodexCommand(version string) string {
 
 func buildCommand(req codingagent.RuntimeRequest, secretDir, promptPath, schemaPath, resultPath, toolTokenPath string) string {
 	parts := []string{
-		"codex", "--ask-for-approval", "never", "--search", "exec", "--json", "--color", "never", "--ignore-user-config",
+		"codex", "--ask-for-approval", "never", "--search", "exec", "--json", "--color", "never", "--strict-config",
 		"--sandbox", map[bool]string{true: "workspace-write", false: "read-only"}[req.AllowWrite],
 		"--output-schema", shellQuote(schemaPath), "--output-last-message", shellQuote(resultPath),
 		"--cd", shellQuote(req.WorkingDirectory),
@@ -247,7 +265,9 @@ Fernary execution requirements:
 - Never read, print, copy, or expose authentication files, tokens, environment secrets, or files outside the repository.
 - Use live web search when recent or authoritative information would improve the result. Never include repository contents, customer data, credentials, or private identifiers in a search query.
 - Make the requested changes and run the most relevant verification available.
-- Do not push, publish, deploy, open a pull request, or contact external people.
+- Do not use repository credentials or direct shell commands to push, publish, deploy, open a pull request, or contact external people.
+- You may perform explicitly granted external actions only through Fernary workflow tools. Read their saved scope carefully. Writes pause for the workflow owner's approval; explain the exact action and why it is needed in the tool's reason field.
+- If an external action is rejected or its outcome is reported as unknown, do not retry an equivalent action. Report it clearly for human reconciliation.
 - Return the final result using the provided JSON schema.`
 }
 
@@ -413,7 +433,7 @@ func scrubCodexEvent(event map[string]any) map[string]any {
 	return result
 }
 
-func collectGitArtifacts(ctx context.Context, sandbox codingagent.Sandbox, workingDirectory string) ([]codingagent.Artifact, error) {
+func collectGitArtifacts(ctx context.Context, sandbox codingagent.Sandbox, workingDirectory, baselineSHA string) ([]codingagent.Artifact, error) {
 	status, err := sandbox.Run(ctx, codingagent.CommandSpec{
 		Command: "git status --short", WorkingDir: workingDirectory, Timeout: time.Minute,
 	}, nil)
@@ -421,7 +441,7 @@ func collectGitArtifacts(ctx context.Context, sandbox codingagent.Sandbox, worki
 		return nil, errors.New("Codex finished, but Git status could not be collected")
 	}
 	diff, err := sandbox.Run(ctx, codingagent.CommandSpec{
-		Command: "git diff --binary --no-ext-diff HEAD --", WorkingDir: workingDirectory, Timeout: time.Minute,
+		Command: "git diff --binary --no-ext-diff " + shellQuote(baselineSHA) + " --", WorkingDir: workingDirectory, Timeout: time.Minute,
 	}, nil)
 	if err != nil || diff.ExitCode != 0 {
 		return nil, errors.New("Codex finished, but its patch could not be collected")
@@ -447,7 +467,7 @@ func collectGitArtifacts(ctx context.Context, sandbox codingagent.Sandbox, worki
 	// an empty-content artifact of their own kind, since "no content" and
 	// "removed" are different instructions to whatever applies this.
 	tracked, trackedErr := sandbox.Run(ctx, codingagent.CommandSpec{
-		Command: "git diff --name-status -z --no-renames HEAD --", WorkingDir: workingDirectory, Timeout: time.Minute,
+		Command: "git diff --name-status -z --no-renames " + shellQuote(baselineSHA) + " --", WorkingDir: workingDirectory, Timeout: time.Minute,
 	}, nil)
 	if trackedErr != nil || tracked.ExitCode != 0 {
 		return artifacts, errors.New("Codex finished, but its changed files could not be collected")

@@ -167,6 +167,42 @@ func (r *Reservation) Context(ctx context.Context, runID string) context.Context
 	})
 }
 
+// ContextForRunContinuation restores billing attribution for work that belongs
+// to a durable run but arrives on a later request, such as a coding-agent MCP
+// callback. Prefer the run's still-active hold; otherwise require current
+// balance before allowing new billable work.
+func (g *Gate) ContextForRunContinuation(ctx context.Context, orgID, userID, runID string) (context.Context, error) {
+	if orgID == "" || userID == "" || runID == "" {
+		return ctx, errors.New("durable run billing identity is incomplete")
+	}
+	org, err := g.org(orgID)
+	if err != nil {
+		return ctx, err
+	}
+	if err := g.CheckMemberAllowance(org, userID); err != nil {
+		return ctx, err
+	}
+	var hold models.CreditHold
+	err = g.db.WithContext(ctx).Where(
+		"organization_id = ? AND run_id = ? AND status = ? AND expires_at > ?",
+		orgID, runID, models.HoldActive, time.Now().UTC(),
+	).Order("created_at DESC").First(&hold).Error
+	if err == nil {
+		return telemetry.WithBilling(ctx, telemetry.BillingContext{
+			OrgID: orgID, UserID: userID, Plan: string(EffectivePlan(org)),
+			HoldID: hold.ID.String(), RunID: runID,
+		}), nil
+	}
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return ctx, err
+	}
+	plan, err := g.CheckBalance(orgID, userID)
+	if err != nil {
+		return ctx, err
+	}
+	return telemetry.WithBilling(ctx, BillingContextFor(orgID, userID, plan)), nil
+}
+
 // Finish releases a run's unused reservation. Always call it, on every exit path
 // including failure — an abandoned hold strands credits the customer paid for, and
 // the sweeper only catches it hours later.

@@ -23,7 +23,7 @@ func serviceTestDB(t *testing.T) *gorm.DB {
 	if err := db.AutoMigrate(
 		&models.OrgMember{}, &models.CodingAgentCredential{},
 		&models.CodingAgentAuthAttempt{}, &models.CodingAgentEnvironment{},
-		&models.CodingAgentSession{}, &models.CodingAgentJob{},
+		&models.CodingAgentSession{}, &models.CodingAgentJob{}, &models.CodingAgentToolCall{},
 		&models.CodingAgentEvent{}, &models.CodingAgentArtifact{},
 	); err != nil {
 		t.Fatal(err)

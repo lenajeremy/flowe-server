@@ -97,19 +97,19 @@ func TestBuilderCatalogIncludesCodingAgentSafetyBoundary(t *testing.T) {
 		"codingAgentAllowedDomains", "codingAgentAllowWrite",
 		// The agent capability layer reads its operations from this catalog, so
 		// a field missing here is a capability no generated workflow can use.
-		"codingAgentToolNodes", "codingAgentNetworkAccess",
+		"codingAgentToolGrants", "codingAgentNetworkAccess",
 	} {
 		if _, exists := fields[field]; !exists {
 			t.Errorf("codingAgent catalog omitted %s", field)
 		}
 	}
 	notes, _ := entry["notes"].(string)
-	if !strings.Contains(notes, "Never put tokens") || !strings.Contains(notes, "cannot push") {
+	if !strings.Contains(notes, "Never put tokens") || !strings.Contains(notes, "owner approval") {
 		t.Fatalf("codingAgent catalog omitted safety guidance: %q", notes)
 	}
 	// The boundary is not "it can do nothing" but "it acts only through granted
 	// nodes". Stating only the first half reads as a node that cannot ship work.
-	if !strings.Contains(notes, "codingAgentToolNodes") {
+	if !strings.Contains(notes, "codingAgentToolGrants") {
 		t.Errorf("codingAgent notes describe the limit without the route through it: %q", notes)
 	}
 }
@@ -129,6 +129,7 @@ func TestWorkflowBuilderPromptKeepsBehaviourNotCapabilities(t *testing.T) {
 		"Call list_integration_resources for github or gitlab",
 		"Never tell the user what a node can or cannot do from memory",
 		"Default to the least authority the task needs",
+		"keep those tool-only nodes disconnected",
 	} {
 		if !strings.Contains(workflowSystemPrompt, want) {
 			t.Errorf("workflow builder prompt is missing the behaviour rule %q", want)

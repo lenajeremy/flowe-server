@@ -365,7 +365,26 @@ func removeMemberAndRevokeAgentAuthority(db *gorm.DB, orgID, target string) erro
 		if err := tx.Model(&models.CodingAgentJob{}).
 			Where("organization_id = ? AND user_id = ? AND status IN ?", orgID, target, []models.CodingAgentJobStatus{
 				models.CodingAgentJobClaimed, models.CodingAgentJobRunning,
-			}).Update("cancel_requested_at", now).Error; err != nil {
+			}).Updates(map[string]any{"cancel_requested_at": now, "tool_token_hash": ""}).Error; err != nil {
+			return err
+		}
+		jobIDs := tx.Model(&models.CodingAgentJob{}).Select("id").Where("organization_id = ? AND user_id = ?", orgID, target)
+		if err := tx.Model(&models.CodingAgentToolCall{}).Where(
+			"job_id IN (?) AND status IN ?", jobIDs, []models.CodingAgentToolCallStatus{
+				models.CodingAgentToolCallPendingApproval, models.CodingAgentToolCallApproved,
+			},
+		).Updates(map[string]any{
+			"status": models.CodingAgentToolCallCancelled, "completed_at": now,
+			"last_error": "organization membership was removed",
+		}).Error; err != nil {
+			return err
+		}
+		if err := tx.Model(&models.CodingAgentToolCall{}).Where(
+			"job_id IN (?) AND status = ?", jobIDs, models.CodingAgentToolCallExecuting,
+		).Updates(map[string]any{
+			"status": models.CodingAgentToolCallOutcomeUnknown, "completed_at": now,
+			"last_error": "membership was removed while the external outcome was unresolved",
+		}).Error; err != nil {
 			return err
 		}
 		return tenancy.RemoveMemberWithinTransaction(tx, orgID, target)

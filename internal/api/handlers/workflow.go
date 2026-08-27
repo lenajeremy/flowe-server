@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -174,16 +175,28 @@ func (h *WorkflowHandler) run(c *gin.Context, nodeOnly bool) {
 	var bufferedEvents []executor.ExecutionEvent
 
 	runID := run.ID.String()
+	streamOpen := true
 	emit := func(event executor.ExecutionEvent) {
 		// Publish to hub so /runs/:id/stream subscribers (e.g. the approval page)
 		// receive events in real time.
 		hub.Global.Publish(runID, event)
 
-		data, _ := json.Marshal(event)
-		fmt.Fprintf(c.Writer, "data: %s\n\n", data)
-		flusher.Flush()
-
 		bufferedEvents = append(bufferedEvents, event)
+		// Persist incrementally: a process interruption should leave a useful
+		// timeline instead of an empty running row. Execution itself is detached
+		// from the browser connection below.
+		if eventsJSON, marshalErr := json.Marshal(bufferedEvents); marshalErr == nil {
+			_ = h.db.DB.WithContext(context.Background()).Model(run).Update("events", models.JSONB(eventsJSON)).Error
+		}
+
+		if streamOpen {
+			data, _ := json.Marshal(event)
+			if _, writeErr := fmt.Fprintf(c.Writer, "data: %s\n\n", data); writeErr != nil {
+				streamOpen = false
+			} else {
+				flusher.Flush()
+			}
+		}
 
 		if event.Type == executor.EventWorkflowError {
 			finalStatus = models.RunStatusError
@@ -198,7 +211,10 @@ func (h *WorkflowHandler) run(c *gin.Context, nodeOnly bool) {
 		Jina:      config.GetEnv("JINA_API_KEY"),
 	}
 
-	runCtx := executor.WithWorkflowID(c.Request.Context(), req.WorkflowID)
+	// A browser navigation is not authority to cancel a durable workflow. The
+	// coding job and all downstream nodes continue, while events remain
+	// available through /runs/:id/stream and the persisted run record.
+	runCtx := executor.WithWorkflowID(context.WithoutCancel(c.Request.Context()), req.WorkflowID)
 	// Carries the plan (for the per-call token ceiling) and the hold, so each spend
 	// settles against this run's reservation rather than only the balance.
 	runCtx = res.Context(runCtx, runID)

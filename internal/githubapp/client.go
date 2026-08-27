@@ -63,6 +63,25 @@ func (i Installation) MissingWebhookRequirements() []string {
 	return missingWebhookRequirements(i.Permissions, i.Events)
 }
 
+// MissingCodingAgentWriteRequirements reports permissions needed by the
+// GitHub operations a coding agent may be explicitly granted. It is separate
+// from webhook readiness: trigger-only installations should remain read-only.
+func (i Installation) MissingCodingAgentWriteRequirements() []string {
+	missing := make([]string, 0)
+	for _, requirement := range []struct{ key, label string }{
+		{key: "contents", label: "Contents permission (read and write)"},
+		{key: "issues", label: "Issues permission (read and write)"},
+		{key: "pull_requests", label: "Pull requests permission (read and write)"},
+		{key: "actions", label: "Actions permission (read and write)"},
+	} {
+		level := strings.ToLower(strings.TrimSpace(i.Permissions[requirement.key]))
+		if level != "write" && level != "admin" {
+			missing = append(missing, requirement.label)
+		}
+	}
+	return missing
+}
+
 type Repository struct {
 	ID       int64  `json:"id"`
 	FullName string `json:"full_name"`

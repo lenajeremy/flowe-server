@@ -8,6 +8,8 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"net"
+	"net/url"
 	"os"
 	"strings"
 
@@ -48,8 +50,12 @@ func HashToolToken(token string) string {
 // toolGrantCount reports how many nodes this job was granted. Zero means the
 // runtime should configure no tool server at all.
 func (s *Service) toolGrantCount(job *models.CodingAgentJob) int {
-	if job == nil || len(job.ToolNodeIDs) == 0 {
+	if job == nil {
 		return 0
+	}
+	var policy ToolPolicy
+	if len(job.ToolPolicy) > 0 && json.Unmarshal(job.ToolPolicy, &policy) == nil && len(policy.Nodes) > 0 {
+		return len(policy.Nodes)
 	}
 	var ids []string
 	if err := json.Unmarshal(job.ToolNodeIDs, &ids); err != nil {
@@ -63,7 +69,16 @@ func (s *Service) mintToolToken(ctx context.Context, job *models.CodingAgentJob)
 	if base == "" {
 		return "", "", errors.New("no publicly reachable server address is configured (set PUBLIC_BASE_URL)")
 	}
-	if !strings.HasPrefix(base, "https://") && !strings.Contains(base, "localhost") && !strings.Contains(base, "127.0.0.1") {
+	parsed, err := url.Parse(base)
+	if err != nil || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return "", "", errors.New("the public server address is invalid")
+	}
+	hostname := strings.ToLower(parsed.Hostname())
+	loopback := hostname == "localhost"
+	if address := net.ParseIP(hostname); address != nil {
+		loopback = address.IsLoopback()
+	}
+	if parsed.Scheme != "https" && !(parsed.Scheme == "http" && loopback) {
 		// The token is a bearer credential; sending it in clear over the public
 		// internet would hand the job's authority to anyone on the path.
 		return "", "", errors.New("the public server address must be https")

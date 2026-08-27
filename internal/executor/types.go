@@ -1,5 +1,7 @@
 package executor
 
+import "workflow-ai/server/internal/codingagent"
+
 // NodeType mirrors the TypeScript NodeType union.
 type NodeType string
 
@@ -102,6 +104,10 @@ type FlowNodeData struct {
 	// agent with no tools, which is the right default for something running
 	// attacker-influenceable text next to a shell.
 	CodingAgentToolNodes []string `json:"codingAgentToolNodes,omitempty"`
+	// CodingAgentToolGrants is the operation- and field-level authority granted
+	// to this node. codingAgentToolNodes is retained only to safely migrate old
+	// workflows to pinned, read-only grants.
+	CodingAgentToolGrants []codingagent.ToolGrant `json:"codingAgentToolGrants,omitempty"`
 
 	// integrationTrigger — what this node is subscribed to. The authoritative
 	// copy lives in the integration_triggers row (that is what the provider was

@@ -408,7 +408,7 @@ func (s *Service) processJob(workerCtx context.Context, workerID string, job *mo
 
 	environment, sandbox, err := s.acquireEnvironment(workerCtx, job, policy)
 	if errors.Is(err, ErrEnvironmentBusy) {
-		_ = s.store.Requeue(workerCtx, job.ID.String(), workerID, 3*time.Second, err.Error())
+		_ = s.store.RequeueBusy(workerCtx, job.ID.String(), workerID, 10*time.Second, err.Error())
 		return
 	}
 	if err != nil {
@@ -436,7 +436,8 @@ func (s *Service) processJob(workerCtx context.Context, workerID string, job *mo
 		return
 	}
 
-	if err := s.prepareRepository(workerCtx, sandbox, job, policy); err != nil {
+	workingDirectory, baselineSHA, err := s.prepareRepository(workerCtx, sandbox, job, policy)
+	if err != nil {
 		s.releaseEnvironment(workerCtx, environment, job, policy, false, err.Error())
 		released = true
 		_ = s.store.Requeue(workerCtx, job.ID.String(), workerID, 10*time.Second, err.Error())
@@ -458,7 +459,10 @@ func (s *Service) processJob(workerCtx context.Context, workerID string, job *mo
 		return
 	}
 	if err := s.db.WithContext(workerCtx).Model(&models.CodingAgentJob{}).Where("id = ?", job.ID).
-		Updates(map[string]any{"environment_id": environment.ID.String(), "session_id": session.ID.String()}).Error; err != nil {
+		Updates(map[string]any{
+			"environment_id": environment.ID.String(), "session_id": session.ID.String(),
+			"repository_base_sha": baselineSHA, "working_directory": workingDirectory,
+		}).Error; err != nil {
 		s.releaseEnvironment(workerCtx, environment, job, policy, false, err.Error())
 		released = true
 		s.failClaimed(workerCtx, workerID, job, err)
@@ -466,6 +470,8 @@ func (s *Service) processJob(workerCtx context.Context, workerID string, job *mo
 	}
 	job.EnvironmentID = environment.ID.String()
 	job.SessionID = session.ID.String()
+	job.RepositoryBaseSHA = baselineSHA
+	job.WorkingDirectory = workingDirectory
 	jobCtx, cancel := context.WithTimeout(workerCtx, time.Duration(policy.MaxDurationSeconds)*time.Second)
 	s.jobMu.Lock()
 	s.jobCancels[job.ID.String()] = cancel
@@ -503,16 +509,20 @@ func (s *Service) processJob(workerCtx context.Context, workerID string, job *mo
 	if grants := s.toolGrantCount(job); grants > 0 {
 		endpoint, token, mintErr := s.mintToolToken(jobCtx, job)
 		if mintErr != nil {
-			slog.WarnContext(jobCtx, "coding agent tools unavailable for this job",
-				"job_id", job.ID.String(), "error", mintErr)
-		} else {
-			toolEndpoint, toolToken = endpoint, token
-			defer s.revokeToolToken(job)
+			cancel()
+			s.releaseEnvironment(context.Background(), environment, job, policy, true, mintErr.Error())
+			released = true
+			_ = s.store.Fail(context.Background(), job.ID.String(), workerID, models.CodingAgentJobFailed,
+				fmt.Errorf("workflow tools could not be configured: %w", mintErr))
+			return
 		}
+		toolEndpoint, toolToken = endpoint, token
+		defer s.revokeToolToken(job)
 	}
 
 	result, runErr := runtime.Run(jobCtx, sandbox, RuntimeRequest{
-		JobID: job.ID.String(), SessionID: session.ID.String(), Task: job.Task, Model: policy.Model, WorkingDirectory: "/workspace/repo",
+		JobID: job.ID.String(), SessionID: session.ID.String(), Task: job.Task, Model: policy.Model,
+		WorkingDirectory: workingDirectory, BaselineSHA: baselineSHA,
 		AuthBundle: []byte(credential.AuthBundle), ExternalThreadID: session.ExternalThreadID,
 		AllowWrite: policy.AllowWorkspaceWrite, Timeout: time.Duration(policy.MaxDurationSeconds) * time.Second,
 		ToolEndpoint: toolEndpoint, ToolToken: toolToken,
@@ -653,7 +663,10 @@ func (s *Service) persistCredentialRefresh(ctx context.Context, credential *mode
 func (s *Service) ensureSession(ctx context.Context, job *models.CodingAgentJob, environment *models.CodingAgentEnvironment, policy ExecutionPolicy) (*models.CodingAgentSession, error) {
 	keySource := strings.TrimSpace(job.ConversationKey)
 	if keySource == "" {
-		keySource = job.WorkflowID + "\x00" + job.NodeID
+		// An omitted key means a fresh conversation. Continuity is an explicit
+		// product choice; silently resuming every run of a persistent node leaks
+		// old task context into unrelated workflow executions.
+		keySource = job.ID.String()
 	}
 	if policy.WorkspaceMode == WorkspaceEphemeral {
 		keySource += "\x00" + job.ID.String()
@@ -752,7 +765,11 @@ func (s *Service) finalizeRuntimeSuccess(ctx context.Context, job *models.Coding
 			if err := tx.Model(&locked).Updates(map[string]any{
 				"status": models.CodingAgentJobSucceeded, "result": models.JSONB(payload),
 				"summary": result.Summary, "completed_at": now, "heartbeat_at": now, "last_error": "",
+				"tool_token_hash": "",
 			}).Error; err != nil {
+				return err
+			}
+			if err := cancelOpenToolCallsTx(tx, job.ID.String(), now, "coding agent job finished"); err != nil {
 				return err
 			}
 			locked.Status = models.CodingAgentJobSucceeded

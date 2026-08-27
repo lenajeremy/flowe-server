@@ -7,6 +7,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"workflow-ai/server/internal/codingagent"
 	"workflow-ai/server/internal/database"
@@ -30,7 +31,7 @@ func codingAgentMCPDB(t *testing.T) *gorm.DB {
 	if err != nil {
 		t.Fatalf("open database: %v", err)
 	}
-	if err := db.AutoMigrate(&models.Workflow{}, &models.CodingAgentJob{}); err != nil {
+	if err := db.AutoMigrate(&models.Workflow{}, &models.OrgMember{}, &models.CodingAgentJob{}, &models.CodingAgentEvent{}, &models.CodingAgentToolCall{}); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
 	return db
@@ -41,12 +42,17 @@ func codingAgentMCPDB(t *testing.T) *gorm.DB {
 func seedToolJob(t *testing.T, db *gorm.DB, grantedNodeIDs []string) (*WorkflowHandler, string) {
 	t.Helper()
 	org, user := uuid.NewString(), uuid.NewString()
+	if err := db.Create(&models.OrgMember{OrganizationID: org, UserID: user, Role: "owner"}).Error; err != nil {
+		t.Fatalf("create membership: %v", err)
+	}
 
-	nodes, _ := json.Marshal([]executor.WorkflowASTNode{{
+	ast := executor.WorkflowAST{Version: "1.0", Name: "Fix bugs", Nodes: []executor.WorkflowASTNode{{
 		ID: "gh", Data: executor.FlowNodeData{
-			NodeType: executor.NodeTypeGithub, Label: "GitHub", GithubRepo: "acme/widget",
+			NodeType: executor.NodeTypeGithub, Label: "GitHub", IntegrationOp: "list_pull_requests", GithubRepo: "acme/widget",
 		},
-	}})
+	}}}
+	nodes, _ := json.Marshal(ast.Nodes)
+	toolWorkflow, _ := json.Marshal(ast)
 	workflow := models.Workflow{
 		BaseModel: models.BaseModel{ID: uuid.New()}, UserID: user, OrganizationID: org,
 		Name: "Fix bugs", Nodes: models.JSONB(nodes), Edges: models.JSONB([]byte("[]")),
@@ -57,11 +63,14 @@ func seedToolJob(t *testing.T, db *gorm.DB, grantedNodeIDs []string) (*WorkflowH
 
 	token := "tok-" + uuid.NewString()
 	granted, _ := json.Marshal(grantedNodeIDs)
+	now := time.Now().UTC()
 	job := models.CodingAgentJob{
 		BaseModel: models.BaseModel{ID: uuid.New()}, OrganizationID: org, UserID: user,
 		WorkflowID: workflow.ID.String(), NodeID: "agent", IdempotencyKey: uuid.NewString(),
 		Runtime: "codex", Task: "fix it", Status: models.CodingAgentJobRunning,
+		HeartbeatAt:   &now,
 		ToolTokenHash: codingagent.HashToolToken(token),
+		ToolWorkflow:  models.JSONB(toolWorkflow),
 		ToolNodeIDs:   models.JSONB(granted),
 	}
 	if err := db.Create(&job).Error; err != nil {
@@ -70,6 +79,7 @@ func seedToolJob(t *testing.T, db *gorm.DB, grantedNodeIDs []string) (*WorkflowH
 	t.Cleanup(func() {
 		db.Unscoped().Delete(&job)
 		db.Unscoped().Delete(&workflow)
+		db.Unscoped().Where("organization_id = ? AND user_id = ?", org, user).Delete(&models.OrgMember{})
 	})
 	return &WorkflowHandler{db: &database.DBClient{DB: db}}, token
 }
