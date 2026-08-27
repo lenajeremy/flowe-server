@@ -54,7 +54,11 @@ func (s *Store) Submit(ctx context.Context, req SubmitRequest) (*models.CodingAg
 	if !json.Valid(toolWorkflow) {
 		return nil, false, fmt.Errorf("%w: coding agent tool workflow is invalid JSON", ErrInvalidRequest)
 	}
-	toolPolicy, err := jsonObject(ToolPolicy{Version: 1, Nodes: req.ToolGrants})
+	storedToolPolicy := ToolPolicy{Version: 2, Integrations: req.ToolGrants}
+	if legacyToolGrants(req.ToolGrants) {
+		storedToolPolicy = ToolPolicy{Version: 1, Nodes: req.ToolGrants}
+	}
+	toolPolicy, err := jsonObject(storedToolPolicy)
 	if err != nil {
 		return nil, false, fmt.Errorf("encode coding agent tool policy: %w", err)
 	}
@@ -156,6 +160,18 @@ func (s *Store) Submit(ctx context.Context, req SubmitRequest) (*models.CodingAg
 	return &job, created, nil
 }
 
+func legacyToolGrants(grants []ToolGrant) bool {
+	if len(grants) == 0 {
+		return false
+	}
+	for _, grant := range grants {
+		if strings.TrimSpace(grant.NodeID) == "" || strings.TrimSpace(grant.NodeType) != "" || len(grant.NodeIDs) > 0 {
+			return false
+		}
+	}
+	return true
+}
+
 func validateSubmitRequest(req SubmitRequest) error {
 	for field, value := range map[string]string{
 		"organization": req.OrganizationID,
@@ -199,9 +215,16 @@ func validateSubmitRequest(req SubmitRequest) error {
 		return fmt.Errorf("coding agent allows at most %d workflow tool grants", maxToolGrants)
 	}
 	for _, grant := range req.ToolGrants {
-		if strings.TrimSpace(grant.NodeID) == "" || len(grant.NodeID) > 200 ||
+		legacy := strings.TrimSpace(grant.NodeID) != ""
+		if (!legacy && (strings.TrimSpace(grant.NodeType) == "" || len(grant.NodeIDs) == 0)) ||
+			len(grant.NodeType) > 100 || len(grant.NodeID) > 200 || len(grant.NodeIDs) > maxToolGrants ||
 			len(grant.AllowedOperations) > 100 || len(grant.AllowedOverrideFields) > 200 {
 			return errors.New("coding agent tool grant is invalid")
+		}
+		for _, nodeID := range grant.NodeIDs {
+			if strings.TrimSpace(nodeID) == "" || len(nodeID) > 200 {
+				return errors.New("coding agent tool grant resource is invalid")
+			}
 		}
 	}
 	if req.Policy.WorkspaceMode != WorkspacePersistent && req.Policy.WorkspaceMode != WorkspaceEphemeral {

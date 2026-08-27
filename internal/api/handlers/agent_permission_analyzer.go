@@ -25,10 +25,11 @@ type analyzeAgentDeploymentRequest struct {
 }
 
 type agentAIAnalysis struct {
-	Goal     string           `json:"goal"`
-	Summary  string           `json:"summary"`
-	Nodes    []AgentNodeGrant `json:"nodes"`
-	Warnings []string         `json:"warnings"`
+	Goal         string                  `json:"goal"`
+	Summary      string                  `json:"summary"`
+	Integrations []AgentIntegrationGrant `json:"integrations"`
+	Nodes        []AgentNodeGrant        `json:"nodes,omitempty"`
+	Warnings     []string                `json:"warnings"`
 }
 
 // AnalyzeAgentDeployment asks a second model pass to infer the deployment goal
@@ -83,9 +84,9 @@ func (h *WorkflowHandler) AnalyzeAgentDeployment(c *gin.Context) {
 		c.JSON(http.StatusBadGateway, gin.H{"error": "permission analyzer returned invalid JSON", "detail": err.Error()})
 		return
 	}
-	proposed := AgentCapabilityPolicy{Version: agentCapabilityPolicyVersion, Nodes: ai.Nodes}
+	proposed := AgentCapabilityPolicy{Version: agentCapabilityPolicyVersion, Integrations: ai.Integrations, Nodes: ai.Nodes}
 	policy, normalizationWarnings := normalizeAgentCapabilityPolicy(ast, proposed)
-	if len(policy.Nodes) == 0 {
+	if len(policy.Integrations) == 0 {
 		policy = defaultSafeAgentPolicy(ast)
 		normalizationWarnings = append(normalizationWarnings,
 			"The AI recommendation contained no valid grants, so Fernary used the closed read-only fallback.")
@@ -137,7 +138,7 @@ func (h *WorkflowHandler) agentPermissionAnalysisPrompt(workflow *models.Workflo
 			ID: node.ID, Label: node.Data.Label, Type: node.Data.NodeType, SavedDefaults: defaults,
 		})
 	}
-	capabilityJSON, _ := json.Marshal(agentWorkflowCapabilities(ast))
+	capabilityJSON, _ := json.Marshal(agentIntegrationCapabilities(ast))
 	nodeJSON, _ := json.Marshal(nodes)
 	conversationJSON, _ := json.Marshal(h.agentBuilderConversation(workflow.ID.String()))
 	return fmt.Sprintf(`Analyze this saved workflow as a team-chat agent deployment.
@@ -145,10 +146,11 @@ func (h *WorkflowHandler) agentPermissionAnalysisPrompt(workflow *models.Workflo
 Infer the deployment goal yourself from the workflow and Builder conversation. Do not ask for or assume a separately entered deployment goal.
 
 Return exactly one JSON object with this shape:
-{"goal":"one sentence","summary":"one plain-language sentence","nodes":[{"nodeId":"exact id","allowedOperations":["exact operation"],"allowedOverrideFields":["exact field"]}],"warnings":["plain-language warning"]}
+{"goal":"one sentence","summary":"one plain-language sentence","integrations":[{"nodeType":"exact type","nodeIds":["exact backing node id"],"allowedOperations":["exact operation"],"allowedOverrideFields":["exact field"]}],"warnings":["plain-language warning"]}
 
 Security rules:
-- Choose only node, operation, and field identifiers present in the capability catalog below.
+- Choose only integration types, backing node ids, operations, and fields present in the capability catalog below.
+- Emit at most one permission grant per integration type. Use nodeIds only to restrict that grant to the configured resources needed for the inferred goal.
 - Start narrow. Prefer read operations. Do not grant an operation merely because the node type supports it.
 - Saved settings are pinned unless the inferred goal clearly requires changing a field per request.
 - Do not select credential, secret, token, authorization-header, password, or environment-value fields.
@@ -302,17 +304,18 @@ func decodeAgentAnalysisJSON(raw string, out *agentAIAnalysis) error {
 }
 
 func agentPolicyRiskWarnings(ast executor.WorkflowAST, policy AgentCapabilityPolicy) []string {
-	byNode := map[string]executor.WorkflowASTNode{}
-	for _, node := range ast.Nodes {
-		byNode[node.ID] = node
+	normalized, _ := normalizeAgentCapabilityPolicy(ast, policy)
+	capabilities := map[executor.NodeType]AgentIntegrationCapability{}
+	for _, capability := range agentIntegrationCapabilities(ast) {
+		capabilities[capability.NodeType] = capability
 	}
 	warnings := []string{}
-	for _, grant := range policy.Nodes {
-		node, exists := byNode[grant.NodeID]
+	for _, grant := range normalized.Integrations {
+		capability, exists := capabilities[grant.NodeType]
 		if !exists {
 			continue
 		}
-		capability, _ := agentNodeCapability(node)
+		label := capability.Label
 		operations := map[string]AgentOperationCapability{}
 		for _, operation := range capability.Operations {
 			operations[operation.ID] = operation
@@ -320,13 +323,13 @@ func agentPolicyRiskWarnings(ast executor.WorkflowAST, policy AgentCapabilityPol
 		for _, operationID := range grant.AllowedOperations {
 			operation := operations[operationID]
 			if operation.Sensitive {
-				warnings = append(warnings, fmt.Sprintf("%s can read sensitive configuration through %s; verify that teammates should see those results.", node.Data.Label, strings.ToLower(operation.Label)))
+				warnings = append(warnings, fmt.Sprintf("%s can read sensitive configuration through %s; verify that teammates should see those results.", label, strings.ToLower(operation.Label)))
 			}
 			if strings.HasPrefix(strings.ToLower(operationID), "search") {
-				warnings = append(warnings, fmt.Sprintf("%s can search beyond some saved resource boundaries; verify that this is intentional.", node.Data.Label))
+				warnings = append(warnings, fmt.Sprintf("%s can search beyond some saved resource boundaries; verify that this is intentional.", label))
 			}
 			if operation.Effect == AgentEffectDestructive {
-				warnings = append(warnings, fmt.Sprintf("%s includes %s. Every call will require requester approval.", node.Data.Label, strings.ToLower(operation.Label)))
+				warnings = append(warnings, fmt.Sprintf("%s includes %s. Every call will require requester approval.", label, strings.ToLower(operation.Label)))
 			}
 		}
 		for _, field := range grant.AllowedOverrideFields {
@@ -334,7 +337,7 @@ func agentPolicyRiskWarnings(ast executor.WorkflowAST, policy AgentCapabilityPol
 			if field == "url" || strings.HasSuffix(lower, "repo") || strings.HasSuffix(lower, "id") ||
 				strings.Contains(lower, "channel") || strings.Contains(lower, "folder") || strings.Contains(lower, "project") ||
 				strings.Contains(lower, "account") || strings.Contains(lower, "workspace") {
-				warnings = append(warnings, fmt.Sprintf("%s may choose a different target through %s.", node.Data.Label, field))
+				warnings = append(warnings, fmt.Sprintf("%s may choose a different target through %s.", label, field))
 			}
 		}
 	}

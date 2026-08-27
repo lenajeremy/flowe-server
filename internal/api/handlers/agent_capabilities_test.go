@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"workflow-ai/server/internal/executor"
@@ -10,14 +11,14 @@ import (
 func TestAgentPolicyJSONUsesArraysForEmptyCollections(t *testing.T) {
 	t.Parallel()
 
-	policy := AgentCapabilityPolicy{Version: agentCapabilityPolicyVersion, Nodes: []AgentNodeGrant{{
-		NodeID: "github-1", AllowedOperations: []string{"list_issues"},
+	policy := AgentCapabilityPolicy{Version: agentCapabilityPolicyVersion, Integrations: []AgentIntegrationGrant{{
+		NodeType: executor.NodeTypeGithub, NodeIDs: []string{"github-1"}, AllowedOperations: []string{"list_issues"},
 	}}}
 	raw, err := json.Marshal(policy)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := string(raw), `{"version":1,"nodes":[{"nodeId":"github-1","allowedOperations":["list_issues"],"allowedOverrideFields":[]}]}`; got != want {
+	if got, want := string(raw), `{"version":2,"integrations":[{"nodeType":"github","nodeIds":["github-1"],"allowedOperations":["list_issues"],"allowedOverrideFields":[]}]}`; got != want {
 		t.Fatalf("policy JSON = %s, want %s", got, want)
 	}
 
@@ -25,7 +26,7 @@ func TestAgentPolicyJSONUsesArraysForEmptyCollections(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := string(raw), `{"version":1,"nodes":[]}`; got != want {
+	if got, want := string(raw), `{"version":2,"integrations":[]}`; got != want {
 		t.Fatalf("closed policy JSON = %s, want %s", got, want)
 	}
 }
@@ -42,10 +43,76 @@ func githubAgentNode() executor.WorkflowASTNode {
 	}
 }
 
+func githubPullRequestAgentNode() executor.WorkflowASTNode {
+	node := githubAgentNode()
+	node.ID, node.Data.Label = "github-2", "Release pull requests"
+	node.Data.IntegrationOp, node.Data.GithubRepo = "create_pull_request", "fernary/release"
+	return node
+}
+
+func TestAgentCapabilitiesCollapseSameTypeAndKeepResourceBoundaries(t *testing.T) {
+	t.Parallel()
+	ast := executor.WorkflowAST{Nodes: []executor.WorkflowASTNode{githubAgentNode(), githubPullRequestAgentNode()}}
+	capabilities := agentIntegrationCapabilities(ast)
+	if len(capabilities) != 1 || len(capabilities[0].Resources) != 2 {
+		t.Fatalf("grouped capabilities = %#v", capabilities)
+	}
+	policy, warnings := normalizeAgentCapabilityPolicy(ast, AgentCapabilityPolicy{Version: 2, Integrations: []AgentIntegrationGrant{{
+		NodeType: executor.NodeTypeGithub, NodeIDs: []string{"github-2"}, AllowedOperations: []string{"create_pull_request"}, AllowedOverrideFields: []string{"githubTitle"},
+	}}})
+	if len(warnings) != 0 || len(policy.Integrations) != 1 {
+		t.Fatalf("policy = %#v, warnings = %#v", policy, warnings)
+	}
+	if _, ok := agentPolicyGrant(policy, githubAgentNode()); ok {
+		t.Fatal("grant escaped its resource allowlist")
+	}
+	if _, ok := agentPolicyGrant(policy, githubPullRequestAgentNode()); !ok {
+		t.Fatal("selected resource was not authorized")
+	}
+}
+
+func TestLegacyNodeGrantsMigrateWithoutUnioningAuthority(t *testing.T) {
+	t.Parallel()
+	ast := executor.WorkflowAST{Nodes: []executor.WorkflowASTNode{githubAgentNode(), githubPullRequestAgentNode()}}
+	policy, _ := normalizeAgentCapabilityPolicy(ast, AgentCapabilityPolicy{Version: 1, Nodes: []AgentNodeGrant{
+		{NodeID: "github-1", AllowedOperations: []string{"list_issues", "create_pull_request"}},
+		{NodeID: "github-2", AllowedOperations: []string{"create_pull_request"}},
+	}})
+	if len(policy.Integrations) != 1 || len(policy.Integrations[0].AllowedOperations) != 1 || policy.Integrations[0].AllowedOperations[0] != "create_pull_request" {
+		t.Fatalf("legacy permissions were broadened: %#v", policy)
+	}
+}
+
+func TestLegacyNodeGrantsWithNoCommonAuthorityMigrateClosed(t *testing.T) {
+	t.Parallel()
+	ast := executor.WorkflowAST{Nodes: []executor.WorkflowASTNode{githubAgentNode(), githubPullRequestAgentNode()}}
+	policy, warnings := normalizeAgentCapabilityPolicy(ast, AgentCapabilityPolicy{Version: 1, Nodes: []AgentNodeGrant{
+		{NodeID: "github-1", AllowedOperations: []string{"list_issues"}},
+		{NodeID: "github-2", AllowedOperations: []string{"create_pull_request"}},
+	}})
+	if len(policy.Integrations) != 0 {
+		t.Fatalf("disjoint legacy permissions were unioned: %#v", policy)
+	}
+	if len(warnings) == 0 {
+		t.Fatal("closed legacy migration did not explain why access was removed")
+	}
+}
+
+func TestCapabilityResourceSummaryDoesNotExposeOperationPayloads(t *testing.T) {
+	t.Parallel()
+	summary := agentResourcePinnedSettings(executor.FlowNodeData{NodeType: executor.NodeTypeSupabase, SupabaseProjectRef: "project-ref", SupabaseSql: "select * from private_customer_data", SupabaseRollbackSql: "drop table customers"})
+	if !strings.Contains(summary, "project-ref") {
+		t.Fatalf("resource boundary omitted: %q", summary)
+	}
+	if strings.Contains(summary, "private_customer_data") || strings.Contains(summary, "drop table") {
+		t.Fatalf("operation payload exposed: %q", summary)
+	}
+}
+
 func TestDefaultAgentPolicyIsReadOnlyAndExcludesSearch(t *testing.T) {
 	t.Parallel()
 	policy := defaultSafeAgentPolicy(executor.WorkflowAST{Nodes: []executor.WorkflowASTNode{githubAgentNode()}})
-	grant, ok := agentPolicyGrant(policy, "github-1")
+	grant, ok := agentPolicyGrant(policy, githubAgentNode())
 	if !ok {
 		t.Fatal("read-capable GitHub node was omitted")
 	}
@@ -155,7 +222,7 @@ func TestNormalizeAgentPolicyDropsUnknownAndSecretCapabilities(t *testing.T) {
 			AllowedOverrideFields: []string{"githubRepo", "integrationToken", "githubRepo", "madeUp"},
 		}},
 	})
-	grant, ok := agentPolicyGrant(policy, "github-1")
+	grant, ok := agentPolicyGrant(policy, githubAgentNode())
 	if !ok {
 		t.Fatal("valid node grant was dropped")
 	}

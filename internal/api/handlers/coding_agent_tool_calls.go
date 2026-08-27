@@ -29,7 +29,7 @@ func (h *WorkflowHandler) CodingAgentCapabilities(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{
-		"capabilities":  agentWorkflowCapabilities(ast),
+		"capabilities":  agentIntegrationCapabilities(ast),
 		"defaultPolicy": defaultSafeAgentPolicy(ast),
 	})
 }

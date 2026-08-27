@@ -170,7 +170,7 @@ func (h *WorkflowHandler) toolsForJob(job *models.CodingAgentJob) ([]agentTool, 
 			return nil, executor.WorkflowAST{}, AgentCapabilityPolicy{}, fmt.Errorf("this job's frozen tool policy is invalid")
 		}
 	}
-	if len(policy.Nodes) == 0 {
+	if len(policy.Integrations) == 0 && len(policy.Nodes) == 0 {
 		var granted []string
 		_ = json.Unmarshal(job.ToolNodeIDs, &granted)
 		policy = safeLegacyCodingAgentPolicy(ast, granted)
@@ -186,9 +186,15 @@ func safeLegacyCodingAgentPolicy(ast executor.WorkflowAST, nodeIDs []string) Age
 	}
 	policy := defaultSafeAgentPolicy(ast)
 	filtered := AgentCapabilityPolicy{Version: agentCapabilityPolicyVersion}
-	for _, grant := range policy.Nodes {
-		if allowed[grant.NodeID] {
-			filtered.Nodes = append(filtered.Nodes, grant)
+	for _, grant := range policy.Integrations {
+		selected := AgentIntegrationGrant{NodeType: grant.NodeType, AllowedOperations: grant.AllowedOperations, AllowedOverrideFields: grant.AllowedOverrideFields}
+		for _, nodeID := range grant.NodeIDs {
+			if allowed[nodeID] {
+				selected.NodeIDs = append(selected.NodeIDs, nodeID)
+			}
+		}
+		if len(selected.NodeIDs) > 0 {
+			filtered.Integrations = append(filtered.Integrations, selected)
 		}
 	}
 	return filtered

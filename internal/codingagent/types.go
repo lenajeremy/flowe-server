@@ -51,18 +51,21 @@ type ExecutionPolicy struct {
 }
 
 // ToolGrant is the exact authority a coding-agent job receives for one
-// workflow node. Both operations and fields are deny-by-default. The grant is
+// integration type and a closed list of backing workflow nodes. All dimensions are deny-by-default. The grant is
 // frozen into the job together with the graph snapshot, so editing a workflow
 // or expanding the integration catalog cannot broaden an already-running job.
 type ToolGrant struct {
-	NodeID                string   `json:"nodeId"`
+	NodeType              string   `json:"nodeType,omitempty"`
+	NodeIDs               []string `json:"nodeIds,omitempty"`
+	NodeID                string   `json:"nodeId,omitempty"`
 	AllowedOperations     []string `json:"allowedOperations"`
 	AllowedOverrideFields []string `json:"allowedOverrideFields"`
 }
 
 type ToolPolicy struct {
-	Version int         `json:"version"`
-	Nodes   []ToolGrant `json:"nodes"`
+	Version      int         `json:"version"`
+	Integrations []ToolGrant `json:"integrations,omitempty"`
+	Nodes        []ToolGrant `json:"nodes,omitempty"`
 }
 
 type SubmitRequest struct {

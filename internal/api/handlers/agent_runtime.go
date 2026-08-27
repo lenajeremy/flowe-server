@@ -118,7 +118,12 @@ func (h *WorkflowHandler) RunAgentTurn(ctx context.Context, input AgentTurnInput
 	_ = json.Unmarshal(input.Session.Messages, &history)
 	history = boundedAgentHistory(history, input.HistoryLimit, input.HistoryTextCap)
 
-	tools := buildAgentToolsWithPolicy(input.Workflow, input.Policy)
+	policy := input.Policy
+	if policy != nil {
+		normalized, _ := normalizeAgentCapabilityPolicy(input.Workflow, *policy)
+		policy = &normalized
+	}
+	tools := buildAgentToolsWithPolicy(input.Workflow, policy)
 	runID := "chat-" + input.Session.ID.String()
 	keys := executor.APIKeys{
 		Anthropic: config.GetEnv("ANTHROPIC_API_KEY"),
@@ -150,8 +155,8 @@ func (h *WorkflowHandler) RunAgentTurn(ctx context.Context, input AgentTurnInput
 
 		overrides, _ := rawInput.(map[string]any)
 		op := agentEffectiveOp(tool.Node.Data, overrides)
-		if input.Policy != nil {
-			authorized, err := authorizeAgentToolCall(*input.Policy, tool.Node, rawInput)
+		if policy != nil {
+			authorized, err := authorizeAgentToolCall(*policy, tool.Node, rawInput)
 			if err != nil {
 				record := agentToolCallRecord{
 					Node: tool.Node.Data.Label, NodeID: tool.Node.ID, Op: op, Status: "error",

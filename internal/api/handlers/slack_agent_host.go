@@ -1585,6 +1585,7 @@ func (h *WorkflowHandler) executeSlackAgentApproval(ctx context.Context, approva
 		}
 		return err
 	}
+	policy, _ = normalizeAgentCapabilityPolicy(ast, policy)
 	authorizationInput := map[string]any{"reason": approval.Reason}
 	for field, value := range overrides {
 		authorizationInput[field] = value

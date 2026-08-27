@@ -249,10 +249,10 @@ func TestVercelNodeIsOfferedToHostedAgentsWithReadsUngated(t *testing.T) {
 	// The default policy is what an owner gets before touching anything, so the
 	// reads must land in it and nothing else may.
 	policy := defaultSafeAgentPolicy(ast)
-	if len(policy.Nodes) != 1 {
-		t.Fatalf("default policy granted %d nodes, want 1", len(policy.Nodes))
+	if len(policy.Integrations) != 1 {
+		t.Fatalf("default policy granted %d integrations, want 1", len(policy.Integrations))
 	}
-	for _, granted := range policy.Nodes[0].AllowedOperations {
+	for _, granted := range policy.Integrations[0].AllowedOperations {
 		if classifyAgentOperation(granted) != AgentEffectRead {
 			t.Errorf("default policy grants %q, which is not a read", granted)
 		}

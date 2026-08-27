@@ -72,15 +72,15 @@ type createAgentDeploymentRequest struct {
 }
 
 type agentDeploymentResponse struct {
-	Deployment   agentDeploymentView         `json:"deployment"`
-	Targets      []agentDeploymentTargetView `json:"targets"`
-	Review       AgentPermissionSummary      `json:"review"`
-	Capabilities []AgentNodeCapability       `json:"capabilities,omitempty"`
-	Workflow     agentDeploymentWorkflowView `json:"workflow"`
-	Deployer     agentDeploymentDeployerView `json:"deployer"`
-	Host         *agentDeploymentHostView    `json:"host,omitempty"`
-	Health       agentDeploymentHealthView   `json:"health"`
-	CanManage    bool                        `json:"can_manage"`
+	Deployment   agentDeploymentView          `json:"deployment"`
+	Targets      []agentDeploymentTargetView  `json:"targets"`
+	Review       AgentPermissionSummary       `json:"review"`
+	Capabilities []AgentIntegrationCapability `json:"capabilities,omitempty"`
+	Workflow     agentDeploymentWorkflowView  `json:"workflow"`
+	Deployer     agentDeploymentDeployerView  `json:"deployer"`
+	Host         *agentDeploymentHostView     `json:"host,omitempty"`
+	Health       agentDeploymentHealthView    `json:"health"`
+	CanManage    bool                         `json:"can_manage"`
 }
 
 // agentDeploymentView deliberately excludes the stored node and edge snapshot.
@@ -163,9 +163,10 @@ func agentSnapshotHash(name string, nodes, edges []byte) string {
 }
 
 func summarizeAgentPolicy(ast executor.WorkflowAST, policy AgentCapabilityPolicy, goal string, warnings []string) AgentPermissionSummary {
-	byNode := map[string]executor.WorkflowASTNode{}
-	for _, node := range ast.Nodes {
-		byNode[node.ID] = node
+	normalized, _ := normalizeAgentCapabilityPolicy(ast, policy)
+	capabilities := map[executor.NodeType]AgentIntegrationCapability{}
+	for _, capability := range agentIntegrationCapabilities(ast) {
+		capabilities[capability.NodeType] = capability
 	}
 	summary := AgentPermissionSummary{
 		Goal:                    strings.TrimSpace(goal),
@@ -174,14 +175,22 @@ func summarizeAgentPolicy(ast executor.WorkflowAST, policy AgentCapabilityPolicy
 		FixedSettings:           []string{},
 		Warnings:                append([]string{}, warnings...),
 	}
-	for _, grant := range policy.Nodes {
-		node, exists := byNode[grant.NodeID]
+	for _, grant := range normalized.Integrations {
+		capability, exists := capabilities[grant.NodeType]
 		if !exists {
 			continue
 		}
-		capability, exists := agentNodeCapability(node)
-		if !exists {
-			continue
+		resourceLabels := []string{}
+		for _, resource := range capability.Resources {
+			if stringSliceContains(grant.NodeIDs, resource.NodeID) {
+				resourceLabels = append(resourceLabels, resource.Label)
+			}
+		}
+		permissionLabel := capability.Label
+		if len(resourceLabels) > 1 {
+			permissionLabel += " (" + strings.Join(resourceLabels, ", ") + ")"
+		} else if len(resourceLabels) == 1 && resourceLabels[0] != capability.Label {
+			permissionLabel += " (" + resourceLabels[0] + ")"
 		}
 		operations := map[string]AgentOperationCapability{}
 		for _, operation := range capability.Operations {
@@ -192,7 +201,7 @@ func summarizeAgentPolicy(ast executor.WorkflowAST, policy AgentCapabilityPolicy
 			if !exists {
 				continue
 			}
-			line := fmt.Sprintf("%s can %s", node.Data.Label, strings.ToLower(operation.Label))
+			line := fmt.Sprintf("%s can %s", permissionLabel, strings.ToLower(operation.Label))
 			if operation.Effect == AgentEffectRead {
 				summary.CanRead = append(summary.CanRead, line)
 			} else {
@@ -201,14 +210,14 @@ func summarizeAgentPolicy(ast executor.WorkflowAST, policy AgentCapabilityPolicy
 		}
 		if len(grant.AllowedOverrideFields) == 0 {
 			summary.FixedSettings = append(summary.FixedSettings,
-				fmt.Sprintf("%s uses its deployed settings exactly", node.Data.Label))
+				fmt.Sprintf("%s uses its deployed resource settings exactly", permissionLabel))
 		} else {
 			fieldLabels := make([]string, 0, len(grant.AllowedOverrideFields))
 			for _, field := range grant.AllowedOverrideFields {
 				fieldLabels = append(fieldLabels, humanizeAgentField(field))
 			}
 			summary.FixedSettings = append(summary.FixedSettings,
-				fmt.Sprintf("%s stays fixed except: %s", node.Data.Label, strings.Join(fieldLabels, ", ")))
+				fmt.Sprintf("%s stays fixed except: %s", permissionLabel, strings.Join(fieldLabels, ", ")))
 		}
 	}
 	sort.Strings(summary.CanRead)
@@ -246,7 +255,7 @@ func (h *WorkflowHandler) AgentDeploymentCapabilities(c *gin.Context) {
 	}
 	policy := defaultSafeAgentPolicy(ast)
 	c.JSON(http.StatusOK, gin.H{
-		"capabilities":  agentWorkflowCapabilities(ast),
+		"capabilities":  agentIntegrationCapabilities(ast),
 		"defaultPolicy": policy,
 		"review":        summarizeAgentPolicy(ast, policy, "", nil),
 	})
@@ -299,7 +308,7 @@ func (h *WorkflowHandler) CreateAgentDeployment(c *gin.Context) {
 		return
 	}
 	policy, warnings := normalizeAgentCapabilityPolicy(ast, request.Policy)
-	if len(policy.Nodes) == 0 {
+	if len(policy.Integrations) == 0 {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "deployment must expose at least one valid read or approval-gated operation", "warnings": warnings})
 		return
 	}
@@ -519,7 +528,7 @@ func (h *WorkflowHandler) buildAgentDeploymentResponses(c *gin.Context, deployme
 	actorIsAdmin := tenancy.CanManageMembers(h.db.DB, organizationID, actorID)
 	for i := range deployments {
 		deployment := &deployments[i]
-		policy := AgentCapabilityPolicy{Version: agentCapabilityPolicyVersion, Nodes: []AgentNodeGrant{}}
+		policy := AgentCapabilityPolicy{Version: agentCapabilityPolicyVersion, Integrations: []AgentIntegrationGrant{}}
 		var ast executor.WorkflowAST
 		ast.Name = deployment.SnapshotName
 		decodeError := ""
@@ -536,6 +545,11 @@ func (h *WorkflowHandler) buildAgentDeploymentResponses(c *gin.Context, deployme
 		_ = json.Unmarshal(deployment.PermissionAnalysis, &analysis)
 		goal, _ := analysis["goal"].(string)
 		warnings := stringValues(analysis["warnings"])
+		if decodeError == "" {
+			normalized, migrationWarnings := normalizeAgentCapabilityPolicy(ast, policy)
+			policy = normalized
+			warnings = uniqueStrings(append(warnings, migrationWarnings...))
+		}
 
 		deploymentTargets := targetsByDeployment[deployment.ID.String()]
 		targetViews := make([]agentDeploymentTargetView, 0, len(deploymentTargets))
@@ -583,7 +597,7 @@ func (h *WorkflowHandler) buildAgentDeploymentResponses(c *gin.Context, deployme
 			CanManage: actorID == deployment.DeployedByUserID || actorIsAdmin,
 		}
 		if includeCapabilities && decodeError == "" {
-			response.Capabilities = agentWorkflowCapabilities(ast)
+			response.Capabilities = agentIntegrationCapabilities(ast)
 		}
 		responses = append(responses, response)
 	}
@@ -761,7 +775,7 @@ func (h *WorkflowHandler) PatchAgentDeployment(c *gin.Context) {
 			return
 		}
 		normalized, warnings := normalizeAgentCapabilityPolicy(ast, *request.Policy)
-		if len(normalized.Nodes) == 0 {
+		if len(normalized.Integrations) == 0 {
 			c.JSON(http.StatusBadRequest, gin.H{
 				"error": "an agent must retain at least one valid operation", "warnings": warnings,
 			})
