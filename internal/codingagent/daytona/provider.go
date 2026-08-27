@@ -206,7 +206,8 @@ func (s *sandbox) Run(ctx context.Context, spec codingagent.CommandSpec, emit fu
 	}
 	defer func() { _ = deleteSession() }()
 
-	command := composeCommand(spec.WorkingDir, spec.Environment, spec.Command)
+	completionPath := "/tmp/.fernary-command-exit-" + uuid.NewString()
+	command := wrapCommandWithCompletionMarker(composeCommand(spec.WorkingDir, spec.Environment, spec.Command), completionPath)
 	started, err := s.sandbox.Process.ExecuteSessionCommand(runCtx, sessionID, command, true, true)
 	if err != nil {
 		return codingagent.CommandResult{}, fmt.Errorf("start Daytona command: %w", err)
@@ -215,22 +216,30 @@ func (s *sandbox) Run(ctx context.Context, spec codingagent.CommandSpec, emit fu
 	if !ok || commandID == "" {
 		return codingagent.CommandResult{}, errors.New("Daytona command did not return an execution ID")
 	}
+	defer func() {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cleanupCancel()
+		_ = s.sandbox.FileSystem.DeleteFile(cleanupCtx, completionPath, false)
+	}()
 	if emit != nil {
 		emit(codingagent.StreamEvent{Type: "execution_started", Payload: map[string]any{"executionId": commandID}})
 	}
 
-	stdout := make(chan string, 64)
-	stderr := make(chan string, 64)
-	streamErr := make(chan error, 1)
-	go func() {
-		streamErr <- s.sandbox.Process.GetSessionCommandLogsStream(runCtx, sessionID, commandID, stdout, stderr)
-	}()
-
 	var stdoutBuffer, stderrBuffer cappedBuffer
 	stdoutBuffer.limit = 2 << 20
 	stderrBuffer.limit = 2 << 20
-	streamDone := streamErr
-	for stdout != nil || stderr != nil {
+	var previousStdout, previousStderr string
+	streamCtx, cancelStream := context.WithCancel(runCtx)
+	defer cancelStream()
+	stdout := make(chan string, 64)
+	stderr := make(chan string, 64)
+	streamDone := make(chan error, 1)
+	go func() {
+		streamDone <- s.sandbox.Process.GetSessionCommandLogsStream(streamCtx, sessionID, commandID, stdout, stderr)
+	}()
+	poll := time.NewTicker(750 * time.Millisecond)
+	defer poll.Stop()
+	for {
 		select {
 		case <-runCtx.Done():
 			if err := deleteSession(); err != nil {
@@ -243,17 +252,13 @@ func (s *sandbox) Run(ctx context.Context, spec codingagent.CommandSpec, emit fu
 				}
 			}
 			return codingagent.CommandResult{ExecutionID: commandID}, runCtx.Err()
-		case err := <-streamDone:
-			streamDone = nil
-			if err != nil {
-				return codingagent.CommandResult{ExecutionID: commandID, Stdout: stdoutBuffer.String(), Stderr: stderrBuffer.String()}, fmt.Errorf("stream Daytona command: %w", err)
-			}
 		case chunk, open := <-stdout:
 			if !open {
 				stdout = nil
 				continue
 			}
 			stdoutBuffer.WriteString(chunk)
+			previousStdout = stdoutBuffer.String()
 			if emit != nil {
 				emit(codingagent.StreamEvent{Type: "stdout", Message: chunk})
 			}
@@ -263,30 +268,68 @@ func (s *sandbox) Run(ctx context.Context, spec codingagent.CommandSpec, emit fu
 				continue
 			}
 			stderrBuffer.WriteString(chunk)
+			previousStderr = stderrBuffer.String()
 			if emit != nil {
 				emit(codingagent.StreamEvent{Type: "stderr", Message: chunk})
 			}
+		case <-streamDone:
+			// The status endpoint below is authoritative. A WebSocket ending (or
+			// failing) early only disables live output; it cannot resolve a command.
+			streamDone = nil
+		case <-poll.C:
+			status, err := s.sandbox.Process.GetSessionCommand(runCtx, sessionID, commandID)
+			if err != nil {
+				return codingagent.CommandResult{ExecutionID: commandID, Stdout: stdoutBuffer.String(), Stderr: stderrBuffer.String()}, fmt.Errorf("read Daytona command status: %w", err)
+			}
+			exitCode, complete := numericInt(status["exitCode"])
+			if !complete {
+				if marker, markerErr := s.sandbox.FileSystem.DownloadFile(runCtx, completionPath, nil); markerErr == nil {
+					exitCode, complete = numericInt(strings.TrimSpace(string(marker)))
+				}
+			}
+			if !complete {
+				continue
+			}
+			cancelStream()
+			logsCtx, logsCancel := context.WithTimeout(runCtx, 5*time.Second)
+			logs, logsErr := s.sandbox.Process.GetSessionCommandLogs(logsCtx, sessionID, commandID)
+			logsCancel()
+			if logsErr == nil {
+				updateLogSnapshot(&stdoutBuffer, &previousStdout, logs.GetStdout(), "stdout", emit)
+				updateLogSnapshot(&stderrBuffer, &previousStderr, logs.GetStderr(), "stderr", emit)
+			}
+			return codingagent.CommandResult{
+				ExecutionID: commandID,
+				ExitCode:    exitCode,
+				Stdout:      stdoutBuffer.String(),
+				Stderr:      stderrBuffer.String(),
+			}, nil
 		}
 	}
-	if streamDone != nil {
-		if err := <-streamDone; err != nil {
-			return codingagent.CommandResult{ExecutionID: commandID, Stdout: stdoutBuffer.String(), Stderr: stderrBuffer.String()}, fmt.Errorf("stream Daytona command: %w", err)
-		}
+}
+
+func wrapCommandWithCompletionMarker(command, completionPath string) string {
+	return "set +e; ( " + command + " ); fernary_exit=$?; printf '%s' \"$fernary_exit\" > " +
+		shellQuote(completionPath) + "; exit \"$fernary_exit\""
+}
+
+// Daytona's follow WebSocket can remain open after a command is terminal.
+// Polling authoritative log snapshots and status prevents a completed external
+// action from being mistaken for a timeout while retaining incremental events.
+func updateLogSnapshot(buffer *cappedBuffer, previous *string, snapshot, eventType string, emit func(codingagent.StreamEvent)) {
+	if snapshot == *previous {
+		return
 	}
-	status, err := s.sandbox.Process.GetSessionCommand(runCtx, sessionID, commandID)
-	if err != nil {
-		return codingagent.CommandResult{ExecutionID: commandID, Stdout: stdoutBuffer.String(), Stderr: stderrBuffer.String()}, fmt.Errorf("read Daytona command status: %w", err)
+	delta := snapshot
+	if strings.HasPrefix(snapshot, *previous) {
+		delta = snapshot[len(*previous):]
 	}
-	exitCode, ok := numericInt(status["exitCode"])
-	if !ok {
-		return codingagent.CommandResult{ExecutionID: commandID, Stdout: stdoutBuffer.String(), Stderr: stderrBuffer.String()}, errors.New("Daytona command ended without an exit code")
+	*previous = snapshot
+	buffer.Buffer.Reset()
+	buffer.WriteString(snapshot)
+	if emit != nil && delta != "" {
+		emit(codingagent.StreamEvent{Type: eventType, Message: delta})
 	}
-	return codingagent.CommandResult{
-		ExecutionID: commandID,
-		ExitCode:    exitCode,
-		Stdout:      stdoutBuffer.String(),
-		Stderr:      stderrBuffer.String(),
-	}, nil
 }
 
 // Daytona process session metadata includes the rendered command. Credentials

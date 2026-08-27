@@ -47,15 +47,20 @@ func HashToolToken(token string) string {
 	return hex.EncodeToString(digest[:])
 }
 
-// toolGrantCount reports how many nodes this job was granted. Zero means the
-// runtime should configure no tool server at all.
+// toolGrantCount reports how many integration or legacy node grants this job
+// received. Zero means the runtime should configure no tool server at all.
 func (s *Service) toolGrantCount(job *models.CodingAgentJob) int {
 	if job == nil {
 		return 0
 	}
 	var policy ToolPolicy
-	if len(job.ToolPolicy) > 0 && json.Unmarshal(job.ToolPolicy, &policy) == nil && len(policy.Nodes) > 0 {
-		return len(policy.Nodes)
+	if len(job.ToolPolicy) > 0 && json.Unmarshal(job.ToolPolicy, &policy) == nil {
+		if len(policy.Integrations) > 0 {
+			return len(policy.Integrations)
+		}
+		if len(policy.Nodes) > 0 {
+			return len(policy.Nodes)
+		}
 	}
 	var ids []string
 	if err := json.Unmarshal(job.ToolNodeIDs, &ids); err != nil {

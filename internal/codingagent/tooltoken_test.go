@@ -2,8 +2,11 @@ package codingagent
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
+
+	"workflow-ai/server/internal/database/models"
 )
 
 func TestMintToolTokenRequiresSecureParsedCallbackURL(t *testing.T) {
@@ -27,5 +30,23 @@ func TestMintToolTokenRequiresSecureParsedCallbackURL(t *testing.T) {
 	}
 	if endpoint != "https://fernary.example"+ToolCallbackPath || token == "" {
 		t.Fatalf("endpoint=%q tokenPresent=%t", endpoint, token != "")
+	}
+}
+
+func TestToolGrantCountSupportsIntegrationAndLegacyPolicies(t *testing.T) {
+	service := &Service{}
+	for name, policy := range map[string]ToolPolicy{
+		"integration": {Version: 2, Integrations: []ToolGrant{{NodeType: "gitlab", NodeIDs: []string{"branch", "commit", "mr"}}}},
+		"legacy":      {Version: 1, Nodes: []ToolGrant{{NodeID: "gitlab-mr"}}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			encoded, err := json.Marshal(policy)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := service.toolGrantCount(&models.CodingAgentJob{ToolPolicy: models.JSONB(encoded)}); got != 1 {
+				t.Fatalf("tool grant count = %d, want 1", got)
+			}
+		})
 	}
 }

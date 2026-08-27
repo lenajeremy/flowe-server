@@ -6,10 +6,11 @@
 # On a network-restricted Daytona tier that is a dependency you cannot widen
 # from the sandbox, so the tools an agent needs are baked in here instead.
 #
-# Build and register:
-#   daytona snapshot create fernary-coding-agent \
-#     --dockerfile ./sandbox/Dockerfile --cpu 2 --memory 4
-# Then set DAYTONA_CODING_AGENT_SNAPSHOT=fernary-coding-agent.
+# Build and register with a new immutable name for every toolchain change:
+#   daytona snapshot create fernary-coding-agent-v1-codex-0-149-1 \
+#     --dockerfile ./sandbox/Dockerfile --cpu 2 --memory 4 --disk 10
+# Then set DAYTONA_CODING_AGENT_SNAPSHOT to that exact snapshot name. Never
+# replace an existing name: the snapshot name is part of the workspace key.
 #
 # Tags are explicit throughout: Daytona rejects `latest`, `lts` and `stable`.
 
@@ -25,7 +26,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates curl wget git jq ripgrep unzip zip tar gzip xz-utils \
       build-essential pkg-config \
       python3 python3-pip python3-venv \
-      openssh-client gnupg less vim-tiny nano procps file sudo \
+      openssh-client gnupg less vim-tiny nano procps file tmux zsh \
     && rm -rf /var/lib/apt/lists/*
 
 # Node, because the Codex CLI is an npm package. NodeSource rather than the
@@ -50,35 +51,31 @@ RUN arch="$(dpkg --print-architecture)" \
     && curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-${arch}.tar.gz" -o /tmp/go.tgz \
     && tar -C /usr/local -xzf /tmp/go.tgz \
     && rm /tmp/go.tgz
-ENV PATH="/usr/local/go/bin:/root/go/bin:${PATH}" \
-    GOPATH="/root/go"
+ENV PATH="/usr/local/go/bin:${PATH}"
 
-# Homebrew refuses to run as root, so it is installed under its own account and
-# that account is given passwordless sudo. An agent running as root reaches it
-# with `sudo -u linuxbrew -i brew ...`; a sandbox that runs unprivileged picks
-# it up from PATH directly.
-RUN useradd -m -s /bin/bash linuxbrew \
-    && echo 'linuxbrew ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/linuxbrew \
-    && chmod 0440 /etc/sudoers.d/linuxbrew
+# The runtime user owns the workspace and Homebrew prefix but has no sudo
+# authority. A coding task can install project dependencies without being able
+# to mutate the base operating system or the globally pinned toolchain.
+RUN useradd -m -s /bin/zsh linuxbrew \
+    && mkdir -p /workspace /home/linuxbrew/go /home/linuxbrew/.cache \
+    && chown -R linuxbrew:linuxbrew /workspace /home/linuxbrew
 USER linuxbrew
+ENV HOME="/home/linuxbrew" \
+    USER="linuxbrew" \
+    GOPATH="/home/linuxbrew/go" \
+    PATH="/usr/local/go/bin:/home/linuxbrew/go/bin:/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin:${PATH}"
 RUN NONINTERACTIVE=1 /bin/bash -c \
       "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-USER root
-ENV PATH="/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin:${PATH}"
-# Written into the brew account's own profile as well as the system one:
-# `sudo -u linuxbrew -i` starts a login shell that reads ~/.profile and
-# ~/.bashrc, and Ubuntu's defaults do not reach /etc/bash.bashrc from there.
 RUN BREW_ENV='eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"' \
-    && echo "$BREW_ENV" >> /etc/bash.bashrc \
-    && echo "$BREW_ENV" >> /etc/profile.d/homebrew.sh \
     && echo "$BREW_ENV" >> /home/linuxbrew/.bashrc \
-    && echo "$BREW_ENV" >> /home/linuxbrew/.profile \
-    && chown linuxbrew:linuxbrew /home/linuxbrew/.bashrc /home/linuxbrew/.profile
+    && echo "$BREW_ENV" >> /home/linuxbrew/.zshrc \
+    && echo "$BREW_ENV" >> /home/linuxbrew/.profile
 
 WORKDIR /workspace
 
 # Fail the build rather than the first agent run if anything is missing.
-RUN git --version && curl --version >/dev/null && python3 --version \
-    && node --version && codex --version && go version \
-    && /home/linuxbrew/.linuxbrew/bin/brew --version \
-    && sudo -u linuxbrew -i brew --version
+RUN test "$(id -u)" -ne 0 && test -w /workspace
+RUN command -v sh >/dev/null && bash --version >/dev/null && zsh --version && git --version \
+    && curl --version >/dev/null && python3 --version && go version \
+    && node --version && npm --version && tmux -V \
+    && codex --version && brew --version

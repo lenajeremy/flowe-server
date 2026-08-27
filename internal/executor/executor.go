@@ -1721,11 +1721,16 @@ func extractLoopItems(input, field string) []string {
 func RunWorkflow(ctx context.Context, workflow WorkflowAST, keys APIKeys, runID, ownerID, orgID string, emit EmitFn, runOptions ...RunOptions) {
 	start := time.Now()
 	ctx = context.WithValue(ctx, workflowStartedAtCtxKey{}, start)
-	ctx = context.WithValue(ctx, workflowSnapshotCtxKey{}, workflow)
 	var options RunOptions
 	if len(runOptions) > 0 {
 		options = runOptions[0]
 	}
+	toolSnapshot := workflow
+	if options.ToolWorkflow != nil {
+		toolSnapshot = *options.ToolWorkflow
+	}
+	ctx = context.WithValue(ctx, workflowSnapshotCtxKey{}, toolSnapshot)
+	workflow = workflowWithoutCodingAgentTools(workflow, options.OnlyNodeID)
 
 	trigger := triggerFromContext(ctx)
 	ctx, span := telemetry.Tracer.Start(ctx, "workflow.run",
@@ -2134,6 +2139,51 @@ func RunWorkflow(ctx context.Context, workflow WorkflowAST, keys APIKeys, runID,
 	}
 	emitSkips()
 	emit(mk(EventWorkflowCompleted, nil, nil, "Workflow completed successfully"))
+}
+
+// workflowWithoutCodingAgentTools keeps tool-only nodes available in the
+// frozen authorization snapshot while preventing a normal/scheduled run from
+// executing those same side effects as disconnected graph roots. An explicit
+// single-node test remains available for owners who want to test a backing
+// integration node itself.
+func workflowWithoutCodingAgentTools(workflow WorkflowAST, onlyNodeID string) WorkflowAST {
+	if onlyNodeID != "" {
+		return workflow
+	}
+	toolOnly := map[string]bool{}
+	for _, node := range workflow.Nodes {
+		if node.Data.NodeType != NodeTypeCodingAgent {
+			continue
+		}
+		for _, grant := range node.Data.CodingAgentToolGrants {
+			for _, nodeID := range grant.NodeIDs {
+				toolOnly[nodeID] = true
+			}
+			if grant.NodeID != "" {
+				toolOnly[grant.NodeID] = true
+			}
+		}
+		for _, nodeID := range node.Data.CodingAgentToolNodes {
+			toolOnly[nodeID] = true
+		}
+	}
+	if len(toolOnly) == 0 {
+		return workflow
+	}
+	filtered := workflow
+	filtered.Nodes = make([]WorkflowASTNode, 0, len(workflow.Nodes))
+	for _, node := range workflow.Nodes {
+		if !toolOnly[node.ID] {
+			filtered.Nodes = append(filtered.Nodes, node)
+		}
+	}
+	filtered.Edges = make([]WorkflowASTEdge, 0, len(workflow.Edges))
+	for _, edge := range workflow.Edges {
+		if !toolOnly[edge.Source] && !toolOnly[edge.Target] {
+			filtered.Edges = append(filtered.Edges, edge)
+		}
+	}
+	return filtered
 }
 
 func upstreamNodeSet(targetID string, edges []WorkflowASTEdge) map[string]bool {
