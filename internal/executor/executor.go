@@ -1467,6 +1467,23 @@ func runNodeInner(ctx context.Context, node WorkflowASTNode, outputs map[string]
 		}
 		return runFront(ctx, token, d, outputs)
 
+	case NodeTypeSentry:
+		token := substituteTemplates(d.IntegrationToken, outputs)
+		org := integrationWorkspaceFromContext(ctx)
+		if (token == "" || org == "") && IntegrationCredsLookup != nil {
+			legacyToken, legacyOrg := IntegrationCredsLookup(ownerID, "sentry")
+			if token == "" {
+				token = legacyToken
+			}
+			if org == "" {
+				org = legacyOrg
+			}
+		}
+		if token == "" {
+			return "", fmt.Errorf("Sentry is not connected — use Connect Sentry in the node settings")
+		}
+		return runSentry(ctx, token, org, d, outputs)
+
 	case NodeTypeGranola:
 		key := substituteTemplates(d.IntegrationToken, outputs)
 		if key == "" && IntegrationCredsLookup != nil {

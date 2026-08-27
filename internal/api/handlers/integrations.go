@@ -444,7 +444,7 @@ var allProviders = []string{
 	"googlekeep", "outlook", "slack", "notion", "linear",
 	"github", "gitlab", "jira", "confluence", "bitbucket",
 	"stripe", "shopify", "granola", "resend", "sendgrid", "kit", "airtable", "clickup", "monday", "asana", "typeform", "calendly", "dropbox", "netlify", "vercel", "supabase", "gumroad",
-	"googlesearchconsole", "googlecontacts", "hubspot", "front",
+	"googlesearchconsole", "googlecontacts", "hubspot", "front", "sentry",
 }
 
 func oauthRedirectURI(provider string) string {
@@ -647,6 +647,12 @@ func (h *WorkflowHandler) providerWorkflowCounts(orgID string) map[string]int {
 
 // ConnectIntegration redirects the browser to the provider's consent page.
 func (h *WorkflowHandler) ConnectIntegration(c *gin.Context) {
+	// Sentry has no authorize URL to build: a public integration is installed
+	// from one fixed address per app. See integrations_sentry.go.
+	if c.Param("provider") == "sentry" {
+		h.connectSentry(c)
+		return
+	}
 	prov, ok := oauthProviders[c.Param("provider")]
 	if !ok {
 		c.JSON(http.StatusNotFound, gin.H{"error": "unknown provider"})
@@ -713,6 +719,10 @@ func (h *WorkflowHandler) ConnectIntegration(c *gin.Context) {
 // returns an HTML page that notifies the opener window and closes itself.
 func (h *WorkflowHandler) CallbackIntegration(c *gin.Context) {
 	provider := c.Param("provider")
+	if provider == "sentry" {
+		h.callbackSentry(c)
+		return
+	}
 	if _, ok := oauthProviders[provider]; !ok {
 		c.JSON(http.StatusNotFound, gin.H{"error": "unknown provider"})
 		return
@@ -879,11 +889,27 @@ func (h *WorkflowHandler) DisconnectIntegration(c *gin.Context) {
 		// GitLab creates real project hooks with this OAuth token. Remove them
 		// while the credential still exists; the authority lock also prevents a
 		// hosted turn from starting halfway through credential revocation.
-		if provider == "gitlab" || provider == "monday" || provider == "asana" {
+		// Sentry creates no remote hook, but its triggers are pinned to an
+		// installation uuid that a later reconnect will not reuse — so they are
+		// retired here rather than left to match nothing.
+		if provider == "gitlab" || provider == "monday" || provider == "asana" || provider == "sentry" {
 			query := connection.Where("organization_id = ? AND user_id = ? AND provider = ? AND deleted_at IS NULL",
 				orgID, userID, provider)
 			if err := h.retireIntegrationTriggers(c.Request.Context(), query); err != nil {
 				return fmt.Errorf("retire provider webhooks: %w", err)
+			}
+		}
+		// Sentry registers nothing per trigger — one app installation feeds every
+		// trigger — so what has to be retired is the installation itself. Left
+		// behind it would keep posting events for an account with no connection.
+		if provider == "sentry" {
+			var conn models.IntegrationConnection
+			if err := connection.Where("organization_id = ? AND user_id = ? AND provider = ?",
+				orgID, userID, provider).First(&conn).Error; err == nil {
+				if err := uninstallSentryApp(&conn); err != nil {
+					slog.WarnContext(c.Request.Context(), "could not uninstall the sentry app",
+						"user_id", userID, "error", truncate(err.Error(), 200))
+				}
 			}
 		}
 		return connection.Unscoped().Where("organization_id = ? AND user_id = ? AND provider = ?",
@@ -960,6 +986,8 @@ func (h *WorkflowHandler) listProviderResources(orgID, userID, provider string) 
 		return mondayResources(token)
 	case "asana":
 		return asanaResources(token)
+	case "sentry":
+		return sentryResources(token, workspace)
 	case "googletasks":
 		return googleTasksResources(token)
 	case "googlechat":
@@ -1308,18 +1336,29 @@ func doOAuthRequest(req *http.Request) ([]byte, error) {
 // targetOrigin is the opener origin captured at connect time; empty falls
 // back to the configured frontend URL.
 func oauthResultPage(c *gin.Context, provider, targetOrigin string, ok bool, errMsg string) {
+	oauthResultPageExtra(c, provider, targetOrigin, ok, errMsg, nil)
+}
+
+// oauthResultPageExtra is the same page with additional fields in the posted
+// message. Sentry uses it to hand the opener a one-time id for the install it
+// just finished, because Sentry's redirect carries no state of ours.
+func oauthResultPageExtra(c *gin.Context, provider, targetOrigin string, ok bool, errMsg string, extra map[string]string) {
 	status := "connected"
 	detail := "You can close this window."
 	if !ok {
 		status = "error"
 		detail = errMsg
 	}
-	payload, _ := json.Marshal(map[string]string{
+	message := map[string]string{
 		"type":     "integration-oauth",
 		"provider": provider,
 		"status":   status,
 		"error":    errMsg,
-	})
+	}
+	for k, v := range extra {
+		message[k] = v
+	}
+	payload, _ := json.Marshal(message)
 	if targetOrigin == "" {
 		targetOrigin = frontendURL()
 	}
@@ -1473,6 +1512,20 @@ type refreshedToken struct {
 // persistence so the wire format can be tested without a database; returns
 // ok=false for providers that have no refresh flow.
 func exchangeRefreshToken(conn *models.IntegrationConnection) (tok refreshedToken, ok bool, err error) {
+	// Sentry refreshes against the installation, not a shared token endpoint,
+	// and answers with its own field names — so it cannot ride the table below.
+	if conn.Provider == "sentry" {
+		grant, err := refreshSentryGrant(conn.InstallationID, conn.RefreshToken)
+		if err != nil {
+			return tok, true, err
+		}
+		return refreshedToken{
+			AccessToken:  grant.Token,
+			RefreshToken: grant.RefreshToken,
+			ExpiresIn:    int64(time.Until(*grant.expiry()).Seconds()),
+		}, true, nil
+	}
+
 	ep, supported := refreshTokenEndpoints[conn.Provider]
 	if !supported {
 		return tok, false, nil

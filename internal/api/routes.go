@@ -240,6 +240,9 @@ func InitServer(port int, db *database.DBClient, rdb *redis.Client) {
 		api.GET("/integrations/:provider/connect", wh.ConnectIntegration)
 		api.GET("/integrations/:provider/resources", wh.IntegrationResources)
 		api.GET("/integrations/github/setup", wh.GitHubIntegrationSetup)
+		// Sentry's redirect carries no state of ours, so the anonymous callback
+		// parks the installation and the SPA claims it here, with a session.
+		api.POST("/integrations/sentry/claim", wh.ClaimSentryInstall)
 		api.PUT("/integrations/:provider/key", wh.SetIntegrationKey)
 		api.DELETE("/integrations/:provider", wh.DisconnectIntegration)
 	}
