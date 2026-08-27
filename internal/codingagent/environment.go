@@ -93,6 +93,13 @@ func (s *Service) acquireEnvironment(ctx context.Context, job *models.CodingAgen
 			_ = s.markEnvironmentError(ctx, &environment, job.ID.String(), err)
 			return &environment, nil, fmt.Errorf("provision coding agent environment: %w", err)
 		}
+		if err := s.verifySandboxToolchain(ctx, sandbox); err != nil {
+			cleanupCtx, cancel := context.WithTimeout(context.Background(), time.Minute)
+			defer cancel()
+			_ = sandbox.Delete(cleanupCtx)
+			_ = s.markEnvironmentError(ctx, &environment, job.ID.String(), err)
+			return &environment, nil, err
+		}
 		if err := s.db.WithContext(ctx).Model(&models.CodingAgentEnvironment{}).
 			Where("id = ? AND current_job_id = ?", environment.ID, job.ID.String()).
 			Updates(map[string]any{
@@ -123,6 +130,13 @@ func (s *Service) acquireEnvironment(ctx context.Context, job *models.CodingAgen
 		var sandboxCreated bool
 		sandbox, sandboxCreated, err = provision()
 		if err == nil {
+			if verifyErr := s.verifySandboxToolchain(ctx, sandbox); verifyErr != nil {
+				cleanupCtx, cancel := context.WithTimeout(context.Background(), time.Minute)
+				defer cancel()
+				_ = sandbox.Delete(cleanupCtx)
+				_ = s.markEnvironmentError(ctx, &environment, job.ID.String(), verifyErr)
+				return &environment, nil, verifyErr
+			}
 			recorded := s.db.WithContext(ctx).Model(&models.CodingAgentEnvironment{}).
 				Where("id = ? AND current_job_id = ?", environment.ID, job.ID.String()).
 				Updates(map[string]any{
@@ -149,6 +163,10 @@ func (s *Service) acquireEnvironment(ctx context.Context, job *models.CodingAgen
 	if err := sandbox.Start(ctx); err != nil {
 		_ = s.markEnvironmentError(ctx, &environment, job.ID.String(), err)
 		return &environment, nil, fmt.Errorf("start coding agent environment: %w", err)
+	}
+	if err := s.verifySandboxToolchain(ctx, sandbox); err != nil {
+		_ = s.markEnvironmentError(ctx, &environment, job.ID.String(), err)
+		return &environment, nil, err
 	}
 	_ = s.db.WithContext(ctx).Model(&models.CodingAgentEnvironment{}).Where("id = ?", environment.ID).
 		Updates(map[string]any{"status": models.CodingAgentEnvironmentBusy, "last_activity_at": time.Now().UTC(), "last_error": ""}).Error

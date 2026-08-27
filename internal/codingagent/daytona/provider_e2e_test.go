@@ -33,7 +33,8 @@ func TestProviderLiveLifecycle(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 	sandbox, err := provider.Create(ctx, codingagent.SandboxSpec{
-		Name: "fernary-e2e-" + uuid.NewString()[:12],
+		Name:     "fernary-e2e-" + uuid.NewString()[:12],
+		Snapshot: strings.TrimSpace(os.Getenv("DAYTONA_CODING_AGENT_SNAPSHOT")),
 		Labels: map[string]string{
 			"fernary": "coding-agent-e2e",
 		},
@@ -50,6 +51,11 @@ func TestProviderLiveLifecycle(t *testing.T) {
 			t.Errorf("delete live test sandbox: %v", err)
 		}
 	}()
+	if strings.TrimSpace(os.Getenv("DAYTONA_CODING_AGENT_SNAPSHOT")) != "" {
+		if err := codingagent.VerifySandboxToolchain(ctx, sandbox, os.Getenv("CODEX_CLI_VERSION")); err != nil {
+			t.Fatal(err)
+		}
+	}
 
 	content := []byte("fernary-daytona-e2e")
 	path := "/tmp/fernary-e2e.txt"
@@ -69,7 +75,7 @@ func TestProviderLiveLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.ExitCode != 0 || result.Stdout != string(content) {
+	if result.ExitCode != 0 || strings.TrimSpace(result.Stdout) != string(content) {
 		t.Fatalf("command result = exit %d, stdout %q, stderr %q", result.ExitCode, result.Stdout, result.Stderr)
 	}
 	if testing.Verbose() {

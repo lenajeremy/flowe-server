@@ -19,11 +19,10 @@ import (
 const authAttemptLifetime = 15 * time.Minute
 
 var (
-	deviceURLPattern   = regexp.MustCompile(`https://[^\s<>]+`)
-	deviceCodePattern  = regexp.MustCompile(`\b[A-Z0-9]{4,8}-[A-Z0-9]{4,8}\b`)
-	toolVersionPattern = regexp.MustCompile(`^[A-Za-z0-9._-]{1,80}$`)
-	ansiCSIPattern     = regexp.MustCompile("\\x1b\\[[0-?]*[ -/]*[@-~]")
-	ansiOSCPattern     = regexp.MustCompile("\\x1b\\][^\\x07\\x1b]*(?:\\x07|\\x1b\\\\)")
+	deviceURLPattern  = regexp.MustCompile(`https://[^\s<>]+`)
+	deviceCodePattern = regexp.MustCompile(`\b[A-Z0-9]{4,8}-[A-Z0-9]{4,8}\b`)
+	ansiCSIPattern    = regexp.MustCompile("\\x1b\\[[0-?]*[ -/]*[@-~]")
+	ansiOSCPattern    = regexp.MustCompile("\\x1b\\][^\\x07\\x1b]*(?:\\x07|\\x1b\\\\)")
 )
 
 func (s *Service) StartCodexConnection(ctx context.Context, organizationID, userID string) (*models.CodingAgentAuthAttempt, bool, error) {
@@ -260,6 +259,10 @@ func (s *Service) runCodexConnection(attemptID string) {
 			_ = s.db.Model(&models.CodingAgentAuthAttempt{}).Where("id = ?", attemptID).Update("external_sandbox_id", "").Error
 		}
 	}()
+	if err := s.verifySandboxToolchain(ctx, sandbox); err != nil {
+		s.finishAuthAttempt(attemptID, models.CodingAgentAuthFailed, err)
+		return
+	}
 
 	secretDir := "/tmp/fernary-codex-auth"
 	prepared, err := sandbox.Run(ctx, CommandSpec{
@@ -277,14 +280,8 @@ func (s *Service) runCodexConnection(attemptID string) {
 	if version == "" {
 		version = DefaultCodexCLIVersion
 	}
-	if !toolVersionPattern.MatchString(version) {
+	if !sandboxToolVersionPattern.MatchString(version) {
 		s.finishAuthAttempt(attemptID, models.CodingAgentAuthFailed, errors.New("configured Codex CLI version is invalid"))
-		return
-	}
-	install := "if ! command -v codex >/dev/null 2>&1 || ! codex --version | grep -Fqx -- " + quoteShell("codex-cli "+version) + "; then npm install -g " + quoteShell("@openai/codex@"+version) + "; fi"
-	installed, err := sandbox.Run(ctx, CommandSpec{Command: install, WorkingDir: "/tmp", Timeout: 10 * time.Minute}, nil)
-	if err != nil || installed.ExitCode != 0 {
-		s.finishAuthAttempt(attemptID, models.CodingAgentAuthFailed, fmt.Errorf("install Codex CLI: %s", commandFailure(installed, err)))
 		return
 	}
 

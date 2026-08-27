@@ -93,7 +93,7 @@ func (r *Runtime) Run(ctx context.Context, sandbox codingagent.Sandbox, req codi
 		_, _ = sandbox.Run(cleanupCtx, codingagent.CommandSpec{Command: cleanupCommand, WorkingDir: "/tmp", Timeout: 30 * time.Second}, nil)
 	}()
 
-	prepareCommand := "mkdir -p -- " + shellQuote(secretDir) + " && " + ensureCodexCommand(r.cliVersion) + " && codex --version"
+	prepareCommand := "mkdir -p -- " + shellQuote(secretDir) + " && " + verifyCodexCommand(r.cliVersion) + " && codex --version"
 	prepared, err := sandbox.Run(ctx, codingagent.CommandSpec{Command: prepareCommand, WorkingDir: "/tmp", Timeout: 10 * time.Minute}, emit)
 	if err != nil {
 		return result, fmt.Errorf("prepare Codex runtime: %w", err)
@@ -202,6 +202,9 @@ func (r *Runtime) Run(ctx context.Context, sandbox codingagent.Sandbox, req codi
 	} else {
 		result.Artifacts = artifacts
 	}
+	if err := completionError(output); err != nil {
+		return result, err
+	}
 	completion, err := json.Marshal(result)
 	if err != nil {
 		return result, fmt.Errorf("encode Codex recovery marker: %w", err)
@@ -225,13 +228,13 @@ exclude = ["FERNARY_MCP_TOKEN"]
 	return config
 }
 
-func ensureCodexCommand(version string) string {
-	packageName := shellQuote("@openai/codex@" + version)
+func verifyCodexCommand(version string) string {
 	if version == "latest" {
-		return "if ! command -v codex >/dev/null 2>&1; then npm install -g " + packageName + "; fi"
+		return "command -v codex >/dev/null 2>&1 || { printf 'Codex CLI is missing from the configured sandbox snapshot\\n' >&2; exit 10; }"
 	}
 	expected := shellQuote("codex-cli " + version)
-	return "if ! command -v codex >/dev/null 2>&1 || ! codex --version | grep -Fqx -- " + expected + "; then npm install -g " + packageName + "; fi"
+	return "command -v codex >/dev/null 2>&1 && codex --version | grep -Fqx -- " + expected +
+		" || { printf 'Codex CLI in the configured sandbox snapshot does not match the required version\\n' >&2; exit 10; }"
 }
 
 func buildCommand(req codingagent.RuntimeRequest, secretDir, promptPath, schemaPath, resultPath, toolTokenPath string) string {
@@ -267,8 +270,24 @@ Fernary execution requirements:
 - Make the requested changes and run the most relevant verification available.
 - Do not use repository credentials or direct shell commands to push, publish, deploy, open a pull request, or contact external people.
 - You may perform explicitly granted external actions only through Fernary workflow tools. Read their saved scope carefully. Writes pause for the workflow owner's approval; explain the exact action and why it is needed in the tool's reason field.
+- An explicitly requested external action is part of the definition of done. If its Fernary workflow tool is unavailable, rejected, or does not complete, state that the task is incomplete; never present prepared instructions or a local patch as if the external action succeeded.
 - If an external action is rejected or its outcome is reported as unknown, do not retry an equivalent action. Report it clearly for human reconciliation.
+- Return completionStatus as "completed" only when every explicitly requested outcome, including external actions, actually happened. Otherwise return "blocked" and put the concrete reason in blockingReason.
 - Return the final result using the provided JSON schema.`
+}
+
+func completionError(output map[string]any) error {
+	status, _ := output["completionStatus"].(string)
+	if status != "blocked" {
+		return nil
+	}
+	reason, _ := output["blockingReason"].(string)
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		reason = "one or more requested outcomes were not completed"
+	}
+	reason = safeLogText(reason, 1000)
+	return fmt.Errorf("coding agent task incomplete: %s", reason)
 }
 
 type jsonLineStream struct {
@@ -589,9 +608,11 @@ const resultSchema = `{
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
   "additionalProperties": false,
-  "required": ["summary", "changedFiles", "tests", "notes"],
+  "required": ["summary", "completionStatus", "blockingReason", "changedFiles", "tests", "notes"],
   "properties": {
     "summary": {"type": "string"},
+    "completionStatus": {"type": "string", "enum": ["completed", "blocked"]},
+    "blockingReason": {"type": "string"},
     "changedFiles": {"type": "array", "items": {"type": "string"}},
     "tests": {
       "type": "array",

@@ -1,6 +1,11 @@
 package daytona
 
-import "testing"
+import (
+	"strings"
+	"testing"
+
+	"workflow-ai/server/internal/codingagent"
+)
 
 func TestEnvironmentPrefixQuotesValuesAndRejectsNames(t *testing.T) {
 	got := environmentPrefix(map[string]string{
@@ -17,6 +22,15 @@ func TestCommandCompositionChangesDirectoryBeforeApplyingEnvironment(t *testing.
 	want := "cd -- '/tmp/work' && env CODEX_HOME='/tmp/codex' codex login --device-auth"
 	if command != want {
 		t.Fatalf("composed command = %q, want %q", command, want)
+	}
+}
+
+func TestCompletionMarkerPreservesCommandExitCode(t *testing.T) {
+	command := wrapCommandWithCompletionMarker("printf done; exit 7", "/tmp/marker")
+	for _, expected := range []string{"( printf done; exit 7 )", `printf '%s' "$fernary_exit" > '/tmp/marker'`, `exit "$fernary_exit"`} {
+		if !strings.Contains(command, expected) {
+			t.Fatalf("wrapped command %q omitted %q", command, expected)
+		}
 	}
 }
 
@@ -41,6 +55,19 @@ func TestCappedBufferKeepsMostRecentOutput(t *testing.T) {
 	buffer.WriteString("123456")
 	if got := buffer.String(); got != "23456" {
 		t.Fatalf("buffer = %q, want 23456", got)
+	}
+}
+
+func TestUpdateLogSnapshotEmitsOnlyNewOutput(t *testing.T) {
+	buffer := cappedBuffer{limit: 100}
+	previous := ""
+	var events []string
+	emit := func(event codingagent.StreamEvent) { events = append(events, event.Message) }
+	updateLogSnapshot(&buffer, &previous, "first\n", "stdout", emit)
+	updateLogSnapshot(&buffer, &previous, "first\nsecond\n", "stdout", emit)
+	updateLogSnapshot(&buffer, &previous, "first\nsecond\n", "stdout", emit)
+	if buffer.String() != "first\nsecond\n" || len(events) != 2 || events[0] != "first\n" || events[1] != "second\n" {
+		t.Fatalf("buffer=%q events=%#v", buffer.String(), events)
 	}
 }
 
