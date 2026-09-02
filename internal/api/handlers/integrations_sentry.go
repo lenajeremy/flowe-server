@@ -1,14 +1,15 @@
 package handlers
 
 import (
+	"context"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
 	"strings"
-	"sync"
 	"time"
 
 	"crypto/rand"
@@ -87,42 +88,75 @@ type sentryPendingInstall struct {
 	orgSlug        string
 	orgName        string
 	scopes         string
-	expires        time.Time
 }
 
-var (
-	sentryPendingMu sync.Mutex
-	sentryPending   = map[string]sentryPendingInstall{}
-)
+// The handoff lives in Redis, not in process memory.
+//
+// The callback and the claim are two separate HTTP requests, and nothing
+// guarantees they reach the same process: a deploy or a restart between them
+// loses an in-memory entry, and a second replica never had it. Either way the
+// user completes an install at Sentry and is then told it expired, with the
+// grant already spent. Redis is where the session for that same browser already
+// lives, so it is the natural home.
+const sentryHandoffTTL = 10 * time.Minute
 
-func parkSentryInstall(p sentryPendingInstall) string {
+func sentryHandoffKey(handoff string) string { return "sentry:handoff:" + handoff }
+
+// sentryHandoffRecord is the wire form. The struct itself is unexported and
+// carries a token, so it is serialized explicitly rather than by reflection on
+// a type someone might later add a field to without thinking about it.
+type sentryHandoffRecord struct {
+	InstallationID string     `json:"installation_id"`
+	Token          string     `json:"token"`
+	RefreshToken   string     `json:"refresh_token"`
+	ExpiresAt      *time.Time `json:"expires_at"`
+	OrgSlug        string     `json:"org_slug"`
+	OrgName        string     `json:"org_name"`
+	Scopes         string     `json:"scopes"`
+}
+
+func (h *WorkflowHandler) parkSentryInstall(ctx context.Context, p sentryPendingInstall) (string, error) {
 	b := make([]byte, 32)
-	_, _ = rand.Read(b)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
 	handoff := hex.EncodeToString(b)
 
-	sentryPendingMu.Lock()
-	defer sentryPendingMu.Unlock()
-	for k, e := range sentryPending {
-		if time.Now().After(e.expires) {
-			delete(sentryPending, k)
-		}
+	payload, err := json.Marshal(sentryHandoffRecord{
+		InstallationID: p.installationID, Token: p.token, RefreshToken: p.refreshToken,
+		ExpiresAt: p.expiresAt, OrgSlug: p.orgSlug, OrgName: p.orgName, Scopes: p.scopes,
+	})
+	if err != nil {
+		return "", err
 	}
-	p.expires = time.Now().Add(10 * time.Minute)
-	sentryPending[handoff] = p
-	return handoff
+	if h.redis == nil {
+		return "", errors.New("sentry install handoff needs Redis, which is not configured")
+	}
+	if err := h.redis.Set(ctx, sentryHandoffKey(handoff), payload, sentryHandoffTTL).Err(); err != nil {
+		return "", err
+	}
+	return handoff, nil
 }
 
-// claimSentryInstall is single-use: the entry is removed whether or not it was
-// still valid, so a replayed handoff cannot bind the same installation twice.
-func claimSentryInstall(handoff string) (sentryPendingInstall, bool) {
-	sentryPendingMu.Lock()
-	defer sentryPendingMu.Unlock()
-	p, found := sentryPending[handoff]
-	delete(sentryPending, handoff)
-	if !found || time.Now().After(p.expires) {
+// claimSentryInstall is single-use: GetDel removes the entry as it reads it, so
+// two requests racing the same handoff cannot both bind the installation.
+func (h *WorkflowHandler) claimSentryInstall(ctx context.Context, handoff string) (sentryPendingInstall, bool) {
+	if h.redis == nil {
 		return sentryPendingInstall{}, false
 	}
-	return p, true
+	raw, err := h.redis.GetDel(ctx, sentryHandoffKey(handoff)).Bytes()
+	if err != nil || len(raw) == 0 {
+		return sentryPendingInstall{}, false
+	}
+	var record sentryHandoffRecord
+	if err := json.Unmarshal(raw, &record); err != nil || record.Token == "" {
+		return sentryPendingInstall{}, false
+	}
+	return sentryPendingInstall{
+		installationID: record.InstallationID, token: record.Token,
+		refreshToken: record.RefreshToken, expiresAt: record.ExpiresAt,
+		orgSlug: record.OrgSlug, orgName: record.OrgName, scopes: record.Scopes,
+	}, true
 }
 
 // ── Connect ───────────────────────────────────────────────────
@@ -186,7 +220,7 @@ func (h *WorkflowHandler) callbackSentry(c *gin.Context) {
 			"installation_id", installationID, "error", truncate(err.Error(), 200))
 	}
 
-	handoff := parkSentryInstall(sentryPendingInstall{
+	handoff, err := h.parkSentryInstall(ctx, sentryPendingInstall{
 		installationID: installationID,
 		token:          grant.Token,
 		refreshToken:   grant.RefreshToken,
@@ -195,6 +229,10 @@ func (h *WorkflowHandler) callbackSentry(c *gin.Context) {
 		orgName:        orgName,
 		scopes:         strings.Join(grant.Scopes, " "),
 	})
+	if err != nil {
+		fail(truncate(err.Error(), 200), "connected to Sentry but could not finish — try connecting again")
+		return
+	}
 	slog.InfoContext(ctx, "sentry installation awaiting claim",
 		"installation_id", installationID, "organization", orgSlug)
 	oauthResultPageExtra(c, "sentry", "", true, "", map[string]string{"handoff": handoff})
@@ -213,7 +251,7 @@ func (h *WorkflowHandler) ClaimSentryInstall(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "expected a handoff field"})
 		return
 	}
-	pending, ok := claimSentryInstall(strings.TrimSpace(body.Handoff))
+	pending, ok := h.claimSentryInstall(c.Request.Context(), strings.TrimSpace(body.Handoff))
 	if !ok {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error": "that Sentry installation has expired — start the connection again",
@@ -237,11 +275,26 @@ func (h *WorkflowHandler) ClaimSentryInstall(c *gin.Context) {
 	}
 	err := h.withHostedAuthorityLock(ctx, orgID, userID, func(connection *gorm.DB) error {
 		return connection.Transaction(func(tx *gorm.DB) error {
+			// Triggers are pinned to the installation uuid, because one webhook URL
+			// receives every customer's events and that uuid is what tells them
+			// apart. Reinstalling the Sentry app mints a new uuid, so replacing the
+			// connection without touching them leaves every trigger matching an
+			// installation that no longer delivers — dead, with nothing said.
+			var previous models.IntegrationConnection
+			hadPrevious := tx.Where("organization_id = ? AND user_id = ? AND provider = ?",
+				orgID, userID, "sentry").First(&previous).Error == nil
+
 			if err := tx.Unscoped().Where("organization_id = ? AND user_id = ? AND provider = ?",
 				orgID, userID, "sentry").Delete(&models.IntegrationConnection{}).Error; err != nil {
 				return err
 			}
-			return tx.Create(conn).Error
+			if err := tx.Create(conn).Error; err != nil {
+				return err
+			}
+			if !hadPrevious || previous.InstallationID == conn.InstallationID {
+				return nil
+			}
+			return resentryTriggers(tx, orgID, userID, previous, *conn)
 		})
 	})
 	if err != nil {
@@ -420,4 +473,30 @@ func sentryResources(token, orgSlug string) ([]integrationResource, error) {
 		out = append(out, integrationResource{ID: p.Slug, Name: name, Type: "project"})
 	}
 	return out, nil
+}
+
+// resentryTriggers keeps existing triggers pointed at the installation that
+// will actually deliver their events after a reconnect.
+//
+// Same Sentry organization: the projects a trigger names still exist and still
+// mean the same thing, so the triggers are retargeted and keep working. That is
+// the ordinary case — someone uninstalled and reinstalled the app.
+//
+// A different organization is not a reconnect, it is a different account. Its
+// project slugs may collide with the old ones while meaning something else
+// entirely, so retargeting would quietly wire a workflow to a stranger's
+// errors. Those triggers are disabled with a reason instead.
+func resentryTriggers(tx *gorm.DB, orgID, userID string, previous, current models.IntegrationConnection) error {
+	scope := tx.Model(&models.IntegrationTrigger{}).
+		Where("provider = ? AND organization_id = ? AND user_id = ? AND deleted_at IS NULL",
+			"sentry", orgID, userID)
+
+	if !strings.EqualFold(strings.TrimSpace(previous.WorkspaceID), strings.TrimSpace(current.WorkspaceID)) {
+		return scope.Updates(map[string]any{
+			"enabled":    false,
+			"last_error": "Sentry was reconnected to a different organization — recreate this trigger against a project in " + current.WorkspaceID,
+		}).Error
+	}
+	return scope.Where("scope_id = ?", previous.InstallationID).
+		Updates(map[string]any{"scope_id": current.InstallationID}).Error
 }

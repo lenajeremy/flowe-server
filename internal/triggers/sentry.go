@@ -357,24 +357,45 @@ func (sentryAdapter) Parse(r *http.Request, body []byte) ([]Event, error) {
 		return nil, nil
 	}
 
-	project, data, occurred := sentryEventData(resource, d)
+	projects, data, occurred := sentryEventData(resource, d)
 	if data == nil {
 		return nil, nil
 	}
 	if d.Actor.Name != "" {
 		data["actor"] = d.Actor.Name
 	}
-	data["project"] = project
 	data["action"] = d.Action
 
-	return []Event{{
-		Key:        sentryDeliveryKey(resource, d.Action, body),
-		Type:       eventType,
-		ResourceID: project,
-		ScopeID:    scopeID,
-		OccurredAt: occurred,
-		Data:       data,
-	}}, nil
+	// A metric alert can span several projects, and a trigger is set up against
+	// one. Emitting a single event carrying only the first project silently
+	// ignores every trigger watching the others, so one event is produced per
+	// project named. The dedupe key is per project for the same reason: two
+	// projects are two separate things to react to, not a redelivery.
+	if len(projects) == 0 {
+		projects = []string{""}
+	}
+	key := sentryDeliveryKey(resource, d.Action, body)
+	events := make([]Event, 0, len(projects))
+	for _, project := range projects {
+		perProject := make(map[string]any, len(data)+1)
+		for k, v := range data {
+			perProject[k] = v
+		}
+		perProject["project"] = project
+		eventKey := key
+		if len(projects) > 1 {
+			eventKey = key + ":" + project
+		}
+		events = append(events, Event{
+			Key:        eventKey,
+			Type:       eventType,
+			ResourceID: project,
+			ScopeID:    scopeID,
+			OccurredAt: occurred,
+			Data:       perProject,
+		})
+	}
+	return events, nil
 }
 
 // sentryDeliveryKey deduplicates on the delivery's own bytes.
@@ -390,12 +411,13 @@ func sentryDeliveryKey(resource, action string, body []byte) string {
 }
 
 // sentryEventData flattens one resource's payload into the fields a template
-// reads, and reports which project it belongs to.
+// reads, and reports which projects it belongs to. A metric alert can name
+// several; every other resource names exactly one.
 //
 // Sentry identifies the project four different ways depending on the resource —
 // a nested object, a slug field, a list of slugs, or nothing but a URL — so
 // this is where that is reconciled rather than in each caller.
-func sentryEventData(resource string, d sentryDelivery) (project string, data map[string]any, occurred time.Time) {
+func sentryEventData(resource string, d sentryDelivery) (projects []string, data map[string]any, occurred time.Time) {
 	occurred = time.Now().UTC()
 
 	switch resource {
@@ -429,10 +451,10 @@ func sentryEventData(resource string, d sentryDelivery) (project string, data ma
 			} `json:"issue"`
 		}
 		if json.Unmarshal(d.Data, &payload) != nil {
-			return "", nil, occurred
+			return nil, nil, occurred
 		}
 		issue := payload.Issue
-		project = firstNonEmpty(issue.Project.Slug,
+		project := firstNonEmpty(issue.Project.Slug,
 			sentryProjectFromURL(issue.ProjectURL), sentryProjectFromURL(issue.URL))
 		if t, err := time.Parse(time.RFC3339, issue.LastSeen); err == nil {
 			occurred = t
@@ -450,7 +472,7 @@ func sentryEventData(resource string, d sentryDelivery) (project string, data ma
 		if len(issue.Count) > 0 {
 			data["count"] = strings.Trim(string(issue.Count), `"`)
 		}
-		return project, data, occurred
+		return []string{project}, data, occurred
 
 	case "error", "event_alert":
 		var payload struct {
@@ -462,16 +484,16 @@ func sentryEventData(resource string, d sentryDelivery) (project string, data ma
 			} `json:"issue_alert"`
 		}
 		if json.Unmarshal(d.Data, &payload) != nil {
-			return "", nil, occurred
+			return nil, nil, occurred
 		}
 		event := payload.Error
 		if event == nil {
 			event = payload.Event
 		}
 		if event == nil {
-			return "", nil, occurred
+			return nil, nil, occurred
 		}
-		project = firstNonEmpty(event.ProjectSlug,
+		project := firstNonEmpty(event.ProjectSlug,
 			sentryProjectFromURL(event.IssueURL), sentryProjectFromURL(event.WebURL))
 		if event.Timestamp > 0 {
 			occurred = time.Unix(int64(event.Timestamp), 0).UTC()
@@ -488,7 +510,7 @@ func sentryEventData(resource string, d sentryDelivery) (project string, data ma
 		if resource == "event_alert" {
 			data["rule"] = firstNonEmpty(payload.TriggeredRule, payload.IssueAlert.Title)
 		}
-		return project, data, occurred
+		return []string{project}, data, occurred
 
 	case "metric_alert":
 		var payload struct {
@@ -506,12 +528,9 @@ func sentryEventData(resource string, d sentryDelivery) (project string, data ma
 			WebURL           string `json:"web_url"`
 		}
 		if json.Unmarshal(d.Data, &payload) != nil {
-			return "", nil, occurred
+			return nil, nil, occurred
 		}
 		alert := payload.MetricAlert
-		if len(alert.Projects) > 0 {
-			project = alert.Projects[0]
-		}
 		data = map[string]any{
 			"incidentId":  strings.Trim(string(alert.ID), `"`),
 			"rule":        firstNonEmpty(alert.AlertRule.Name, alert.Title),
@@ -520,7 +539,7 @@ func sentryEventData(resource string, d sentryDelivery) (project string, data ma
 			"description": payload.DescriptionText,
 			"webUrl":      payload.WebURL,
 		}
-		return project, data, occurred
+		return alert.Projects, data, occurred
 
 	case "comment":
 		var payload struct {
@@ -531,7 +550,7 @@ func sentryEventData(resource string, d sentryDelivery) (project string, data ma
 			Timestamp   string          `json:"timestamp"`
 		}
 		if json.Unmarshal(d.Data, &payload) != nil {
-			return "", nil, occurred
+			return nil, nil, occurred
 		}
 		if t, err := time.Parse(time.RFC3339, payload.Timestamp); err == nil {
 			occurred = t
@@ -541,10 +560,10 @@ func sentryEventData(resource string, d sentryDelivery) (project string, data ma
 			"commentId": strings.Trim(string(payload.CommentID), `"`),
 			"issueId":   strings.Trim(string(payload.IssueID), `"`),
 		}
-		return payload.ProjectSlug, data, occurred
+		return []string{payload.ProjectSlug}, data, occurred
 	}
 
-	return "", nil, occurred
+	return nil, nil, occurred
 }
 
 // sentryErrorEvent is the event body shared by the error and issue-alert

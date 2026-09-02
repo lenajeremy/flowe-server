@@ -266,3 +266,65 @@ func TestSentryRegisterRefusesIncompleteSetup(t *testing.T) {
 		t.Fatal("registered a trigger whose deliveries could never be verified")
 	}
 }
+
+// A metric alert can span several projects, and a trigger is set up against
+// one. Emitting a single event carrying only the first project silently ignores
+// every trigger watching the others.
+func TestSentryMetricAlertReachesEveryProjectItNames(t *testing.T) {
+	body := []byte(`{"action":"critical","installation":{"uuid":"install-abc"},"data":{
+		"metric_alert":{"id":12,"title":"Checkout latency","projects":["backend","payments","web"],
+		  "alert_rule":{"name":"Checkout latency"}},
+		"description_title":"Critical: Checkout latency",
+		"web_url":"https://sentry.io/organizations/acme/alerts/rules/details/12/"}}`)
+
+	events, err := (sentryAdapter{}).Parse(sentryRequest(t, "metric_alert", body), body)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if len(events) != 3 {
+		t.Fatalf("got %d events, want one per project", len(events))
+	}
+
+	seen := map[string]bool{}
+	keys := map[string]bool{}
+	for _, event := range events {
+		seen[event.ResourceID] = true
+		if event.Data["project"] != event.ResourceID {
+			t.Errorf("data.project = %#v, want %q", event.Data["project"], event.ResourceID)
+		}
+		if event.Data["rule"] != "Checkout latency" {
+			t.Errorf("event lost its shared fields: %#v", event.Data)
+		}
+		if keys[event.Key] {
+			// Same key means the second and third are treated as retries of the
+			// first and dropped by the dedupe table.
+			t.Errorf("two projects share the dedupe key %q", event.Key)
+		}
+		keys[event.Key] = true
+	}
+	for _, project := range []string{"backend", "payments", "web"} {
+		if !seen[project] {
+			t.Errorf("no event for project %q", project)
+		}
+	}
+}
+
+// A single-project alert must keep the plain body-hash key, so a genuine
+// redelivery still collapses to one run.
+func TestSentrySingleProjectAlertKeepsTheRetryProofKey(t *testing.T) {
+	body := []byte(`{"action":"critical","installation":{"uuid":"install-abc"},"data":{
+		"metric_alert":{"id":12,"title":"Checkout latency","projects":["backend"],
+		  "alert_rule":{"name":"Checkout latency"}}}}`)
+
+	first, err := (sentryAdapter{}).Parse(sentryRequest(t, "metric_alert", body), body)
+	if err != nil || len(first) != 1 {
+		t.Fatalf("Parse = %#v, %v", first, err)
+	}
+	second, err := (sentryAdapter{}).Parse(sentryRequest(t, "metric_alert", body), body)
+	if err != nil || len(second) != 1 {
+		t.Fatalf("Parse = %#v, %v", second, err)
+	}
+	if first[0].Key != second[0].Key {
+		t.Fatal("a redelivery produced a different key, so it would buy a second run")
+	}
+}
