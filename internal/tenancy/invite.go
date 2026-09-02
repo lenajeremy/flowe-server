@@ -287,6 +287,21 @@ func RemoveMemberWithinTransaction(tx *gorm.DB, orgID, memberUserID string) erro
 		Delete(&models.OrgMember{}).Error
 }
 
+// IsMember reports whether a user currently belongs to an organization.
+//
+// Worth a database read rather than trusting the session: the org a session
+// acts in is cached at sign-in and removing someone from an org does not
+// invalidate their existing sessions, so a former member's token still carries
+// the old org id. Anywhere that attributes an action to an organization has to
+// ask now, not at login.
+func IsMember(db *gorm.DB, orgID, userID string) bool {
+	if strings.TrimSpace(orgID) == "" || strings.TrimSpace(userID) == "" {
+		return false
+	}
+	var m models.OrgMember
+	return db.Where("organization_id = ? AND user_id = ?", orgID, userID).First(&m).Error == nil
+}
+
 // CanManageMembers reports whether a user may invite and remove people.
 func CanManageMembers(db *gorm.DB, orgID, userID string) bool {
 	var m models.OrgMember

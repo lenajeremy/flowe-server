@@ -115,7 +115,7 @@ func TestSubmitFeedbackUsesAuthenticatedSenderAndWorkspace(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := db.AutoMigrate(&models.User{}, &models.Organization{}); err != nil {
+	if err := db.AutoMigrate(&models.User{}, &models.Organization{}, &models.OrgMember{}); err != nil {
 		t.Fatal(err)
 	}
 	user := models.User{Email: "tester@example.com", Name: "Product Tester"}
@@ -124,6 +124,12 @@ func TestSubmitFeedbackUsesAuthenticatedSenderAndWorkspace(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := db.Create(&org).Error; err != nil {
+		t.Fatal(err)
+	}
+	membership := models.OrgMember{
+		OrganizationID: org.ID.String(), UserID: user.ID.String(), Role: models.RoleOwner,
+	}
+	if err := db.Create(&membership).Error; err != nil {
 		t.Fatal(err)
 	}
 
@@ -180,5 +186,78 @@ func TestSubmitFeedbackUsesAuthenticatedSenderAndWorkspace(t *testing.T) {
 	}
 	if sent.Width != 1280 || sent.Height != 720 || !bytes.Equal(sent.Screenshot, payload) {
 		t.Fatalf("submission screenshot = %d bytes, %dx%d", len(sent.Screenshot), sent.Width, sent.Height)
+	}
+}
+
+// A session caches the org it acts in, and removing someone from an org does
+// not invalidate their sessions. Without a membership check at submit time, a
+// former member's still-valid token keeps sending feedback stamped with a
+// workspace they have been removed from.
+func TestSubmitFeedbackRefusesAFormerMember(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db, err := gorm.Open(sqlite.Open("file:"+uuid.NewString()+"?mode=memory&cache=shared"), &gorm.Config{
+		Logger: logger.Default.LogMode(logger.Silent),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AutoMigrate(&models.User{}, &models.Organization{}, &models.OrgMember{}); err != nil {
+		t.Fatal(err)
+	}
+	user := models.User{Email: "former@example.com", Name: "Former Member"}
+	org := models.Organization{Name: "Test workspace", Slug: "test-workspace", Seats: 2}
+	if err := db.Create(&user).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Create(&org).Error; err != nil {
+		t.Fatal(err)
+	}
+	// No membership row: the person was removed after their session was issued.
+
+	t.Setenv("FEEDBACK_TO_EMAIL", "feedback@example.com")
+	t.Setenv("RESEND_API_KEY", "re_test")
+	previousSender := feedbackEmailSender
+	t.Cleanup(func() { feedbackEmailSender = previousSender })
+	delivered := false
+	feedbackEmailSender = func(context.Context, feedbackSubmission) error {
+		delivered = true
+		return nil
+	}
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	part, err := writer.CreateFormFile("screenshot", "capture.png")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := part.Write(feedbackPNG(t, 1280, 720)); err != nil {
+		t.Fatal(err)
+	}
+	for key, value := range map[string]string{
+		"message": "still here", "page": "/workflows/workflow-1", "viewport": "1280x720",
+	} {
+		if err := writer.WriteField(key, value); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	request := httptest.NewRequest(http.MethodPost, "/api/feedback", &body)
+	request.Header.Set("Content-Type", writer.FormDataContentType())
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = request
+	c.Set("auth.userID", user.ID.String())
+	c.Set("auth.orgID", org.ID.String())
+	handler := &WorkflowHandler{db: &database.DBClient{DB: db}}
+	handler.SubmitFeedback(c)
+
+	if recorder.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403; body = %s", recorder.Code, recorder.Body.String())
+	}
+	if delivered {
+		t.Fatal("feedback from a former member was delivered")
 	}
 }

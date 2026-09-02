@@ -22,6 +22,7 @@ import (
 	"workflow-ai/server/internal/database/models"
 	platformmail "workflow-ai/server/internal/email"
 	"workflow-ai/server/internal/telemetry"
+	"workflow-ai/server/internal/tenancy"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -122,6 +123,14 @@ func (h *WorkflowHandler) SubmitFeedback(c *gin.Context) {
 	var user models.User
 	if err := h.db.DB.Where("id = ?", userID).First(&user).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not identify the feedback sender"})
+		return
+	}
+	// The org id is cached on the session at sign-in, and removing someone from
+	// an org does not invalidate their existing sessions. Without this check a
+	// former member's still-valid token would keep sending feedback stamped with
+	// a workspace they no longer belong to.
+	if !tenancy.IsMember(h.db.DB, currentOrgID(c), userID) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "you are no longer a member of this workspace"})
 		return
 	}
 	var org models.Organization
