@@ -181,7 +181,7 @@ func (h *WorkflowHandler) applyTriggerLifecycle(provider string, ev triggers.Eve
 
 	switch lifecycle.Action {
 	case triggers.LifecycleScopeRemoved:
-		base.Updates(map[string]any{"enabled": false, "last_error": installationRemovedError})
+		base.Updates(map[string]any{"enabled": false, "last_error": scopeRemovedError(provider)})
 
 	case triggers.LifecycleScopeSuspended:
 		base.Updates(map[string]any{"enabled": false, "last_error": installationSuspendedError})
@@ -211,6 +211,16 @@ func (h *WorkflowHandler) applyTriggerLifecycle(provider string, ev triggers.Eve
 	case triggers.LifecycleAuthorizationRevoked:
 		h.revokeProviderAuthorization(provider, lifecycle.AccountID, lifecycle.AccountName)
 	}
+}
+
+// scopeRemovedError names the repair in the provider's own vocabulary. The
+// generic wording sends a Sentry user to reinstall a GitHub App, which is worse
+// than saying nothing.
+func scopeRemovedError(provider string) string {
+	if provider == "sentry" {
+		return "the Fernary integration was uninstalled from Sentry — reconnect Sentry, then recreate this trigger"
+	}
+	return installationRemovedError
 }
 
 func normalizedResourceIDs(ids []string) []string {

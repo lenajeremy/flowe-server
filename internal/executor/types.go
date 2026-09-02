@@ -59,6 +59,7 @@ const (
 	NodeTypeGoogleContacts      NodeType = "googlecontacts"
 	NodeTypeHubspot             NodeType = "hubspot"
 	NodeTypeFront               NodeType = "front"
+	NodeTypeSentry              NodeType = "sentry"
 	NodeTypeData                NodeType = "data"
 	NodeTypeCodingAgent         NodeType = "codingAgent"
 )
@@ -985,6 +986,30 @@ type FlowNodeData struct {
 	FrontTeammateId     string `json:"frontTeammateId,omitempty"`
 	FrontTo             string `json:"frontTo,omitempty"`
 	FrontUrl            string `json:"frontUrl,omitempty"`
+
+	// ── Sentry ──
+	SentryProject     string `json:"sentryProject,omitempty"` // project slug
+	SentryIssueId     string `json:"sentryIssueId,omitempty"`
+	SentryQuery       string `json:"sentryQuery,omitempty"`       // Sentry search, e.g. "is:unresolved level:error"
+	SentryStatsPeriod string `json:"sentryStatsPeriod,omitempty"` // 1h | 24h | 14d | 90d
+	SentryEnvironment string `json:"sentryEnvironment,omitempty"`
+	SentrySort        string `json:"sentrySort,omitempty"` // date | freq | new | user
+	SentryLimit       int    `json:"sentryLimit,omitempty"`
+	SentryCursor      string `json:"sentryCursor,omitempty"`
+	// SentryStatus overrides the status implied by the operation, so an
+	// otherwise ordinary resolve can be "resolvedInNextRelease".
+	SentryStatus        string `json:"sentryStatus,omitempty"`
+	SentryAssignee      string `json:"sentryAssignee,omitempty"` // user:<id> | team:<id> | email
+	SentryComment       string `json:"sentryComment,omitempty"`
+	SentryTagKey        string `json:"sentryTagKey,omitempty"`
+	SentryIgnoreMinutes int    `json:"sentryIgnoreMinutes,omitempty"` // archive until this long has passed
+	SentryIgnoreCount   int    `json:"sentryIgnoreCount,omitempty"`   // archive until it happens this many more times
+	SentryVersion       string `json:"sentryVersion,omitempty"`       // release version
+	SentryProjects      string `json:"sentryProjects,omitempty"`      // comma-separated slugs for a release or deploy
+	SentryRef           string `json:"sentryRef,omitempty"`
+	SentryUrl           string `json:"sentryUrl,omitempty"`
+	SentryDeployName    string `json:"sentryDeployName,omitempty"`
+	SentryFields        string `json:"sentryFields,omitempty"` // comma-separated discover fields
 }
 
 type Position struct {
