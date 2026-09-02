@@ -257,7 +257,7 @@ func TestChannelListIsScopedToTheCallersOwnMembership(t *testing.T) {
 	// not send it on this method, so it has to be filled from the bot's own list.
 	botIn := map[string]bool{}
 	for _, ch := range inventory.Channels {
-		botIn[ch.Name] = ch.IsMember
+		botIn[ch.Name] = ch.IsMember != nil && *ch.IsMember
 	}
 	if !botIn["engineering"] {
 		t.Error("engineering came back not-a-member, so the picker would disable it")
@@ -341,5 +341,13 @@ func TestAFailedBotLookupIsReportedAsUnknownNotAsAbsence(t *testing.T) {
 	}
 	if len(inventory.Channels) == 0 {
 		t.Fatal("the caller's own channels disappeared because a different call failed")
+	}
+	// Null, not false. A consumer can overlook an envelope flag; it cannot
+	// overlook a null where it expected a boolean.
+	for _, ch := range inventory.Channels {
+		if ch.IsMember != nil {
+			t.Errorf("channel %s reported is_member=%v as fact when membership was never determined",
+				ch.Name, *ch.IsMember)
+		}
 	}
 }

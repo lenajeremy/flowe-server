@@ -62,11 +62,18 @@ type agentDeploymentChannelInput struct {
 }
 
 type agentHostSlackChannel struct {
-	ID        string `json:"id"`
-	Name      string `json:"name"`
-	IsMember  bool   `json:"is_member"`
-	IsPrivate bool   `json:"is_private"`
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	// IsMember is a pointer so "we could not find out" is null on the wire
+	// rather than false. A plain bool has no way to say that, and false reads as
+	// "the bot is not in this channel" — which disables it in the picker. A
+	// consumer can ignore an envelope flag; it cannot ignore a null.
+	IsMember  *bool `json:"is_member"`
+	IsPrivate bool  `json:"is_private"`
 }
+
+// memberFlag is for the paths that genuinely know the answer.
+func memberFlag(v bool) *bool { return &v }
 
 type createAgentDeploymentRequest struct {
 	Name               string                        `json:"name" binding:"required"`
@@ -1267,7 +1274,7 @@ func (h *WorkflowHandler) ListAgentHostChannels(c *gin.Context) {
 		// On the scoped path is_member is absent, so fill it from the bot's own
 		// list. On the public fallback conversations.list supplies it already.
 		if slackUserID != "" && !inventory.MembershipUnknown {
-			channel.IsMember = botChannels[channel.ID]
+			channel.IsMember = memberFlag(botChannels[channel.ID])
 		}
 		inventory.Channels = append(inventory.Channels, channel)
 	}
@@ -1350,7 +1357,7 @@ func joinSlackAgentPublicChannel(ctx context.Context, token, channelID string) (
 	if info.Channel.IsPrivate {
 		return agentHostSlackChannel{}, errSlackAgentPrivateChannel
 	}
-	if info.Channel.IsMember {
+	if info.Channel.IsMember != nil && *info.Channel.IsMember {
 		return info.Channel, nil
 	}
 	var joined struct {
@@ -1362,7 +1369,7 @@ func joinSlackAgentPublicChannel(ctx context.Context, token, channelID string) (
 	if joined.Channel.ID != channelID {
 		return agentHostSlackChannel{}, errors.New("Slack joined a different channel")
 	}
-	joined.Channel.IsMember = true
+	joined.Channel.IsMember = memberFlag(true)
 	return joined.Channel, nil
 }
 
