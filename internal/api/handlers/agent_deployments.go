@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"regexp"
 	"sort"
@@ -1107,6 +1108,12 @@ type slackChannelInventory struct {
 	// only public channels are offered.
 	Scope  string `json:"scope"`
 	Notice string `json:"notice,omitempty"`
+	// MembershipUnknown reports that the bot's own channel list could not be
+	// read, so is_member on each channel means "we could not tell" rather than
+	// "the bot is not in it". Without this the two are indistinguishable, and a
+	// failed lookup would present every channel as unavailable — locking an
+	// admin out of channels the bot is already sitting in.
+	MembershipUnknown bool `json:"membership_unknown,omitempty"`
 }
 
 // slackWorkspaceUserID maps the calling Fernary user onto their Slack account.
@@ -1170,7 +1177,7 @@ func (h *WorkflowHandler) pageSlackChannels(c *gin.Context, botToken, method str
 // userID is empty. Errors are swallowed on purpose: this only decides whether a
 // channel is shown as ready or as "invite Fernary first", and failing that check
 // should degrade the label rather than the whole picker.
-func (h *WorkflowHandler) slackConversations(c *gin.Context, botToken, userID string) []agentHostSlackChannel {
+func (h *WorkflowHandler) slackConversations(c *gin.Context, botToken, userID string) ([]agentHostSlackChannel, error) {
 	payload := map[string]any{
 		"limit": 200, "exclude_archived": true, "types": "public_channel,private_channel",
 	}
@@ -1179,9 +1186,9 @@ func (h *WorkflowHandler) slackConversations(c *gin.Context, botToken, userID st
 	}
 	channels, err := h.pageSlackChannels(c, botToken, "users.conversations", payload)
 	if err != nil {
-		return nil
+		return nil, err
 	}
-	return channels
+	return channels, nil
 }
 
 // ListAgentHostChannels offers the channels this caller may deploy an agent to.
@@ -1219,7 +1226,17 @@ func (h *WorkflowHandler) ListAgentHostChannels(c *gin.Context) {
 	// used to flag channels already in the caller's own list.
 	botChannels := map[string]bool{}
 	if slackUserID != "" {
-		for _, channel := range h.slackConversations(c, installation.BotToken, "") {
+		botOwn, err := h.slackConversations(c, installation.BotToken, "")
+		if err != nil {
+			// Say so rather than reporting every channel as one the bot is missing
+			// from. A silent false here reads as fact and disables the whole picker.
+			inventory.MembershipUnknown = true
+			inventory.Notice = "Could not check which channels Fernary is already in — " +
+				"if a deploy fails, invite Fernary to that channel in Slack and try again."
+			slog.WarnContext(c.Request.Context(), "slack bot channel lookup failed",
+				"error", err, "installation_id", installation.ID)
+		}
+		for _, channel := range botOwn {
 			botChannels[channel.ID] = true
 		}
 	}
@@ -1249,7 +1266,7 @@ func (h *WorkflowHandler) ListAgentHostChannels(c *gin.Context) {
 	for _, channel := range channels {
 		// On the scoped path is_member is absent, so fill it from the bot's own
 		// list. On the public fallback conversations.list supplies it already.
-		if slackUserID != "" {
+		if slackUserID != "" && !inventory.MembershipUnknown {
 			channel.IsMember = botChannels[channel.ID]
 		}
 		inventory.Channels = append(inventory.Channels, channel)

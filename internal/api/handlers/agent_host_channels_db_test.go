@@ -58,6 +58,10 @@ type slackStub struct {
 	calls      []url.Values
 	methods    []string
 	knownEmail string
+	// botListFails makes the bot's own users.conversations call fail while the
+	// caller's succeeds — the partial outage that decides whether a failed
+	// lookup is reported as "unknown" or as "the bot is in nothing".
+	botListFails bool
 }
 
 func (s *slackStub) serve(t *testing.T) {
@@ -87,6 +91,10 @@ func (s *slackStub) serve(t *testing.T) {
 			// bot's own, which is how is_member gets filled. The bot is in
 			// #engineering and #my-private-team but not #user-only.
 			if r.URL.Query().Get("user") == "" {
+				if s.botListFails {
+					_, _ = w.Write([]byte(`{"ok":false,"error":"ratelimited"}`))
+					return
+				}
 				_, _ = w.Write([]byte(`{"ok":true,"channels":[
 					{"id":"C_ENG","name":"engineering","is_private":false},
 					{"id":"C_MINE","name":"my-private-team","is_private":true}
@@ -299,5 +307,39 @@ func TestAnUnresolvedSlackIdentityFallsBackToPublicChannelsOnly(t *testing.T) {
 	if inventory.Scope != "public" || inventory.Notice == "" {
 		t.Errorf("fallback must say why the list is short: scope=%q notice=%q",
 			inventory.Scope, inventory.Notice)
+	}
+}
+
+// A failed bot-membership lookup must not masquerade as fact.
+//
+// is_member false means "the bot is not in this channel", and the picker
+// disables those. If a failed lookup produced the same false, every channel
+// would come back unavailable and an admin could not deploy to channels the bot
+// is already sitting in — an outage in a secondary call locking out the whole
+// feature.
+func TestAFailedBotLookupIsReportedAsUnknownNotAsAbsence(t *testing.T) {
+	db := channelsDB(t)
+	email := "member-" + uuid.NewString()[:8] + "@example.test"
+	stub := &slackStub{knownEmail: email, botListFails: true}
+	stub.serve(t)
+
+	h, orgID, hostID := seedHost(t, db, email)
+	var member models.User
+	if err := db.First(&member, "email = ?", email).Error; err != nil {
+		t.Fatalf("load member: %v", err)
+	}
+
+	inventory, status := listChannelsAs(t, h, orgID, member.ID.String(), hostID)
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200 — a secondary lookup failing must not fail the listing", status)
+	}
+	if !inventory.MembershipUnknown {
+		t.Fatal("membership_unknown is false, so the client cannot tell a failed lookup from a bot that joined nothing")
+	}
+	if inventory.Notice == "" {
+		t.Error("nothing told the user why membership could not be checked")
+	}
+	if len(inventory.Channels) == 0 {
+		t.Fatal("the caller's own channels disappeared because a different call failed")
 	}
 }
