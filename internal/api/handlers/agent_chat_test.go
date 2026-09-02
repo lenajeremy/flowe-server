@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 
@@ -152,6 +153,36 @@ func TestWorkflowBuilderPromptKeepsBehaviourNotCapabilities(t *testing.T) {
 		if strings.Contains(workflowSystemPrompt, capability) {
 			t.Errorf("workflow builder prompt states the capability %q — that belongs in nodeCatalog, which cannot go stale", capability)
 		}
+	}
+}
+
+func TestWorkflowBuilderNamesNewWorkflowsWithoutOverwritingCustomNames(t *testing.T) {
+	t.Parallel()
+
+	if got := autoWorkflowName("New Workflow", "Weekly Sales Digest"); got != "Weekly Sales Digest" {
+		t.Fatalf("placeholder name was not replaced: %q", got)
+	}
+	if got := autoWorkflowName("Customer Renewal Alerts", "Weekly Sales Digest"); got != "Customer Renewal Alerts" {
+		t.Fatalf("custom name was overwritten: %q", got)
+	}
+	if got := autoWorkflowName("New Workflow", "Automation"); got != "New Workflow" {
+		t.Fatalf("generic proposed name should be ignored: %q", got)
+	}
+	if got := autoWorkflowName("", strings.Repeat("é", 81)); len([]rune(got)) != 80 {
+		t.Fatalf("generated name was not bounded to 80 characters: %d", len([]rune(got)))
+	}
+
+	schema, _ := toolCreateWorkflow["input_schema"].(map[string]any)
+	properties, _ := schema["properties"].(map[string]any)
+	if _, ok := properties["name"]; !ok {
+		t.Fatal("create_workflow does not accept a generated name")
+	}
+	required, _ := schema["required"].([]string)
+	if !slices.Contains(required, "name") {
+		t.Fatal("create_workflow does not require a generated name")
+	}
+	if !strings.Contains(workflowSystemPrompt, "Name every new workflow after its purpose or outcome") {
+		t.Fatal("builder prompt does not require descriptive workflow names")
 	}
 }
 
