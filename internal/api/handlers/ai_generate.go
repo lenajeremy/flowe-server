@@ -229,15 +229,42 @@ var chatModels = []chatModelSpec{
 	},
 }
 
-const defaultChatModel = "gpt-5.5"
+// Two defaults, because these two surfaces are not the same trade.
+//
+// The builder is used once, by one person, while they design a workflow, and it
+// does the hardest reasoning in the product: many tool calls against a large node
+// catalog, where a weaker model starts emitting operations that do not exist. It
+// keeps a frontier model.
+//
+// The agent surfaces — chat with a workflow, and a deployed agent answering in
+// Slack — run per message, for a whole team, forever. That is where the spend
+// actually accumulates, and the work is narrower: read a request, pick a tool
+// already on the canvas, summarize the result. Flash is priced at a quarter of
+// gpt-4o and an eighth of gpt-5.5 in credit terms.
+const (
+	defaultChatModel  = "gpt-5.5"
+	defaultAgentModel = "gemini-3.5-flash"
+)
 
+// resolveChatModel resolves a builder-chat model id, defaulting to the frontier
+// model when the id is unknown or empty.
 func resolveChatModel(id string) chatModelSpec {
+	return resolveModelWithDefault(id, defaultChatModel)
+}
+
+// resolveAgentModel resolves a model id for the agent surfaces, defaulting to
+// the cheap tier.
+func resolveAgentModel(id string) chatModelSpec {
+	return resolveModelWithDefault(id, defaultAgentModel)
+}
+
+func resolveModelWithDefault(id, fallbackID string) chatModelSpec {
 	var fallback chatModelSpec
 	for _, m := range chatModels {
 		if m.ID == id {
 			return m
 		}
-		if m.ID == defaultChatModel {
+		if m.ID == fallbackID {
 			fallback = m
 		}
 	}
@@ -256,7 +283,7 @@ func (h *WorkflowHandler) AIModels(c *gin.Context) {
 		m.Available = os.Getenv(prov.KeyEnv) != ""
 		out[i] = m
 	}
-	c.JSON(http.StatusOK, gin.H{"models": out, "default": defaultChatModel})
+	c.JSON(http.StatusOK, gin.H{"models": out, "default": defaultChatModel, "agentDefault": defaultAgentModel})
 }
 
 // ── HTTP client for Anthropic ───────────────────────────────────
@@ -1473,7 +1500,7 @@ func (h *WorkflowHandler) runOpenAIChat(c *gin.Context, flusher http.Flusher, re
 	for round := 0; round < 5; round++ {
 		sendSSE(c.Writer, flusher, "thinking", statusForRound(round))
 
-		body, _ := json.Marshal(map[string]any{
+		payload := map[string]any{
 			"model":  model.ID,
 			"stream": true,
 			// Without include_usage a streamed response carries no token counts
@@ -1481,7 +1508,13 @@ func (h *WorkflowHandler) runOpenAIChat(c *gin.Context, flusher http.Flusher, re
 			"stream_options": map[string]any{"include_usage": true},
 			"messages":       messages,
 			"tools":          openAIToolDefs(),
-		})
+		}
+		// The builder defaults to a frontier model, but a user can pick Gemini
+		// here, and the same thinking-budget rule applies to it.
+		for key, value := range executor.OpenAICompatibleBody(model.ID) {
+			payload[key] = value
+		}
+		body, _ := json.Marshal(payload)
 
 		resp, err := doOpenAIRequest(c, url, apiKey, body)
 		if err != nil {

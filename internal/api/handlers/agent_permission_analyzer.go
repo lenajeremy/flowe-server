@@ -67,7 +67,12 @@ func (h *WorkflowHandler) AnalyzeAgentDeployment(c *gin.Context) {
 		c.JSON(http.StatusUnprocessableEntity, gin.H{"error": err.Error()})
 		return
 	}
-	runtimeModel, err := prepareAgentRuntimeModel(request.ModelID)
+	// Deliberately not the agent default. This decides which operations an agent
+	// may perform and which fields it may set — it is a security judgement made
+	// once per deployment, not a per-message turn, so it stays on the model that
+	// reasons best. Cheapening it saves nothing measurable and risks a policy that
+	// grants more than it should.
+	runtimeModel, err := prepareAgentAnalysisModel(request.ModelID)
 	if err != nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": err.Error()})
 		return
@@ -237,14 +242,24 @@ func requestAgentPermissionAnalysis(ctx context.Context, runtimeModel agentRunti
 		return text.String(), nil
 	}
 
-	body, _ := json.Marshal(map[string]any{
+	payload := map[string]any{
 		"model": runtimeModel.Spec.ID,
 		"messages": []map[string]string{
 			{"role": "system", "content": "You are a security-focused least-privilege deployment analyzer. Return JSON only."},
 			{"role": "user", "content": prompt},
 		},
 		"response_format": map[string]string{"type": "json_object"},
-	})
+		// The Anthropic branch above sets 4000; this one set nothing, which on a
+		// model that thinks from the same budget can return an empty body.
+		"max_completion_tokens": 4000,
+	}
+	// This path does not go through the executor's router, so provider-specific
+	// fields have to be applied here too — a thinking model with no budget left
+	// returns an empty policy, and an empty policy is not a safe default.
+	for key, value := range executor.OpenAICompatibleBody(runtimeModel.Spec.ID) {
+		payload[key] = value
+	}
+	body, _ := json.Marshal(payload)
 	resp, err := doOpenAIRequestContext(ctx, runtimeModel.ProviderURL, runtimeModel.APIKey, body)
 	if err != nil {
 		return "", err

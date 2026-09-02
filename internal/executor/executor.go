@@ -321,8 +321,8 @@ type openAIResponse struct {
 	} `json:"choices"`
 }
 
-func callOpenAI(ctx context.Context, model, system, user string, temp float64, maxTok int, key string, imgs []imageRef) (out string, err error) {
-	ctx, llmDone := telemetry.StartLLM(ctx, "openai", model)
+func callOpenAI(ctx context.Context, route llmRoute, model, system, user string, temp float64, maxTok int, imgs []imageRef) (out string, err error) {
+	ctx, llmDone := telemetry.StartLLM(ctx, route.Provider, model)
 	defer func() { llmDone(len(out), err) }()
 
 	system = WithClock(system)
@@ -349,9 +349,10 @@ func callOpenAI(ctx context.Context, model, system, user string, temp float64, m
 			{Role: "user", Content: userContent},
 		},
 	})
-	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://api.openai.com/v1/chat/completions", bytes.NewReader(body))
+	body = withRouteBody(body, route.Body)
+	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, route.URL, bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+key)
+	req.Header.Set("Authorization", "Bearer "+route.Key)
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -695,7 +696,7 @@ func runNodeInner(ctx context.Context, node WorkflowASTNode, outputs map[string]
 		})
 		return string(response), nil
 	case NodeTypeLLM:
-		model := derefStr(d.Model, "gpt-4o")
+		model := derefStr(d.Model, DefaultLLMModel)
 		sys := substituteTemplates(derefStr(d.SystemPrompt, ""), outputs)
 		userPromptTpl := derefStr(d.UserPrompt, "")
 
@@ -751,13 +752,14 @@ func runNodeInner(ctx context.Context, node WorkflowASTNode, outputs map[string]
 			}
 			return callAnthropic(ctx, model, sys, usr, temp, maxTok, keys.Anthropic, imgs)
 		}
-		if keys.OpenAI == "" {
-			return "", fmt.Errorf("OpenAI API key not set")
+		route, err := routeForModel(model, keys)
+		if err != nil {
+			return "", err
 		}
 		if d.EnableWebSearch {
-			return callOpenAIWithTools(ctx, model, sys, usr, maxTok, keys.OpenAI, imgs, keys)
+			return callOpenAIWithTools(ctx, route, model, sys, usr, maxTok, imgs, keys)
 		}
-		return callOpenAI(ctx, model, sys, usr, temp, maxTok, keys.OpenAI, imgs)
+		return callOpenAI(ctx, route, model, sys, usr, temp, maxTok, imgs)
 	case NodeTypeBranch:
 		cond := derefStr(d.Condition, "")
 		if cond == "" {
@@ -781,19 +783,27 @@ func runNodeInner(ctx context.Context, node WorkflowASTNode, outputs map[string]
 			name string
 			call func() (string, error)
 		}
+		// One word of output, so the cheapest small model that answers correctly is
+		// the right one. Ordered cheapest-first; each is only attempted if its key
+		// is set, and a failure falls through to the next.
 		var attempts []attempt
+		for _, small := range []string{DefaultSmallModel, "gpt-5.4-mini"} {
+			route, err := routeForModel(small, keys)
+			if err != nil {
+				continue
+			}
+			model, providerRoute := small, route
+			attempts = append(attempts, attempt{providerRoute.Provider, func() (string, error) {
+				return callOpenAI(ctx, providerRoute, model, system, prompt, 0, 8, nil)
+			}})
+		}
 		if keys.Anthropic != "" {
 			attempts = append(attempts, attempt{"anthropic", func() (string, error) {
 				return callAnthropic(ctx, "claude-haiku-4-5-20251001", system, prompt, 0, 8, keys.Anthropic, nil)
 			}})
 		}
-		if keys.OpenAI != "" {
-			attempts = append(attempts, attempt{"openai", func() (string, error) {
-				return callOpenAI(ctx, "gpt-5.4-mini", system, prompt, 0, 8, keys.OpenAI, nil)
-			}})
-		}
 		if len(attempts) == 0 {
-			return "", fmt.Errorf("branch conditions need an LLM — set ANTHROPIC_API_KEY or OPENAI_API_KEY on the server")
+			return "", fmt.Errorf("branch conditions need an LLM — set GEMINI_API_KEY, OPENAI_API_KEY or ANTHROPIC_API_KEY on the server")
 		}
 		var failures []string
 		for _, a := range attempts {

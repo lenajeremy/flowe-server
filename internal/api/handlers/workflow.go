@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"time"
 
-	"workflow-ai/server/config"
 	"workflow-ai/server/internal/auth"
 	"workflow-ai/server/internal/billing"
 	"workflow-ai/server/internal/codingagent"
@@ -204,12 +203,7 @@ func (h *WorkflowHandler) run(c *gin.Context, nodeOnly bool) {
 		}
 	}
 
-	keys := executor.APIKeys{
-		Anthropic: config.GetEnv("ANTHROPIC_API_KEY"),
-		OpenAI:    config.GetEnv("OPENAI_API_KEY"),
-		Brave:     config.GetEnv("BRAVE_API_KEY"),
-		Jina:      config.GetEnv("JINA_API_KEY"),
-	}
+	keys := executor.KeysFromEnv()
 
 	// A browser navigation is not authority to cancel a durable workflow. The
 	// coding job and all downstream nodes continue, while events remain
