@@ -952,6 +952,8 @@ func (h *WorkflowHandler) listProviderResources(orgID, userID, provider string) 
 		return airtableResources(token)
 	case "supabase":
 		return supabaseResources(token)
+	case "vercel":
+		return vercelResources(token)
 	case "googlesearchconsole":
 		return searchConsoleResources(token)
 	case "clickup":
@@ -1014,6 +1016,9 @@ func (h *WorkflowHandler) listChildResources(orgID, userID, provider, parent str
 		return mondayBoardResources(token, parent)
 	case "asana":
 		return asanaProjectResources(token, parent)
+	case "vercel":
+		// Composite parent: a team, or "team/project". See integrations_vercel.go.
+		return vercelChildResources(token, parent)
 	}
 	return []integrationResource{}, nil
 }
