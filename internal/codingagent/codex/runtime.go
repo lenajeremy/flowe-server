@@ -237,13 +237,43 @@ func verifyCodexCommand(version string) string {
 		" || { printf 'Codex CLI in the configured sandbox snapshot does not match the required version\\n' >&2; exit 10; }"
 }
 
+// sandboxArguments picks a Codex sandbox backend that can start at all inside
+// a provider sandbox.
+//
+// Codex confines shell commands with bubblewrap, which needs a nested user
+// namespace. Daytona refuses one — writing /proc/self/uid_map is denied — so
+// the default backend kills every command the agent runs with "bwrap:
+// loopback: Failed RTM_NEWADDR: Operation not permitted", and the job reports
+// that it could not read or change a single file.
+//
+// Read-only work survives on the legacy Landlock backend, which enforces
+// through the kernel LSM rather than a namespace. Codex cannot express
+// workspace-write that way ("permission profiles requiring direct runtime
+// enforcement are incompatible with --use-legacy-landlock"), so a write job
+// runs unconfined by Codex and leans on the provider sandbox for its boundary:
+// an unprivileged user with no sudo, a disposable workspace, and a network
+// allow list applied outside the guest. That is the containment this runtime
+// has always actually depended on; the nested sandbox only ever cost us jobs.
+//
+// Codex reports use_legacy_landlock as deprecated. When it goes, --strict-config
+// rejects it at startup and read-only jobs stop before any credential or
+// repository content is uploaded, rather than failing halfway through.
+func sandboxArguments(allowWrite bool) []string {
+	if allowWrite {
+		return []string{"--sandbox", "danger-full-access"}
+	}
+	return []string{"--sandbox", "read-only", "--enable", "use_legacy_landlock"}
+}
+
 func buildCommand(req codingagent.RuntimeRequest, secretDir, promptPath, schemaPath, resultPath, toolTokenPath string) string {
 	parts := []string{
 		"codex", "--ask-for-approval", "never", "--search", "exec", "--json", "--color", "never", "--strict-config",
-		"--sandbox", map[bool]string{true: "workspace-write", false: "read-only"}[req.AllowWrite],
+	}
+	parts = append(parts, sandboxArguments(req.AllowWrite)...)
+	parts = append(parts,
 		"--output-schema", shellQuote(schemaPath), "--output-last-message", shellQuote(resultPath),
 		"--cd", shellQuote(req.WorkingDirectory),
-	}
+	)
 	if strings.TrimSpace(req.Model) != "" {
 		parts = append(parts, "--model", shellQuote(strings.TrimSpace(req.Model)))
 	}

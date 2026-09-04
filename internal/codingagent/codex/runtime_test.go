@@ -15,7 +15,7 @@ func TestBuildCommandReadsPromptFromFileAndResumes(t *testing.T) {
 		AllowWrite:       true,
 	}, "/tmp/auth", "/tmp/auth/prompt.txt", "/tmp/auth/schema.json", "/tmp/auth/result.json", "/tmp/auth/mcp-token")
 	for _, expected := range []string{
-		"--ask-for-approval never", "--search", "--sandbox workspace-write", "--strict-config",
+		"--ask-for-approval never", "--search", "--sandbox danger-full-access", "--strict-config",
 		"--model 'gpt-5.6-codex'", "resume '019c-thread-123'", "- < '/tmp/auth/prompt.txt'",
 		// Read from the file at run time: the provider stores the rendered
 		// command, so the token itself must never appear in it.
@@ -24,6 +24,30 @@ func TestBuildCommandReadsPromptFromFileAndResumes(t *testing.T) {
 		if !strings.Contains(command, expected) {
 			t.Fatalf("command %q does not contain %q", command, expected)
 		}
+	}
+}
+
+// Bubblewrap cannot start inside the provider sandbox, so a write job carries
+// no Codex-side confinement and a read-only job must fall back to Landlock.
+// Asking for workspace-write again would restore the failure this replaced:
+// every command dying on "bwrap: loopback: Failed RTM_NEWADDR".
+func TestBuildCommandChoosesASandboxBackendThatStartsUnderDaytona(t *testing.T) {
+	request := codingagent.RuntimeRequest{WorkingDirectory: "/workspace/repo"}
+	readOnly := buildCommand(request, "/tmp/auth", "/tmp/auth/prompt.txt", "/tmp/auth/schema.json", "/tmp/auth/result.json", "")
+	if !strings.Contains(readOnly, "--sandbox read-only --enable use_legacy_landlock") {
+		t.Fatalf("read-only command does not use the Landlock backend: %s", readOnly)
+	}
+	if strings.Contains(readOnly, "danger-full-access") {
+		t.Fatalf("read-only command must stay enforced: %s", readOnly)
+	}
+
+	request.AllowWrite = true
+	write := buildCommand(request, "/tmp/auth", "/tmp/auth/prompt.txt", "/tmp/auth/schema.json", "/tmp/auth/result.json", "")
+	if strings.Contains(write, "workspace-write") || strings.Contains(write, "use_legacy_landlock") {
+		t.Fatalf("write command uses a backend that cannot start under Daytona: %s", write)
+	}
+	if !strings.Contains(write, "--sandbox danger-full-access") {
+		t.Fatalf("write command does not disable the unusable nested sandbox: %s", write)
 	}
 }
 
