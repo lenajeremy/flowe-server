@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"regexp"
 	"sort"
@@ -29,7 +30,13 @@ var slackAgentHostRequiredScopes = []string{
 	"app_mentions:read", "chat:write", "chat:write.customize",
 	"channels:read", "channels:history", "groups:read", "groups:history",
 }
-var slackAgentHostRequestedScopes = append(append([]string{}, slackAgentHostRequiredScopes...), "channels:join")
+
+// users:read.email maps a Fernary member onto their Slack account so the channel
+// picker can be scoped to what that person can already see. Requested but not
+// required: installs that predate it keep working, and offer public channels
+// only until they are reinstalled.
+var slackAgentHostRequestedScopes = append(append([]string{}, slackAgentHostRequiredScopes...),
+	"channels:join", "users:read.email")
 
 type AgentPermissionSummary struct {
 	Goal                    string   `json:"goal,omitempty"`
@@ -55,11 +62,18 @@ type agentDeploymentChannelInput struct {
 }
 
 type agentHostSlackChannel struct {
-	ID        string `json:"id"`
-	Name      string `json:"name"`
-	IsMember  bool   `json:"is_member"`
-	IsPrivate bool   `json:"is_private"`
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	// IsMember is a pointer so "we could not find out" is null on the wire
+	// rather than false. A plain bool has no way to say that, and false reads as
+	// "the bot is not in this channel" — which disables it in the picker. A
+	// consumer can ignore an envelope flag; it cannot ignore a null.
+	IsMember  *bool `json:"is_member"`
+	IsPrivate bool  `json:"is_private"`
 }
+
+// memberFlag is for the paths that genuinely know the answer.
+func memberFlag(v bool) *bool { return &v }
 
 type createAgentDeploymentRequest struct {
 	Name               string                        `json:"name" binding:"required"`
@@ -1106,6 +1120,110 @@ func (h *WorkflowHandler) DeleteAgentHost(c *gin.Context) {
 	c.Status(http.StatusNoContent)
 }
 
+// slackChannelInventory is what the channel picker gets back: the channels the
+// caller may choose, plus why the list might be shorter than they expect.
+type slackChannelInventory struct {
+	Channels []agentHostSlackChannel `json:"channels"`
+	// Scope is "member" when the list was narrowed to the caller's own Slack
+	// membership, or "public" when their Slack identity could not be resolved and
+	// only public channels are offered.
+	Scope  string `json:"scope"`
+	Notice string `json:"notice,omitempty"`
+	// MembershipUnknown reports that the bot's own channel list could not be
+	// read, so is_member on each channel means "we could not tell" rather than
+	// "the bot is not in it". Without this the two are indistinguishable, and a
+	// failed lookup would present every channel as unavailable — locking an
+	// admin out of channels the bot is already sitting in.
+	MembershipUnknown bool `json:"membership_unknown,omitempty"`
+}
+
+// slackWorkspaceUserID maps the calling Fernary user onto their Slack account.
+//
+// The host bot is shared org-wide, so its own channel list says nothing about
+// what any individual member is entitled to see. Matching on the account email
+// is the only link between the two identities that exists without asking every
+// member to authorize Slack separately.
+//
+// An empty id is not an error: the member may simply not be in this workspace,
+// their Slack address may differ from their Fernary one, or the install may
+// predate the users:read.email scope. The caller decides what to do about it.
+func (h *WorkflowHandler) slackWorkspaceUserID(c *gin.Context, botToken string) string {
+	var user models.User
+	if h.db.DB.First(&user, "id = ?", auth.UserID(c)).Error != nil {
+		return ""
+	}
+	email := strings.TrimSpace(user.Email)
+	if email == "" {
+		return ""
+	}
+	var lookup struct {
+		User struct {
+			ID string `json:"id"`
+		} `json:"user"`
+	}
+	if err := slackAgentAPIGet(c.Request.Context(), botToken, "users.lookupByEmail",
+		map[string]any{"email": email}, &lookup); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(lookup.User.ID)
+}
+
+// pageSlackChannels walks a cursor-paginated Slack channel listing.
+func (h *WorkflowHandler) pageSlackChannels(c *gin.Context, botToken, method string, payload map[string]any) ([]agentHostSlackChannel, error) {
+	var channels []agentHostSlackChannel
+	cursor := ""
+	for page := 0; page < 10; page++ {
+		var response struct {
+			Channels []agentHostSlackChannel `json:"channels"`
+			Metadata struct {
+				NextCursor string `json:"next_cursor"`
+			} `json:"response_metadata"`
+		}
+		if cursor != "" {
+			payload["cursor"] = cursor
+		}
+		if err := slackAgentAPIGet(c.Request.Context(), botToken, method, payload, &response); err != nil {
+			return nil, err
+		}
+		channels = append(channels, response.Channels...)
+		cursor = strings.TrimSpace(response.Metadata.NextCursor)
+		if cursor == "" {
+			break
+		}
+	}
+	return channels, nil
+}
+
+// slackConversations lists conversations for one user, or for the bot itself when
+// userID is empty. Errors are swallowed on purpose: this only decides whether a
+// channel is shown as ready or as "invite Fernary first", and failing that check
+// should degrade the label rather than the whole picker.
+func (h *WorkflowHandler) slackConversations(c *gin.Context, botToken, userID string) ([]agentHostSlackChannel, error) {
+	payload := map[string]any{
+		"limit": 200, "exclude_archived": true, "types": "public_channel,private_channel",
+	}
+	if userID != "" {
+		payload["user"] = userID
+	}
+	channels, err := h.pageSlackChannels(c, botToken, "users.conversations", payload)
+	if err != nil {
+		return nil, err
+	}
+	return channels, nil
+}
+
+// ListAgentHostChannels offers the channels this caller may deploy an agent to.
+//
+// The list is scoped to the caller's own Slack membership, not the bot's. The
+// host bot is connected once for the whole organization and sits in whatever
+// channels the workspace put it in, so listing its channels handed every member
+// — including people outside that Slack workspace entirely — an inventory of
+// private channel names, ids and membership. Deploying stays open to any member;
+// what they can point a deployment at is what they can already see.
+//
+// users.conversations with a user id returns a private channel only when the bot
+// shares membership too, which is the same set a deployment needs anyway: the
+// bot has to be in a channel to post there.
 func (h *WorkflowHandler) ListAgentHostChannels(c *gin.Context) {
 	var installation models.AgentHostInstallation
 	if err := h.db.DB.Where("id = ? AND organization_id = ? AND status = ?",
@@ -1117,33 +1235,64 @@ func (h *WorkflowHandler) ListAgentHostChannels(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "this host does not expose Slack channels"})
 		return
 	}
-	// Membership is transport metadata, not a persistent deployment permission.
-	var channels []agentHostSlackChannel
-	cursor := ""
-	for page := 0; page < 10; page++ {
-		var response struct {
-			Channels []agentHostSlackChannel `json:"channels"`
-			Metadata struct {
-				NextCursor string `json:"next_cursor"`
-			} `json:"response_metadata"`
+
+	inventory := slackChannelInventory{Channels: []agentHostSlackChannel{}, Scope: "member"}
+	slackUserID := h.slackWorkspaceUserID(c, installation.BotToken)
+
+	// users.conversations does not return is_member — Slack's reference says so
+	// explicitly — and the picker disables any channel the bot is not in, so
+	// without this every channel arrives undefined and nothing is selectable.
+	// The bot's own membership is a separate question from the caller's, so it
+	// takes a separate call. Nothing workspace-wide is returned: this is only
+	// used to flag channels already in the caller's own list.
+	botChannels := map[string]bool{}
+	if slackUserID != "" {
+		botOwn, err := h.slackConversations(c, installation.BotToken, "")
+		if err != nil {
+			// Say so rather than reporting every channel as one the bot is missing
+			// from. A silent false here reads as fact and disables the whole picker.
+			inventory.MembershipUnknown = true
+			inventory.Notice = "Could not check which channels Fernary is already in — " +
+				"if a deploy fails, invite Fernary to that channel in Slack and try again."
+			slog.WarnContext(c.Request.Context(), "slack bot channel lookup failed",
+				"error", err, "installation_id", installation.ID)
 		}
-		payload := map[string]any{
-			"limit": 200, "exclude_archived": true, "types": "public_channel,private_channel",
-		}
-		if cursor != "" {
-			payload["cursor"] = cursor
-		}
-		if err := slackAgentAPIGet(c.Request.Context(), installation.BotToken, "conversations.list", payload, &response); err != nil {
-			c.JSON(http.StatusBadGateway, gin.H{"error": "could not list Slack channels", "detail": err.Error()})
-			return
-		}
-		channels = append(channels, response.Channels...)
-		cursor = strings.TrimSpace(response.Metadata.NextCursor)
-		if cursor == "" {
-			break
+		for _, channel := range botOwn {
+			botChannels[channel.ID] = true
 		}
 	}
-	c.JSON(http.StatusOK, channels)
+
+	// Falling back to public channels rather than to everything: an unresolved
+	// identity must never widen what is returned. Installs that predate the
+	// users:read.email scope keep working, with private channels withheld until
+	// the Slack app is reinstalled.
+	method, payload := "users.conversations", map[string]any{
+		"limit": 200, "exclude_archived": true,
+		"types": "public_channel,private_channel", "user": slackUserID,
+	}
+	if slackUserID == "" {
+		inventory.Scope = "public"
+		inventory.Notice = "Showing public channels only — we could not match your account to a Slack user. " +
+			"Private channels appear once your Slack email matches this one and the app has been reinstalled."
+		method, payload = "conversations.list", map[string]any{
+			"limit": 200, "exclude_archived": true, "types": "public_channel",
+		}
+	}
+
+	channels, err := h.pageSlackChannels(c, installation.BotToken, method, payload)
+	if err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": "could not list Slack channels", "detail": err.Error()})
+		return
+	}
+	for _, channel := range channels {
+		// On the scoped path is_member is absent, so fill it from the bot's own
+		// list. On the public fallback conversations.list supplies it already.
+		if slackUserID != "" && !inventory.MembershipUnknown {
+			channel.IsMember = memberFlag(botChannels[channel.ID])
+		}
+		inventory.Channels = append(inventory.Channels, channel)
+	}
+	c.JSON(http.StatusOK, inventory)
 }
 
 // JoinAgentDeploymentSlackChannel lets a deployment manager add the shared bot
@@ -1222,7 +1371,7 @@ func joinSlackAgentPublicChannel(ctx context.Context, token, channelID string) (
 	if info.Channel.IsPrivate {
 		return agentHostSlackChannel{}, errSlackAgentPrivateChannel
 	}
-	if info.Channel.IsMember {
+	if info.Channel.IsMember != nil && *info.Channel.IsMember {
 		return info.Channel, nil
 	}
 	var joined struct {
@@ -1234,7 +1383,7 @@ func joinSlackAgentPublicChannel(ctx context.Context, token, channelID string) (
 	if joined.Channel.ID != channelID {
 		return agentHostSlackChannel{}, errors.New("Slack joined a different channel")
 	}
-	joined.Channel.IsMember = true
+	joined.Channel.IsMember = memberFlag(true)
 	return joined.Channel, nil
 }
 
