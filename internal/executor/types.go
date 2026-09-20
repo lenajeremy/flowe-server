@@ -1061,6 +1061,12 @@ const (
 	EventWorkflowCompleted ExecutionEventType = "workflow_completed"
 	EventWorkflowError     ExecutionEventType = "workflow_error"
 	EventNodeWaiting       ExecutionEventType = "node_waiting"
+	// EventApprovalFeedback records one rejected attempt at an approval gate:
+	// the output the reviewer turned down, and the steer they gave instead.
+	// The executor holds no database handle and run events are already
+	// persisted, so emitting the feedback is what makes it durable — it lives
+	// in the run's own trace and replays with it.
+	EventApprovalFeedback ExecutionEventType = "approval_feedback"
 	// EventNodeProgress reports non-terminal activity inside a long-running
 	// node. Unlike EventNodeWaiting, it never pauses the workflow or creates a
 	// human-approval decision.

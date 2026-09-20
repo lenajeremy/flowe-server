@@ -153,31 +153,123 @@ func integrationWorkspaceFromContext(ctx context.Context) string {
 
 // ── Approval channels ──────────────────────────────────────────
 
+// ApprovalAction is what a reviewer decided at a gate. Approve and reject are
+// terminal and select the node's outgoing edge; retry is not — it re-runs the
+// node feeding the gate and asks again, so one gate can be visited several
+// times inside a single run.
+type ApprovalAction string
+
+const (
+	ApprovalApproved ApprovalAction = "approved"
+	ApprovalRejected ApprovalAction = "rejected"
+	ApprovalRetry    ApprovalAction = "retry"
+)
+
+// ApprovalDecision carries the choice and, for a retry, the steer to apply to
+// the next attempt.
+type ApprovalDecision struct {
+	Action   ApprovalAction
+	Feedback string
+}
+
+// MaxApprovalRetries caps the loop. Every retry is a real model call billed to
+// the owner, and the loop is driven by whoever holds the run link, so it needs
+// a ceiling that does not depend on the reviewer losing interest.
+const MaxApprovalRetries = 5
+
 var (
-	approvalChannels   = make(map[string]chan bool)
+	approvalChannels   = make(map[string]chan ApprovalDecision)
 	approvalChannelsMu sync.Mutex
 )
 
-func RegisterApprovalChannel(runID string) chan bool {
-	ch := make(chan bool, 1)
+// RegisterApprovalChannel opens the wait for one attempt. The retry loop calls
+// it once per attempt — ResolveApproval consumes and removes the channel, so
+// each attempt waits on a fresh one.
+func RegisterApprovalChannel(key string) chan ApprovalDecision {
+	ch := make(chan ApprovalDecision, 1)
 	approvalChannelsMu.Lock()
-	approvalChannels[runID] = ch
+	approvalChannels[key] = ch
 	approvalChannelsMu.Unlock()
 	return ch
 }
 
-func ResolveApproval(runID string, approved bool) bool {
+func ResolveApproval(key string, decision ApprovalDecision) bool {
 	approvalChannelsMu.Lock()
-	ch, ok := approvalChannels[runID]
+	ch, ok := approvalChannels[key]
 	approvalChannelsMu.Unlock()
 	if !ok {
 		return false
 	}
-	ch <- approved
+	ch <- decision
 	approvalChannelsMu.Lock()
-	delete(approvalChannels, runID)
+	delete(approvalChannels, key)
 	approvalChannelsMu.Unlock()
 	return true
+}
+
+// ApprovalRetrier re-runs the node feeding a gate. Only the outer execution
+// loop knows the graph, so it supplies this through the context; a single-node
+// test or any caller without one gets no retry option at all, which is why
+// CanRetry is asked before the choice is ever offered to a reviewer.
+type ApprovalRetrier interface {
+	// CanRetry reports whether feedback has anywhere to go. Today that means
+	// the upstream node is an LLM: a steer aimed at a Slack or HTTP node has no
+	// prompt to change, so offering it would be a button that does nothing.
+	CanRetry(sourceNodeID string) bool
+	// Retry re-executes the upstream node with the feedback folded into its
+	// prompt, and returns the new output.
+	Retry(ctx context.Context, sourceNodeID, feedback, previousOutput string) (string, error)
+}
+
+type approvalRetrierCtxKey struct{}
+
+func WithApprovalRetrier(ctx context.Context, r ApprovalRetrier) context.Context {
+	return context.WithValue(ctx, approvalRetrierCtxKey{}, r)
+}
+
+func approvalRetrierFrom(ctx context.Context) ApprovalRetrier {
+	r, _ := ctx.Value(approvalRetrierCtxKey{}).(ApprovalRetrier)
+	return r
+}
+
+// appBaseURL is the origin a person's browser reaches the app on — the one
+// /run/:runId is served from.
+//
+// It reads FRONTEND_URL, which is what the rest of the server already uses for
+// exactly this: the CORS allowlist, sign-in links, and the logo in branded mail
+// all resolve the app origin from it. The approval mail used to read an APP_URL
+// that appears nowhere else in the codebase and in no .env file, so it was
+// always empty and every approval link fell back to localhost.
+//
+// Not PUBLIC_BASE_URL: that is the API origin, where OAuth callbacks and
+// inbound webhooks land. The SPA is built against a separate host
+// (VITE_BACKEND_URL points the client at the API), so aiming approval mail
+// there would 404 rather than open a run.
+//
+// A localhost value is kept rather than rewritten — it is correct in local
+// development — but it is logged, because the symptom in production is an
+// unusable link sitting in somebody's inbox with nothing else to show for it.
+func appBaseURL(ctx context.Context) string {
+	raw := strings.TrimRight(strings.TrimSpace(strings.Split(os.Getenv("FRONTEND_URL"), ",")[0]), "/")
+	if raw == "" {
+		raw = "http://localhost:5173"
+	}
+	if strings.Contains(raw, "localhost") || strings.Contains(raw, "127.0.0.1") {
+		slog.WarnContext(ctx, "approval link points at a local origin — set FRONTEND_URL for mail that works off this machine",
+			"origin", raw)
+	}
+	return raw
+}
+
+// approvalSource finds the node whose output the gate is reviewing — the one a
+// retry re-runs.
+func approvalSource(nodeID string, edges []WorkflowASTEdge, outputs map[string]string) (sourceID, output string) {
+	for _, e := range edges {
+		if e.Target == nodeID {
+			return e.Source, outputs[e.Source]
+		}
+	}
+	return "", ""
 }
 
 // ── UUID ──────────────────────────────────────────────────────
@@ -943,50 +1035,44 @@ func runNodeInner(ctx context.Context, node WorkflowASTNode, outputs map[string]
 		if message == "" {
 			message = "Please review and approve or reject this step."
 		}
-		ch := RegisterApprovalChannel(runID + ":" + node.ID)
-		emit(ExecutionEvent{
-			ID:      newUUID(),
-			Type:    EventNodeWaiting,
-			NodeID:  strPtr(node.ID),
-			Message: message,
-			RunID:   runID,
-		})
+		key := runID + ":" + node.ID
+		sourceID, upstreamOutput := approvalSource(node.ID, edges, outputs)
 
-		// Send notification email if configured
-		if d.ApprovalEmail != "" {
-			appURL := os.Getenv("APP_URL")
-			if appURL == "" {
-				appURL = "http://localhost:4905"
+		// Retry is only offered when the steer has somewhere to land. The
+		// outer loop owns the graph, so it decides; without a retrier (a
+		// single-node test, say) the reviewer simply gets approve or reject.
+		retrier := approvalRetrierFrom(ctx)
+		canRetry := retrier != nil && sourceID != "" && retrier.CanRetry(sourceID)
+
+		notify := func(attempt int, content string) {
+			if d.ApprovalEmail == "" {
+				return
 			}
-			runURL := fmt.Sprintf("%s/run/%s", appURL, runID)
-
-			// Find the upstream node output (the content to review)
-			var upstreamOutput string
-			for _, e := range edges {
-				if e.Target == node.ID {
-					if v, ok := outputs[e.Source]; ok {
-						upstreamOutput = v
-					}
-					break
-				}
-			}
-
 			resendKey := os.Getenv("RESEND_API_KEY")
-			if resendKey != "" {
-				emailText := fmt.Sprintf("%s\n\n---\n\nContent to review:\n\n%s\n\n---\n\nApprove or reject here:\n%s", message, upstreamOutput, runURL)
-				// A platform notification → Fernary-branded shell + CTA button.
-				htmlBody := email.Action("Action required", message, upstreamOutput, runURL, "Review & respond", node.Data.Label)
-				client := resend.NewClient(resendKey)
-				_, mailErr := client.Emails.Send(&resend.SendEmailRequest{
-					From:    email.FromAddress(),
-					To:      []string{d.ApprovalEmail},
-					Subject: "Action Required: " + node.Data.Label,
-					Text:    emailText,
-					Html:    htmlBody,
-				})
-				telemetry.EmailSent(ctx, "approval", mailErr)
+			if resendKey == "" {
+				return
 			}
+			runURL := fmt.Sprintf("%s/run/%s", appBaseURL(ctx), runID)
+			heading := "Action required"
+			if attempt > 1 {
+				heading = fmt.Sprintf("Action required — revision %d", attempt)
+			}
+			// One button, no decision links. The reviewer reads the result on
+			// the run page and decides there, so a forwarded email can never
+			// approve anything on their behalf.
+			emailText := fmt.Sprintf("%s\n\n---\n\nResult to review:\n\n%s\n\n---\n\nReview this run:\n%s", message, content, runURL)
+			htmlBody := email.Action(heading, message, content, runURL, "Review this run", node.Data.Label)
+			client := resend.NewClient(resendKey)
+			_, mailErr := client.Emails.Send(&resend.SendEmailRequest{
+				From:    email.FromAddress(),
+				To:      []string{d.ApprovalEmail},
+				Subject: "Action Required: " + node.Data.Label,
+				Text:    emailText,
+				Html:    htmlBody,
+			})
+			telemetry.EmailSent(ctx, "approval", mailErr)
 		}
+
 		timeout := NormalizeApprovalTimeout(d.ApprovalTimeout)
 		waitStart := time.Now()
 		result := "cancelled"
@@ -998,25 +1084,86 @@ func runNodeInner(ctx context.Context, node WorkflowASTNode, outputs map[string]
 				"run_id", runID, "node_id", node.ID, "result", result,
 				"waited_ms", time.Since(waitStart).Milliseconds())
 		}()
-		select {
-		case approved := <-ch:
-			if approved {
-				result = "approved"
-				return "approved", nil
+
+		for attempt := 1; ; attempt++ {
+			ch := RegisterApprovalChannel(key)
+			retriesLeft := 0
+			if canRetry {
+				retriesLeft = MaxApprovalRetries - (attempt - 1)
 			}
-			result = "rejected"
-			return "rejected", nil
-		case <-time.After(time.Duration(timeout) * time.Second):
-			result = "timeout"
-			approvalChannelsMu.Lock()
-			delete(approvalChannels, runID+":"+node.ID)
-			approvalChannelsMu.Unlock()
-			return "rejected", fmt.Errorf("approval timed out after %d seconds", timeout)
-		case <-ctx.Done():
-			approvalChannelsMu.Lock()
-			delete(approvalChannels, runID+":"+node.ID)
-			approvalChannelsMu.Unlock()
-			return "", fmt.Errorf("workflow cancelled")
+			emit(ExecutionEvent{
+				ID:      newUUID(),
+				Type:    EventNodeWaiting,
+				NodeID:  strPtr(node.ID),
+				Message: message,
+				RunID:   runID,
+				Payload: map[string]any{
+					"canRetry":      canRetry && retriesLeft > 0,
+					"retriesLeft":   retriesLeft,
+					"attempt":       attempt,
+					"sourceNodeId":  sourceID,
+					"reviewContent": upstreamOutput,
+				},
+			})
+			notify(attempt, upstreamOutput)
+
+			select {
+			case decision := <-ch:
+				switch decision.Action {
+				case ApprovalApproved:
+					result = "approved"
+					return "approved", nil
+
+				case ApprovalRetry:
+					if !canRetry || attempt > MaxApprovalRetries {
+						// The reviewer asked for something this gate cannot
+						// do. Treat it as a rejection rather than silently
+						// looping, so the run resolves either way.
+						result = "rejected"
+						return "rejected", nil
+					}
+					// The feedback is emitted before the retry runs: if the
+					// re-run fails, the steer the reviewer wrote is still in
+					// the trace rather than lost with the attempt.
+					emit(ExecutionEvent{
+						ID:      newUUID(),
+						Type:    EventApprovalFeedback,
+						NodeID:  strPtr(node.ID),
+						Message: decision.Feedback,
+						Output:  strPtr(upstreamOutput),
+						RunID:   runID,
+						Payload: map[string]any{
+							"attempt":      attempt,
+							"sourceNodeId": sourceID,
+						},
+					})
+					newOut, retryErr := retrier.Retry(ctx, sourceID, decision.Feedback, upstreamOutput)
+					if retryErr != nil {
+						result = "error"
+						return "", fmt.Errorf("retry of %q failed: %w", sourceID, retryErr)
+					}
+					upstreamOutput = newOut
+					outputs[sourceID] = newOut
+					continue
+
+				default:
+					result = "rejected"
+					return "rejected", nil
+				}
+
+			case <-time.After(time.Duration(timeout) * time.Second):
+				result = "timeout"
+				approvalChannelsMu.Lock()
+				delete(approvalChannels, key)
+				approvalChannelsMu.Unlock()
+				return "rejected", fmt.Errorf("approval timed out after %d seconds", timeout)
+
+			case <-ctx.Done():
+				approvalChannelsMu.Lock()
+				delete(approvalChannels, key)
+				approvalChannelsMu.Unlock()
+				return "", fmt.Errorf("workflow cancelled")
+			}
 		}
 
 	case NodeTypeWebhookTrigger:
@@ -1728,6 +1875,69 @@ func extractLoopItems(input, field string) []string {
 
 // RunWorkflow executes a workflow AST. ownerID is the workflow owner's user
 // ID, used to resolve their integration connections (OAuth tokens).
+// graphApprovalRetrier re-runs one node on a reviewer's instruction. It holds
+// the live outputs map rather than a copy: runNodeInner receives a filtered
+// view of the outputs, so the gate cannot publish the new value itself and the
+// retrier has to write it where the rest of the graph will read it.
+type graphApprovalRetrier struct {
+	nodeMap map[string]WorkflowASTNode
+	outputs map[string]string
+	edges   []WorkflowASTEdge
+	keys    APIKeys
+	runID   string
+	ownerID string
+	emit    func(ExecutionEvent)
+	mk      func(ExecutionEventType, *WorkflowASTNode, *string, string) ExecutionEvent
+}
+
+func (r *graphApprovalRetrier) CanRetry(sourceNodeID string) bool {
+	node, ok := r.nodeMap[sourceNodeID]
+	return ok && node.Data.NodeType == NodeTypeLLM
+}
+
+// steerPrompt folds the rejected attempt and the reviewer's correction into the
+// prompt. It is appended to the user prompt rather than the system prompt so it
+// reads as the latest turn of a conversation, and the saved workflow is never
+// touched — the steer applies to this attempt in this run only.
+func steerPrompt(original, previousOutput, feedback string) string {
+	var b strings.Builder
+	b.WriteString(original)
+	b.WriteString("\n\n---\n\nA reviewer rejected your previous attempt.\n\nYour previous answer was:\n")
+	b.WriteString(previousOutput)
+	b.WriteString("\n\nTheir feedback:\n")
+	b.WriteString(feedback)
+	b.WriteString("\n\nProduce a revised answer that addresses the feedback. Return only the revised answer, with no preamble and no commentary on the change.")
+	return b.String()
+}
+
+func (r *graphApprovalRetrier) Retry(ctx context.Context, sourceNodeID, feedback, previousOutput string) (string, error) {
+	node, ok := r.nodeMap[sourceNodeID]
+	if !ok {
+		return "", fmt.Errorf("node %q is no longer in the graph", sourceNodeID)
+	}
+	if node.Data.NodeType != NodeTypeLLM {
+		return "", fmt.Errorf("node %q is not a model node, so there is nothing to steer", sourceNodeID)
+	}
+
+	// Copy the node before editing it. nodeMap is shared with the execution
+	// loop, so mutating the stored node would leak this attempt's steer into
+	// any later re-run of the same node.
+	retryNode := node
+	steered := steerPrompt(derefStr(node.Data.UserPrompt, ""), previousOutput, feedback)
+	retryNode.Data.UserPrompt = &steered
+
+	r.emit(r.mk(EventNodeStarted, &retryNode, nil, node.Data.Label+" (revising)"))
+	out, err := executeNode(ctx, retryNode, r.outputs, r.edges, r.keys, r.runID, r.ownerID, r.emit)
+	if err != nil {
+		r.emit(r.mk(EventNodeError, &retryNode, nil, "Error: "+err.Error()))
+		return "", err
+	}
+	r.outputs[sourceNodeID] = out
+	r.emit(r.mk(EventNodeOutput, &retryNode, strPtr(out), node.Data.Label))
+	r.emit(r.mk(EventNodeCompleted, &retryNode, nil, node.Data.Label+" revised"))
+	return out, nil
+}
+
 func RunWorkflow(ctx context.Context, workflow WorkflowAST, keys APIKeys, runID, ownerID, orgID string, emit EmitFn, runOptions ...RunOptions) {
 	start := time.Now()
 	ctx = context.WithValue(ctx, workflowStartedAtCtxKey{}, start)
@@ -1876,6 +2086,24 @@ func RunWorkflow(ctx context.Context, workflow WorkflowAST, keys APIKeys, runID,
 	nodeMap := make(map[string]WorkflowASTNode, len(nodes))
 	for _, n := range nodes {
 		nodeMap[n.ID] = n
+	}
+
+	// An approval gate can send its upstream node back for another attempt.
+	// Only this scope has the graph and the live outputs map, so the retrier is
+	// built here and reaches the gate through the context. A retrier already on
+	// the context wins, which is the seam tests use to exercise the loop without
+	// a live model call.
+	if approvalRetrierFrom(ctx) == nil {
+		ctx = WithApprovalRetrier(ctx, &graphApprovalRetrier{
+			nodeMap: nodeMap,
+			outputs: outputs,
+			edges:   edges,
+			keys:    keys,
+			runID:   runID,
+			ownerID: ownerID,
+			emit:    emit,
+			mk:      mk,
+		})
 	}
 
 	// A node test uses the same credential lookup, billing, telemetry, approval,
