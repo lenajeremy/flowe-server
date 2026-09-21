@@ -111,7 +111,7 @@ func TestApprovalGatingRecordsPathAndSkips(t *testing.T) {
 	go func() {
 		deadline := time.Now().Add(4 * time.Second)
 		for time.Now().Before(deadline) {
-			if ResolveApproval("run-gate:gate", true) {
+			if ResolveApproval("run-gate:gate", ApprovalDecision{Action: ApprovalApproved}) {
 				return
 			}
 			time.Sleep(5 * time.Millisecond)

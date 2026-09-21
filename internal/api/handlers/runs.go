@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"workflow-ai/server/internal/auth"
@@ -269,7 +270,7 @@ func (h *WorkflowHandler) ApproveRun(c *gin.Context) {
 	runID := c.Param("runId")
 	nodeID := c.Param("nodeId")
 	key := runID + ":" + nodeID
-	if !executor.ResolveApproval(key, true) {
+	if !executor.ResolveApproval(key, executor.ApprovalDecision{Action: executor.ApprovalApproved}) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "no pending approval for this run/node"})
 		return
 	}
@@ -277,15 +278,48 @@ func (h *WorkflowHandler) ApproveRun(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"status": "approved"})
 }
 
+// maxApprovalFeedback bounds the steer a reviewer can send. The text is
+// appended to a model prompt, so an unbounded body is a way to spend the
+// workflow owner's tokens.
+const maxApprovalFeedback = 4000
+
 // POST /api/runs/:runId/node/:nodeId/reject
+//
+// Ending the run stays the default. A body of {"retry":true,"feedback":"…"}
+// sends the upstream node back for another attempt instead. The executor still
+// decides whether that gate can retry at all and rejects outright when it
+// cannot, so a client cannot loop a gate that has nothing to re-run.
 func (h *WorkflowHandler) RejectRun(c *gin.Context) {
 	runID := c.Param("runId")
 	nodeID := c.Param("nodeId")
 	key := runID + ":" + nodeID
-	if !executor.ResolveApproval(key, false) {
+
+	var body struct {
+		Retry    bool   `json:"retry"`
+		Feedback string `json:"feedback"`
+	}
+	_ = c.ShouldBindJSON(&body) // absent or malformed body → plain rejection
+
+	decision := executor.ApprovalDecision{Action: executor.ApprovalRejected}
+	outcome := "rejected"
+	if body.Retry {
+		feedback := strings.TrimSpace(body.Feedback)
+		if feedback == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "feedback is required to retry"})
+			return
+		}
+		if len(feedback) > maxApprovalFeedback {
+			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("feedback is limited to %d characters", maxApprovalFeedback)})
+			return
+		}
+		decision = executor.ApprovalDecision{Action: executor.ApprovalRetry, Feedback: feedback}
+		outcome = "retry"
+	}
+
+	if !executor.ResolveApproval(key, decision) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "no pending approval for this run/node"})
 		return
 	}
-	slog.InfoContext(c.Request.Context(), "approval decision received", "run_id", runID, "node_id", nodeID, "decision", "rejected")
-	c.JSON(http.StatusOK, gin.H{"status": "rejected"})
+	slog.InfoContext(c.Request.Context(), "approval decision received", "run_id", runID, "node_id", nodeID, "decision", outcome)
+	c.JSON(http.StatusOK, gin.H{"status": outcome})
 }
