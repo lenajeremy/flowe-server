@@ -267,7 +267,7 @@ func (h *WorkflowHandler) AuthEmailVerify(c *gin.Context) {
 
 	h.db.DB.Model(&lc).Update("consumed_at", now)
 
-	user, err := h.findOrCreateUserByEmail(lc.Email)
+	user, created, err := h.findOrCreateUserByEmail(lc.Email)
 	if err != nil {
 		slog.ErrorContext(ctx, "auth: find/create user failed", "error", err)
 		telemetry.AuthEvent(ctx, "login_verify", "error")
@@ -281,22 +281,29 @@ func (h *WorkflowHandler) AuthEmailVerify(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not sign you in"})
 		return
 	}
+	// After the session succeeds, so a half-finished signup is never announced.
+	if created {
+		h.notifyNewSignup(user, "email code")
+	}
 	slog.InfoContext(ctx, "login verified", "email", user.Email, "user_id", user.ID.String())
 	telemetry.AuthEvent(ctx, "login_verify", "ok")
 	c.JSON(http.StatusOK, gin.H{"user": publicUser(user), "token": token})
 }
 
-func (h *WorkflowHandler) findOrCreateUserByEmail(email string) (*models.User, error) {
+// The bool reports whether this call created the account. Signing in and
+// signing up are the same request here, so this is the only point that can tell
+// them apart — everything downstream sees an identical session either way.
+func (h *WorkflowHandler) findOrCreateUserByEmail(email string) (*models.User, bool, error) {
 	var user models.User
 	err := h.db.DB.Where("email = ?", email).First(&user).Error
 	if err == nil {
-		return &user, nil
+		return &user, false, nil
 	}
 	user = models.User{Email: email}
 	if err := h.db.DB.Create(&user).Error; err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	return &user, nil
+	return &user, true, nil
 }
 
 // startSession creates a Redis session and returns the raw bearer token the
@@ -393,7 +400,7 @@ func (h *WorkflowHandler) AuthGoogleCallback(c *gin.Context) {
 		return
 	}
 
-	user, err := h.upsertGoogleUser(claims)
+	user, created, err := h.upsertGoogleUser(claims)
 	if err != nil {
 		slog.WarnContext(ctx, "auth: google upsert failed", "error", err)
 		telemetry.AuthEvent(ctx, "oauth_google", "error")
@@ -406,6 +413,10 @@ func (h *WorkflowHandler) AuthGoogleCallback(c *gin.Context) {
 		telemetry.AuthEvent(ctx, "oauth_google", "error")
 		authResultPage(c, openerOrig, "", false, "Could not sign you in.")
 		return
+	}
+	// After the session succeeds, so a half-finished signup is never announced.
+	if created {
+		h.notifyNewSignup(user, "Google")
 	}
 	slog.InfoContext(ctx, "login verified", "email", user.Email, "user_id", user.ID.String(), "method", "google")
 	telemetry.AuthEvent(ctx, "oauth_google", "ok")
@@ -473,13 +484,16 @@ func exchangeGoogleCode(code string) (*googleClaims, error) {
 // upsertGoogleUser links or creates the account: match by google_id first,
 // then by verified email (linking Google to an existing OTP account), else
 // create a new user.
-func (h *WorkflowHandler) upsertGoogleUser(claims *googleClaims) (*models.User, error) {
+// The bool reports whether a new account was created. Linking Google to an
+// existing email account is not a signup — that person already had an account —
+// so only the final branch reports true.
+func (h *WorkflowHandler) upsertGoogleUser(claims *googleClaims) (*models.User, bool, error) {
 	email := normalizeEmail(claims.Email)
 
 	var user models.User
 	if err := h.db.DB.Where("google_id = ?", claims.Sub).First(&user).Error; err == nil {
 		h.fillProfile(&user, claims)
-		return &user, nil
+		return &user, false, nil
 	}
 
 	if err := h.db.DB.Where("email = ?", email).First(&user).Error; err == nil {
@@ -489,17 +503,17 @@ func (h *WorkflowHandler) upsertGoogleUser(claims *googleClaims) (*models.User, 
 		if err := h.db.DB.Model(&user).Updates(map[string]any{
 			"google_id": sub, "name": user.Name, "avatar_url": user.AvatarURL,
 		}).Error; err != nil {
-			return nil, err
+			return nil, false, err
 		}
-		return &user, nil
+		return &user, false, nil
 	}
 
 	sub := claims.Sub
 	user = models.User{Email: email, Name: claims.Name, AvatarURL: claims.Picture, GoogleID: &sub}
 	if err := h.db.DB.Create(&user).Error; err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	return &user, nil
+	return &user, true, nil
 }
 
 // fillProfile backfills empty profile fields from Google claims.
