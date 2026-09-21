@@ -198,7 +198,7 @@ func TestJoinSlackAgentPublicChannelUsesJoinAPIAndRejectsPrivateChannels(t *test
 		}
 	})}
 	channel, err := joinSlackAgentPublicChannel(context.Background(), "xoxb-test", "C123")
-	if err != nil || !channel.IsMember || channel.ID != "C123" || requests != 2 {
+	if err != nil || channel.IsMember == nil || !*channel.IsMember || channel.ID != "C123" || requests != 2 {
 		t.Fatalf("public join = (%#v, %v, %d requests), want joined channel", channel, err, requests)
 	}
 

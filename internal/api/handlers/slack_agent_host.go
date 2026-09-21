@@ -1164,12 +1164,16 @@ func slackAgentThreadContext(ctx context.Context, token, channelID, threadID, cu
 	return strings.Join(lines, "\n"), nil
 }
 
+// slackAgentAPIBase is a var so tests can drive these calls against a stub.
+// Same seam the rest of the repo uses (asanaAPIURL, mondayAPIURL).
+var slackAgentAPIBase = "https://slack.com/api/"
+
 func slackAgentAPICall(ctx context.Context, token, method string, payload map[string]any, out any) error {
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return fmt.Errorf("encode Slack API %s payload: %w", method, err)
 	}
-	return slackAgentAPIRequest(ctx, token, http.MethodPost, "https://slack.com/api/"+method, strings.NewReader(string(body)), method, out)
+	return slackAgentAPIRequest(ctx, token, http.MethodPost, slackAgentAPIBase+method, strings.NewReader(string(body)), method, out)
 }
 
 // Slack documents its read-only Web API methods as GET endpoints. Sending
@@ -1195,7 +1199,7 @@ func slackAgentAPIGet(ctx context.Context, token, method string, payload map[str
 		}
 		query.Set(key, encoded)
 	}
-	endpoint := "https://slack.com/api/" + method
+	endpoint := slackAgentAPIBase + method
 	if encoded := query.Encode(); encoded != "" {
 		endpoint += "?" + encoded
 	}
