@@ -85,6 +85,12 @@ func knownProvider(p string) bool {
 	if _, ok := oauthProviders[p]; ok {
 		return true
 	}
+	// Sentry is in neither map: its install flow is neither an authorize
+	// redirect nor a pasted key. It is still a provider everything else — the
+	// connections page, disconnect — must recognise.
+	if p == "sentry" {
+		return true
+	}
 	_, ok := apiKeyProviders[p]
 	return ok
 }

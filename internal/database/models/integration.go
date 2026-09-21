@@ -41,6 +41,12 @@ type IntegrationConnection struct {
 	WorkspaceName   string     `json:"workspace_name"`
 	WorkspaceID     string     `json:"workspace_id"`
 	Scope           string     `json:"scope"`
+	// InstallationID is the provider's identifier for this installation of our
+	// app, where that is a separate thing from the account. Sentry needs it on
+	// every token refresh and uninstall because both are addressed by
+	// installation rather than by organization. Empty for providers that have no
+	// such concept.
+	InstallationID string `json:"-"`
 	// BotUserID is transient OAuth exchange metadata used to bind a Slack host
 	// installation to the exact mention that should be removed from prompts.
 	// The durable copy lives on AgentHostInstallation.
